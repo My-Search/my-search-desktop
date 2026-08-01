@@ -1,0 +1,26 @@
+[package]
+name = "my-search-desktop"
+version = "7.9.5"
+description = "我的搜索桌面版 - 订阅式搜索工具"
+authors = ["zhuangjie"]
+edition = "2021"
+license = "MIT"
+
+[lib]
+name = "my_search_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-store = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json", "blocking", "rustls-tls"], default-features = false }
+tokio = { version = "1", features = ["full"] }
+dirs = "5"
+base64 = "0.22"
