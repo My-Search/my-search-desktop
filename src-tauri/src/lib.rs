@@ -129,6 +129,14 @@ fn convert_raw_to_api(url: &str) -> Option<String> {
     ))
 }
 
+/// 调整主窗口高度（前端根据结果数量动态展开/收起）
+#[tauri::command]
+fn set_window_height(app: tauri::AppHandle, height: f64) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_size(tauri::LogicalSize::new(window.outer_size().unwrap_or_default().width as f64, height));
+    }
+}
+
 /// 打开外部链接（默认浏览器）
 #[tauri::command]
 async fn open_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
@@ -172,6 +180,7 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             http_get,
+            set_window_height,
             open_url,
             quit_app,
             get_default_subscribes,

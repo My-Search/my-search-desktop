@@ -68,6 +68,20 @@ export async function getDefaultSubscribes() {
 }
 
 /**
+ * 调整窗口高度（有结果时展开，无结果时收起只显示搜索框）
+ * @param {number} height 目标高度（逻辑像素）
+ */
+export async function setWindowHeight(height) {
+  if (isTauri) {
+    try {
+      await invoke("set_window_height", { height });
+    } catch (e) {
+      console.warn("调整窗口高度失败:", e);
+    }
+  }
+}
+
+/**
  * 隐藏窗口（悬浮窗失焦自动隐藏，前端也可主动调用）
  */
 export async function hideWindow() {

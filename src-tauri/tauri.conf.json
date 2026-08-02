@@ -15,9 +15,9 @@
         "title": "我的搜索",
         "label": "main",
         "width": 720,
-        "height": 480,
-        "minWidth": 480,
-        "minHeight": 320,
+        "height": 47,
+        "minWidth": 320,
+        "minHeight": 47,
         "center": true,
         "resizable": true,
         "fullscreen": false,
@@ -26,7 +26,8 @@
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "visible": false,
-        "shadow": true
+        "shadow": true,
+        "maxHeight": 600
       }
     ],
     "security": {
