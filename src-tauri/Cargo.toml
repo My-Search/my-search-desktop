@@ -1,6 +1,6 @@
 [package]
 name = "my-search-desktop"
-version = "7.9.5"
+version = "7.9.6"
 description = "我的搜索桌面版 - 订阅式搜索工具"
 authors = ["zhuangjie"]
 edition = "2021"
@@ -14,7 +14,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-store = "2"

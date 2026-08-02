@@ -2,7 +2,8 @@
 //!
 //! 功能：
 //! - 全局快捷键 Ctrl+Alt+S 呼出/隐藏悬浮搜索窗
-//! - 悬浮窗：无边框、置顶、透明背景、跳过任务栏
+//! - 悬浮窗：无边框、置顶、白底、跳过任务栏
+//! - 系统托盘：显示/隐藏、退出
 //! - 通过 Tauri command 向 WebView 提供 HTTP 代理（订阅拉取，绕开 CORS）
 //! - 订阅/配置存储（JSON 文件，基于 tauri-plugin-store）
 
@@ -129,11 +130,29 @@ fn convert_raw_to_api(url: &str) -> Option<String> {
     ))
 }
 
-/// 调整主窗口高度（前端根据结果数量动态展开/收起）
+/// 窗口宽度约束：最小 320px，最大 960px，且不超过屏幕宽度的 90%
+const MIN_WINDOW_WIDTH: f64 = 320.0;
+const MAX_WINDOW_WIDTH: f64 = 960.0;
+const MAX_SCREEN_WIDTH_RATIO: f64 = 0.9;
+
+/// 计算受约束后的窗口宽度
+fn clamp_window_width(window: &tauri::WebviewWindow) -> f64 {
+    let current = window.outer_size().unwrap_or_default().width as f64;
+    let mut max = MAX_WINDOW_WIDTH;
+    // 按当前所在显示器限制宽度占比（多显示器时取当前窗口所在屏）
+    if let Some(monitor) = window.current_monitor().unwrap_or(None) {
+        let screen_w = monitor.size().width as f64;
+        max = max.min(screen_w * MAX_SCREEN_WIDTH_RATIO);
+    }
+    current.clamp(MIN_WINDOW_WIDTH, max)
+}
+
+/// 调整主窗口尺寸（前端根据结果数量动态展开/收起，高度可变、宽度受约束）
 #[tauri::command]
 fn set_window_height(app: tauri::AppHandle, height: f64) {
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.set_size(tauri::LogicalSize::new(window.outer_size().unwrap_or_default().width as f64, height));
+        let width = clamp_window_width(&window);
+        let _ = window.set_size(tauri::LogicalSize::new(width, height));
     }
 }
 
@@ -149,6 +168,40 @@ async fn open_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
 #[tauri::command]
 fn quit_app(app: tauri::AppHandle) {
     app.exit(0);
+}
+
+/// 创建系统托盘：左键单击切换显示/隐藏，菜单提供显示/隐藏与退出
+fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItem};
+    use tauri::tray::TrayIconBuilder;
+
+    let toggle = MenuItem::with_id(app, "toggle", "显示/隐藏", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&toggle, &quit])?;
+
+    let _tray = TrayIconBuilder::with_id("main-tray")
+        .icon(app.default_window_icon().unwrap().clone())
+        .menu(&menu)
+        .show_menu_on_left_click(true)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "toggle" => toggle_window(app),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            // Linux 上部分桌面环境点击托盘图标不触发菜单，左键单击直接切换
+            if let tauri::tray::TrayIconEvent::Click {
+                button: tauri::tray::MouseButton::Left,
+                button_state: tauri::tray::MouseButtonState::Up,
+                ..
+            } = event
+            {
+                toggle_window(tray.app_handle());
+            }
+        })
+        .build(app)?;
+
+    Ok(())
 }
 
 /// 获取默认订阅（内置官方订阅）
@@ -188,6 +241,8 @@ pub fn run() {
         .setup(|app| {
             // 注册全局快捷键
             register_global_shortcut(app.handle());
+            // 创建系统托盘（显示/隐藏、退出）
+            setup_tray(app.handle())?;
             Ok(())
         })
         .on_window_event(|window, event| {
