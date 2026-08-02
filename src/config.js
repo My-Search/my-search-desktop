@@ -1,18 +1,17 @@
 /**
  * 我的搜索桌面版 - 配置窗口
  * 独立窗口管理订阅（与主窗口共享 localStorage 数据）
- * 通过 tauri-bridge 与主窗口 Rust 后端交互
+ * 注意：此窗口不加载搜索引擎/订阅数据，只做订阅列表的增删改查，
+ * 避免引入重型依赖导致窗口空白/卡死。
  */
 import "./css/style.css";
-import { getDefaultSubscribes, isTauri } from "./lib/tauri-bridge.js";
-import { SearchEngine } from "./lib/search-engine.js";
+import { isTauri, getDefaultSubscribes } from "./lib/tauri-bridge.js";
 
 // ========== 全局状态 ==========
 const SUBSCRIBES_STORAGE_KEY = "my-search-desktop:subscribes";
 
 const state = {
   subscribes: [],
-  engine: new SearchEngine(),
 };
 
 const app = document.getElementById("app");
@@ -38,7 +37,6 @@ function renderApp() {
       <div class="panel-footer">
         <input type="text" id="newSubUrl" placeholder="输入订阅 URL（支持 tis:: 格式或直接 URL）" />
         <button id="btnAddSub">添加</button>
-        <button class="btn-close" id="btnRefresh">刷新数据</button>
       </div>
     </div>
   `;
@@ -86,22 +84,15 @@ function saveSubscribes() {
 
 // ========== 事件 ==========
 function bindEvents() {
-  document.getElementById("panelClose").addEventListener("click", async () => {
-    if (isTauri) {
-      const { getCurrentWindow } = await import("@tauri-apps/api/window");
-      await getCurrentWindow().close();
-    } else {
-      window.close();
-    }
-  });
-
+  document.getElementById("panelClose").addEventListener("click", closeWindow);
   document.getElementById("btnAddSub").addEventListener("click", addSubscribe);
   document.getElementById("newSubUrl").addEventListener("keydown", (e) => {
     if (e.key === "Enter") addSubscribe();
+    // Esc 关闭配置窗口
+    if (e.key === "Escape") closeWindow();
   });
-  document.getElementById("btnRefresh").addEventListener("click", async () => {
-    await refreshData();
-    alert("数据刷新完成");
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeWindow();
   });
 
   document.getElementById("panelBody").addEventListener("click", (e) => {
@@ -113,6 +104,16 @@ function bindEvents() {
     saveSubscribes();
     renderSubscribePanel();
   });
+}
+
+function closeWindow() {
+  if (isTauri) {
+    import("@tauri-apps/api/window")
+      .then(({ getCurrentWindow }) => getCurrentWindow().close())
+      .catch(() => window.close());
+  } else {
+    window.close();
+  }
 }
 
 function addSubscribe() {
@@ -134,31 +135,28 @@ function addSubscribe() {
   input.value = "";
   saveSubscribes();
   renderSubscribePanel();
-  refreshData();
-}
-
-async function refreshData() {
-  try {
-    await state.engine.reload();
-  } catch (e) {
-    console.error("刷新失败:", e);
-  }
 }
 
 // ========== 启动 ==========
 async function bootstrap() {
+  // 先渲染基础 UI，保证窗口不空白
   renderApp();
   bindEvents();
 
-  const saved = loadSubscribes();
-  if (saved && saved.length > 0) {
-    state.subscribes = saved;
-  } else {
-    const defaults = await getDefaultSubscribes();
-    state.subscribes = defaults;
-    saveSubscribes();
+  // 再异步加载订阅数据（失败也不影响 UI 展示）
+  try {
+    const saved = loadSubscribes();
+    if (saved && saved.length > 0) {
+      state.subscribes = saved;
+    } else {
+      const defaults = await getDefaultSubscribes();
+      state.subscribes = defaults;
+      saveSubscribes();
+    }
+  } catch (e) {
+    console.error("加载订阅失败:", e);
+    state.subscribes = [];
   }
-  state.engine.subscribes = state.subscribes;
   renderSubscribePanel();
 }
 

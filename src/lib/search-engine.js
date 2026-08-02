@@ -167,14 +167,16 @@ export class SearchEngine {
    */
   fuzzySearch(keyword) {
     const upperKeyword = keyword.toUpperCase();
-    const results = [];
-    overlapMatchingDegreeForObjectArray(
+    const scoreList = [];
+    // overlapMatchingDegreeForObjectArray 返回过滤后的数据项数组，
+    // scoreList 通过 scopeForObjArrContainer 收集每项的匹配分数（与返回数组同序）
+    const matchedItems = overlapMatchingDegreeForObjectArray(
       upperKeyword,
       [...this.searchData],
       (item) => [item.title || "", item.desc || ""],
-      { onlyHasScope: true, scopeForObjArrContainer: results }
+      { onlyHasScope: true, scopeForObjArrContainer: scoreList }
     );
-    return results.map((item, i) => ({ item, level: 2, score: results[i] }));
+    return matchedItems.map((item, i) => ({ item, level: 2, score: scoreList[i] }));
   }
 
   /**
