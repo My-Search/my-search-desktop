@@ -263,6 +263,9 @@ function onSearchInput(value) {
       renderResults();
       return;
     }
+    // 新输入关键词时退出 vassal 模式，回到正常搜索
+    state.vassalMode = false;
+    state.vassalItems = [];
     state.results = state.engine.search(keyword);
     state.activeIndex = 0;
     renderResults();
@@ -373,15 +376,17 @@ let noResultToastTimer = null;
  */
 function showNoResultToast(keyword) {
   const matchResult = document.getElementById("matchResult");
-  if (!matchResult) return;
+  const list = document.getElementById("matchItems");
+  if (!matchResult || !list) return;
   clearTimeout(noResultToastTimer);
   matchResult.classList.add("show");
   matchResult.style.display = "block";
-  matchResult.innerHTML = `
-    <div class="no-result-toast">
+  // 提示插入 matchItems 列表内部（保留 <ol> 结构，避免破坏后续渲染）
+  list.innerHTML = `
+    <li class="no-result-toast">
       <span class="no-result-icon">🔍</span>
       <span class="no-result-text">没有找到与「${escapeHtml(keyword)}」相关的内容</span>
-    </div>`;
+    </li>`;
   // 提示弹框只显示 2.5 秒后收起
   noResultToastTimer = setTimeout(() => {
     matchResult.classList.remove("show");

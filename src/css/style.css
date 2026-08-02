@@ -549,7 +549,7 @@ html, body {
 }
 
 /* ========== 无结果提示弹框（问题②） ========== */
-.no-result-toast {
+#matchItems .no-result-toast {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -561,6 +561,10 @@ html, body {
   border-radius: 6px;
   margin: 8px 15px;
   border: 1px solid #e8eaed;
+  list-style: none;
+  height: auto;
+  line-height: 1.5;
+  cursor: default;
 }
 
 .no-result-toast .no-result-icon {

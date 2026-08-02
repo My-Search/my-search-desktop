@@ -1,6 +1,6 @@
 [package]
 name = "my-search-desktop"
-version = "7.9.8"
+version = "7.9.9"
 description = "我的搜索桌面版 - 订阅式搜索工具"
 authors = ["zhuangjie"]
 edition = "2021"
