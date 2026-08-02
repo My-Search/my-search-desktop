@@ -607,22 +607,28 @@ async function initData() {
     }
     await state.engine.loadAll(state.subscribes);
     // 加载完成后显示 tis 提示（订阅数）
-    const tis = document.getElementById("tis");
-    if (tis) {
-      tis.textContent = `${state.engine.searchData.length} 条数据 · ${state.subscribes.length} 个订阅`;
+    updateTisTip();
+    // 订阅全部加载失败时，给出可见提示（网络差时用户可感知，而非静默无结果）
+    if (state.engine.searchData.length === 0 && state.subscribes.length > 0) {
+      console.warn("[我的搜索] 订阅加载失败（网络不可达），可点击 logo 在配置窗口检查订阅");
     }
   } catch (e) {
     console.error("初始化数据失败:", e);
   }
 }
 
+/** 更新订阅来源提示（tis） */
+function updateTisTip() {
+  const tis = document.getElementById("tis");
+  if (tis) {
+    tis.textContent = `${state.engine.searchData.length} 条数据 · ${state.subscribes.length} 个订阅`;
+  }
+}
+
 async function refreshData() {
   try {
     await state.engine.reload();
-    const tis = document.getElementById("tis");
-    if (tis) {
-      tis.textContent = `${state.engine.searchData.length} 条数据 · ${state.subscribes.length} 个订阅`;
-    }
+    updateTisTip();
   } catch (e) {
     console.error("刷新失败:", e);
   }

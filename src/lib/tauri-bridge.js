@@ -4,7 +4,6 @@
  */
 
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-opener";
 
 /** 是否运行在 Tauri 环境 */
 export const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;

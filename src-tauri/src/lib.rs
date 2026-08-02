@@ -120,7 +120,46 @@ async fn http_get(url: String) -> Result<String, String> {
             }
         }
     }
+
+    // raw.githubusercontent.com 再失败时回退到 jsDelivr CDN（国内可访问）
+    if url.contains("raw.githubusercontent.com/") {
+        if let Some(cdn_url) = convert_raw_to_jsdelivr(&url) {
+            let cdn_client = reqwest::Client::builder()
+                .user_agent("Mozilla/5.0 MySearchDesktop/7.9.10")
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .map_err(|e| e.to_string())?;
+            if let Ok(resp) = cdn_client.get(&cdn_url).send().await {
+                if resp.status().is_success() {
+                    if let Ok(text) = resp.text().await {
+                        return Ok(text);
+                    }
+                }
+            }
+        }
+    }
     Err("请求失败".into())
+}
+
+/// 将 raw.githubusercontent.com URL 转换为 jsDelivr CDN URL
+/// https://raw.githubusercontent.com/{owner}/{repo}/refs/heads/{branch}/{path}
+/// https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}
+/// -> https://cdn.jsdelivr.net/gh/{owner}/{repo}@{branch}/{path}
+fn convert_raw_to_jsdelivr(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("https://raw.githubusercontent.com/")?;
+    let parts: Vec<&str> = rest.split('/').collect();
+    if parts.len() < 5 {
+        return None;
+    }
+    let (owner, repo) = (parts[0], parts[1]);
+    if parts[2] == "refs" && parts[3] == "heads" && parts.len() >= 6 {
+        let branch = parts[4];
+        let path = parts[5..].join("/");
+        return Some(format!("https://cdn.jsdelivr.net/gh/{owner}/{repo}@{branch}/{path}"));
+    }
+    let branch = parts[2];
+    let path = parts[3..].join("/");
+    Some(format!("https://cdn.jsdelivr.net/gh/{owner}/{repo}@{branch}/{path}"))
 }
 
 /// 将 raw.githubusercontent.com URL 转换为 GitHub API URL

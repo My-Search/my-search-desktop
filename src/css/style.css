@@ -54,7 +54,9 @@ html, body {
 
 /* ========== 搜索框（还原 #searchBox） ========== */
 #searchBox {
-  height: 45px;
+  /* 容器高度 = 窗口 47px - 上下边框 4px = 43px；固定高度避免 flex 拉伸 */
+  height: 43px;
+  flex-shrink: 0;
   background: #ffffff;
   padding: 0 10px;
   box-sizing: border-box;
