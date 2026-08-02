@@ -530,3 +530,20 @@ html, body {
 .panel-footer button.btn-close:hover {
   background: #e8eaed;
 }
+
+/* ========== 配置窗口（独立窗口） ========== */
+.config-window {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  border: 2px solid #cecece;
+  box-sizing: border-box;
+}
+
+.config-window .panel-header,
+.config-window .panel-body,
+.config-window .panel-footer {
+  border-radius: 0;
+}

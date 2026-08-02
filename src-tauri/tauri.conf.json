@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "my-search-desktop",
-  "version": "7.9.6",
+  "version": "7.9.7",
   "identifier": "com.mysearch.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -26,9 +26,9 @@
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "visible": false,
-        "shadow": true,
+        "shadow": false,
         "maxHeight": 600,
-        "maxWidth": 960
+        "maxWidth": 720
       }
     ],
     "security": {

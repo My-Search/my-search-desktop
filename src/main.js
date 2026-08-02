@@ -12,6 +12,7 @@ import {
   quitApp,
   hideWindow,
   setWindowHeight,
+  openConfigWindow,
 } from "./lib/tauri-bridge.js";
 
 // ========== 全局状态 ==========
@@ -289,8 +290,10 @@ function bindEvents() {
     }
   });
 
-  // logo 按钮：打开订阅管理
-  document.getElementById("logoButton").addEventListener("click", openSubscribePanel);
+  // logo 按钮：打开独立配置窗口（订阅管理）
+  document.getElementById("logoButton").addEventListener("click", () => {
+    openConfigWindow();
+  });
 
   // 订阅管理
   document.getElementById("panelClose").addEventListener("click", closeSubscribePanel);

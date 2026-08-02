@@ -47,6 +47,15 @@ export async function quitApp() {
 }
 
 /**
+ * 打开独立配置窗口（订阅管理）
+ */
+export async function openConfigWindow() {
+  if (isTauri) {
+    await invoke("open_config_window");
+  }
+}
+
+/**
  * 获取默认订阅
  */
 export async function getDefaultSubscribes() {

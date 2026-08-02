@@ -3,7 +3,8 @@
   "identifier": "default",
   "description": "默认权限 - 主窗口能力",
   "windows": [
-    "main"
+    "main",
+    "config"
   ],
   "permissions": [
     "core:default",

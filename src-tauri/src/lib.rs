@@ -39,12 +39,27 @@ fn toggle_window(app: &tauri::AppHandle) {
         if window.is_visible().unwrap_or(false) {
             let _ = window.hide();
         } else {
-            // 呼出时居中显示并聚焦
-            let _ = window.center();
+            // 呼出时显示并聚焦：左右居中、上下偏上（屏幕高度约 1/4 处）
+            position_window_top_center(&window);
             let _ = window.show();
             let _ = window.set_focus();
         }
     }
+}
+
+/// 将窗口定位到当前屏幕的顶部居中位置（y 约屏幕高度的 22%）
+fn position_window_top_center(window: &tauri::WebviewWindow) {
+    let Ok(Some(monitor)) = window.current_monitor() else {
+        let _ = window.center();
+        return;
+    };
+    let screen = monitor.size();
+    let Ok(size) = window.outer_size() else {
+        return;
+    };
+    let x = ((screen.width.saturating_sub(size.width)) / 2) as i32;
+    let y = ((screen.height as f64 * 0.22) as u32).min(screen.height.saturating_sub(size.height)) as i32;
+    let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
 }
 
 /// 注册全局快捷键
@@ -62,25 +77,30 @@ fn register_global_shortcut(app: &tauri::AppHandle) {
 /// 当 raw.githubusercontent.com 直连失败时，自动回退到 GitHub API（api.github.com）
 #[tauri::command]
 async fn http_get(url: String) -> Result<String, String> {
-    let client = reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0 Safari/537.36 MySearchDesktop/7.9.5")
-        .timeout(std::time::Duration::from_secs(30))
+    // 直连客户端：短超时（3s），失败快速回退
+    let direct_client = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0 Safari/537.36 MySearchDesktop/7.9.7")
+        .timeout(std::time::Duration::from_secs(3))
         .build()
         .map_err(|e| e.to_string())?;
 
-    // 尝试直接请求
-    match client.get(&url).send().await {
+    // 尝试直接请求（3 秒超时）
+    match direct_client.get(&url).send().await {
         Ok(resp) if resp.status().is_success() => {
             return resp.text().await.map_err(|e| e.to_string());
         }
         _ => {}
     }
 
-    // raw.githubusercontent.com 失败时回退到 GitHub API
+    // raw.githubusercontent.com 失败时回退到 GitHub API（API 客户端超时放宽到 15s）
     if url.contains("raw.githubusercontent.com/") {
-        let api_url = convert_raw_to_api(&url);
-        if let Some(api_url) = api_url {
-            let resp = client
+        if let Some(api_url) = convert_raw_to_api(&url) {
+            let api_client = reqwest::Client::builder()
+                .user_agent("Mozilla/5.0 MySearchDesktop/7.9.7")
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .map_err(|e| e.to_string())?;
+            let resp = api_client
                 .get(&api_url)
                 .send()
                 .await
@@ -132,7 +152,7 @@ fn convert_raw_to_api(url: &str) -> Option<String> {
 
 /// 窗口宽度约束：最小 320px，最大 960px，且不超过屏幕宽度的 90%
 const MIN_WINDOW_WIDTH: f64 = 320.0;
-const MAX_WINDOW_WIDTH: f64 = 960.0;
+const MAX_WINDOW_WIDTH: f64 = 720.0;
 const MAX_SCREEN_WIDTH_RATIO: f64 = 0.9;
 
 /// 计算受约束后的窗口宽度
@@ -168,6 +188,32 @@ async fn open_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
 #[tauri::command]
 fn quit_app(app: tauri::AppHandle) {
     app.exit(0);
+}
+
+/// 打开独立配置窗口（订阅管理）
+/// 已存在时聚焦，不存在时创建
+#[tauri::command]
+fn open_config_window(app: tauri::AppHandle) {
+    use tauri::WebviewWindowBuilder;
+
+    if let Some(win) = app.get_webview_window("config") {
+        let _ = win.show();
+        let _ = win.set_focus();
+        return;
+    }
+    let config_url = tauri::WebviewUrl::App("config.html".into());
+    let result = WebviewWindowBuilder::new(&app, "config", config_url)
+        .title("我的搜索 - 配置")
+        .inner_size(560.0, 480.0)
+        .min_inner_size(420.0, 320.0)
+        .resizable(true)
+        .center()
+        .decorations(true)
+        .visible(true)
+        .build();
+    if let Err(e) = result {
+        eprintln!("创建配置窗口失败: {e}");
+    }
 }
 
 /// 创建系统托盘：左键单击切换显示/隐藏，菜单提供显示/隐藏与退出
@@ -236,6 +282,7 @@ pub fn run() {
             set_window_height,
             open_url,
             quit_app,
+            open_config_window,
             get_default_subscribes,
         ])
         .setup(|app| {
