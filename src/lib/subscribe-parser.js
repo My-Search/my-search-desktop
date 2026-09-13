@@ -250,8 +250,9 @@ export function mLineFetchFun(pageText) {
   let appendTarget = "resource";
   let current_build_search_item_resource = "";
   let current_build_search_item_vassal = "";
-  let current_build_search_item_links = [];
+let current_build_search_item_links = [];
   let point = 0;
+  let inCode = false;
   const default_desc = "--无描述--";
 
   function getTitleLineData(titleLine) {
@@ -267,7 +268,14 @@ export function mLineFetchFun(pageText) {
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    if (line.indexOf("# ") === 0) {
+
+// 围栏代码块切换：当行以 ``` 开头时切换 inCode 状态
+    if (/^```/.test(line.trim())) {
+      inCode = !inCode;
+    }
+
+    // 在代码块内部不将 # 开头行解析为新的数据项标题
+    if (!inCode && line.indexOf("# ") === 0) {
       point++;
       current_build_search_item = { ...getTitleLineData(line) };
       current_build_search_item_resource = "";
@@ -299,7 +307,7 @@ export function mLineFetchFun(pageText) {
     }
 
     const nextLine = lines[i + 1];
-    if (i === lines.length - 1 || (nextLine != null && nextLine.indexOf("# ") === 0)) {
+    if (i === lines.length - 1 || (!inCode && nextLine != null && nextLine.indexOf("# ") === 0)) {
       current_build_search_item.resource = current_build_search_item_resource;
       if (!isBlank(current_build_search_item_vassal)) {
         current_build_search_item.vassal = current_build_search_item_vassal;

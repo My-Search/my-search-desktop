@@ -205,7 +205,9 @@ function inlineMd(text) {
   s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
   s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
   // 恢复行内代码
-  s = s.replace(/\u0000(\d+)\u0000/g, (m, i) => `<code>${escapeHtml(codes[Number(i)])}</code>`);
+  // 注：inlineMd 仅被 md2html 内部调用，所有调用方都已提前 escapeHtml，
+  // 因此这里不再重复转义，否则会导致 &quot; → &amp;quot; 这类双重编码。
+  s = s.replace(/\u0000(\d+)\u0000/g, (m, i) => `<code>${codes[Number(i)]}</code>`);
   return s;
 }
 
