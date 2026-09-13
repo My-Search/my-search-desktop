@@ -1,11 +1,23 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" class="ms-config-root">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>我的搜索 - 配置</title>
+    <meta name="color-scheme" content="light dark" />
+    <title>我的搜索 - 设置</title>
+    <script>
+      // 在样式表/模块脚本加载前先按系统主题铺底，避免首帧白闪
+      (function () {
+        var dark =
+          window.matchMedia &&
+          window.matchMedia("(prefers-color-scheme: dark)").matches;
+        document.documentElement.style.backgroundColor = dark
+          ? "#17191d"
+          : "#f5f6f8";
+      })();
+    </script>
   </head>
-  <body>
+  <body class="ms-config-body">
     <div id="app"></div>
     <script type="module" src="./src/config.js"></script>
   </body>

@@ -4,8 +4,26 @@ dist/
 
 # Rust 构建产物
 src-tauri/target/
+src-tauri/target-live/
 src-tauri/gen/
+
+# 图标生成的中间产物（可用 `npm run icons` 重新生成）
+test/_icons/
+
+# UI 测试的运行期产物（浏览器 profile 目录、截图；测试结束会自行清理，
+# 异常中断时会残留，不应提交）
+test/_chrome-profile-*/
+test/.e2e-drag-profile/
+test/_shot-*.png
+test/.cache-restart-store.json
+test/_fix-subscribes.mjs
 
 # 系统文件
 .DS_Store
 *.log
+*.bak
+
+# IDE
+.idea/
+.vscode/
+*.iml

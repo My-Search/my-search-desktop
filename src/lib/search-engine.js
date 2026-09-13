@@ -1,204 +1,957 @@
 /**
- * 搜索数据管理核心 - 我的搜索桌面版
- * 移植自油猴脚本"我的搜索"（v7.9.5）
+ * 搜索核心 - 我的搜索桌面版
+ * 移植自油猴脚本"我的搜索"（v7.9.5，作者 zhuangjie）
  *
- * 负责：
- * - 订阅数据加载（递归 tis 解析 + 提取函数）
- * - 数据项缓存与索引
- * - 拼音索引
- * - 多级搜索（精确搜索 → 拼音搜索 → 重叠匹配）
+ * 关键点（修正原桌面版的"搜索不出结果"问题）：
+ * 1. 和油猴版一致地递归解析 tis 订阅（配置 → 子订阅 → 内容），并支持自定义 fetchFun。
+ * 2. 一次性构建「大小写归一化 + 拼音」的检索索引，避免每次搜索对每条数据做重复计算，
+ *    既保证结果正确，也保证输入时的响应速度。
+ * 3. 三级搜索：精确(标题/描述/内容) → 拼音 → 重叠匹配度（AI 模糊）。
+ * 4. 点击权重、选择历史、特殊关键词（<new> / <history> / <highFrequency>）。
+ * 6. 搜索PRO模式（子搜索模式）：当关键词中含有 " : "（SEARCH_BOUNDARY）时，
+ *    触发PRO模式搜索，仅搜索被标记为"[可搜索]"的项（URL 包含 [[...keyword...]] 模板）。
+ *    支持特殊路由：空父关键词 → "问AI"，父关键词为 "问AI" → 精确搜索。
+ * 5. 数据缓存（还原油猴版 SEARCH_DATA_KEY + effectiveDuration）：
+ *    加载结果带过期时间写入本地存储，未过期时启动直接复用缓存，只有过期
+ *    （或订阅变化 / 强制刷新）才重新发起网络加载，避免每次启动都全量拉取。
  */
 
 import { pinyin } from "pinyin-pro";
-import { parseAllDesignatedSingTags, resolveUrl, getFetchFunByName } from "./subscribe-parser.js";
-import { overlapMatchingDegreeForObjectArray } from "./overlap.js";
 import { httpGet } from "./tauri-bridge.js";
+import {
+  getConfigFromDataSource,
+  getFetchFunByName,
+  resolveUrl,
+  contentRecovery,
+  defaultTagHandle,
+  parseScriptItem,
+  escapeText,
+} from "./subscribe-parser.js";
+import { parseTags, extractTagsAndCleanContent } from "./tags.js";
+import { overlapMatchingDegreeForObjectArray } from "./overlap.js";
+import { storageGet, storageSet, storageRemove, isUrl } from "./util.js";
 
-/** 空格占位符（拼音转换时保护空格） */
+/** 检索层级：0=标题命中 1=描述命中 2=内容命中 */
+export const LEVEL_TITLE = 0;
+export const LEVEL_DESC = 1;
+export const LEVEL_CONTENT = 2;
+/** 模糊匹配层 */
+export const LEVEL_FUZZY = 9;
+
 const SPACE = "<Space>";
 const SPACE_CHAR = " ";
 
+// ---------- 数据缓存（还原油猴版 registry.searchData） ----------
+/** 缓存键：加载完成的全部数据项 + 过期时间（还原 SEARCH_DATA_KEY） */
+export const SEARCH_DATA_KEY = "SEARCH_DATA_KEY";
+/** 上一次加载的数据项 id 集合（还原 OLD_SEARCH_DATA_KEY） */
+const OLD_SEARCH_DATA_KEY = "OLD_SEARCH_DATAS_KEY";
+/** 数据有效期（还原 effectiveDuration：12 小时） */
+export const EFFECTIVE_DURATION = 1000 * 60 * 60 * 12;
+/** 订阅列表指纹（用于判断订阅是否变化，变化则立即失效缓存） */
+const SUBSCRIBE_FINGERPRINT_KEY = "SUBSCRIBE_FINGERPRINT_CACHE_KEY";
+
+/** 订阅列表指纹：按内容计算，订阅增删改都会变化（顺序无关） */
+export function subscribeFingerprint(subscribes) {
+  return (subscribes || [])
+    .map((s) => `${s.url ?? ""}|${s.title ?? ""}|${s.fetchFun ?? ""}|${s.defaultTag ?? ""}`)
+    .sort()
+    .join("\n");
+}
+
+/** 特殊关键词（还原 specialKeyword） */
+export const SPECIAL_KEYWORD = {
+  new: "<new>",
+  history: "<history>",
+  highFrequency: "<highFrequency>",
+};
+
+/** 子搜索分隔符（还原 subSearch.searchBoundary） */
+export const SEARCH_BOUNDARY = " : ";
+
+/** 搜索PRO标签（还原 searchProTag），标记可被子搜索搜索到的项 */
+export const SEARCH_PRO_TAG = "[可搜索]";
+
+/** 数据项唯一 id（还原 registry.searchData.idFun） */
+export function itemId(item) {
+  if (item == null || !(item instanceof Object && item.title != null)) return null;
+  return item.title.replace(/\[.*\]/, "").trim() + ("" + item.desc).trim();
+}
+
+/** links 搜索字符串（还原 links.stringifyForSearch） */
+export function linksToString(links) {
+  if (!Array.isArray(links)) return "";
+  return links.map((l) => `${l.text ?? ""}${l.title ?? ""}${l.url ?? ""}`).join("\n");
+}
+
+/** 文本转拼音（无空格、大写） */
+export function textToPinyin(text) {
+  if (text == null) return "";
+  const safe = String(text).replaceAll(SPACE_CHAR, SPACE);
+  try {
+    const arr = pinyin(safe, { toneType: "none", type: "array" });
+    return arr.join("").replaceAll(SPACE, SPACE_CHAR).toUpperCase();
+  } catch (e) {
+    return "";
+  }
+}
+
+// ========== 加分器 / 历史记录器（还原 DataWeightScorer / SelectHistoryRecorder） ==========
+const WEIGHT_KEY = "ITEM_WEIGHT_CACHE_KEY";
+const HISTORY_KEY = "HISTORY_CACHE_KEY";
+const NEW_ITEMS_KEY = "SEARCH_NEW_ITEMS_KEY";
+/** 上一次加载的数据项 id 集合（还原油猴版 OLD_SEARCH_DATA_KEY） */
+const OLD_DATA_KEY = OLD_SEARCH_DATA_KEY;
+/** 用户维护的不关注标签列表（与配置窗口共享） */
+export const UNFOLLOW_KEY = "USER_UNFOLLOW_LIST_CACHE_KEY";
+/** 数据项标签统计缓存（供配置窗口的“关注标签”使用） */
+export const TAGS_KEY = "DATA_ITEM_TAGS_CACHE_KEY";
+/** 默认不关注的标签（还原 USER_DEFAULT_UNFOLLOW） */
+export const DEFAULT_UNFOLLOW = ["成人内容", "Adults only"];
+/** 新数据保留天数（还原 NEW_DATA_EXPIRE_DAY_NUM） */
+const NEW_DATA_EXPIRE_DAY_NUM = 7;
+/** 新数据标签（还原 NEW_ITEMS_TAG） */
+const NEW_ITEMS_TAG = "[新]";
+const DAY_MS = 1000 * 60 * 60 * 24;
+
+/** 给被点击项加分（还原 DataWeightScorer.select） */
+export function scoreSelect(item) {
+  if (item == null) return;
+  const key = itemId(item);
+  if (key == null) return;
+  const data = storageGet(WEIGHT_KEY, {}) || {};
+  data[key] = (data[key] ?? 0) + 1;
+  storageSet(WEIGHT_KEY, data);
+}
+
+/** 稳定排序：先按层内权重降序，保持同权重原顺序 */
+function sortByWeight(items) {
+  // 一次读取权重表，避免每条数据都读一遍 localStorage
+  const data = storageGet(WEIGHT_KEY, {}) || {};
+  return items
+    .map((item, i) => {
+      const key = itemId(item);
+      return { item, i, w: key != null && data[key] != null ? data[key] : 0 };
+    })
+    .sort((a, b) => b.w - a.w || a.i - b.i)
+    .map((x) => x.item);
+}
+
+/** 记录选择历史（还原 SelectHistoryRecorder.select） */
+export function historySelect(item) {
+  if (item == null || itemId(item) == null) return;
+  const key = itemId(item);
+  let history = storageGet(HISTORY_KEY, []) || [];
+  history = history.filter((_item) => itemId(_item) !== key);
+  const copy = { ...item };
+  delete copy.index;
+  delete copy._titleUpper;
+  delete copy._descUpper;
+  delete copy._contentUpper;
+  delete copy._titlePinyin;
+  delete copy._descPinyin;
+  delete copy._cleanedTitleUpper;
+  delete copy._descTagsUpper;
+  history.unshift(copy);
+  storageSet(HISTORY_KEY, history.slice(0, 60));
+}
+
+export function historyList(count) {
+  const history = storageGet(HISTORY_KEY, []) || [];
+  return count == null ? history : history.slice(0, count);
+}
+
+/** 高频项（还原 DataWeightScorer.highFrequency） */
+export function highFrequencyList(allItems, count) {
+  const data = storageGet(WEIGHT_KEY, {}) || {};
+  const keys = Object.keys(data).sort((a, b) => data[b] - data[a]);
+  const picked = count != null ? keys.slice(0, count) : keys;
+  const map = new Map();
+  for (const item of allItems) map.set(itemId(item), item);
+  return picked.map((k) => map.get(k)).filter(Boolean);
+}
+
+/** 读取「新数据」记录 [{id, expires}] */
+export function newItemsRecord() {
+  return storageGet(NEW_ITEMS_KEY, []) || [];
+}
+
 /**
- * 搜索数据管理器
+ * 记录新数据（还原 compareBlocks）
+ *
+ * 与上次加载的 id 集合对比，找出新增项并记录过期时间。两条与原版一致的关键规则：
+ * 1. **首次加载（没有 OLD_SEARCH_DATA_KEY）不应把全部数据当成「新」**：
+ *    原版 `compareBlocks` 在 `oldNewItems == null` 时写入 `[]` 并直接 return，
+ *    注释写明「如果是第一次加载数据，那不要这次的『新』」。
+ * 2. **过期记录（超过 NEW_DATA_EXPIRE_DAY_NUM 天）必须丢弃**：
+ *    原版遍历旧记录时用 `item.expires > currentTime` 过滤，到期即消失；
+ *    否则 [新] 标签会永久累积。
  */
+function recordNewItems(allItems) {
+  const oldIdsRaw = storageGet(OLD_DATA_KEY, null);
+  // 收集本次加载的全部 id（后续无论哪条分支都要更新，作为下次比较的基线）
+  const currentIds = [];
+  for (const item of allItems) {
+    const id = itemId(item);
+    if (id != null) currentIds.push(id);
+  }
+
+  // 首次加载：写入空记录作为哨兵（下次才能区分出真正的「新增」），不标记任何新数据
+  if (!Array.isArray(oldIdsRaw) || oldIdsRaw.length === 0) {
+    storageSet(NEW_ITEMS_KEY, []);
+    storageSet(OLD_DATA_KEY, currentIds);
+    return;
+  }
+  const oldIds = new Set(oldIdsRaw);
+
+  const now = Date.now();
+  const currentSet = new Set(currentIds);
+  // 旧记录：丢弃已过期、以及数据里已不存在的条目
+  const existing = new Map(
+    (storageGet(NEW_ITEMS_KEY, []) || [])
+      .filter((r) => r != null && Number(r.expires) > now && currentSet.has(r.id))
+      .map((r) => [r.id, r])
+  );
+  for (const id of currentIds) {
+    if (!oldIds.has(id) && !existing.has(id)) {
+      existing.set(id, { id, expires: now + NEW_DATA_EXPIRE_DAY_NUM * DAY_MS });
+    }
+  }
+  storageSet(NEW_ITEMS_KEY, [...existing.values()]);
+  storageSet(OLD_DATA_KEY, currentIds);
+}
+/**
+ * 构建「新数据」结果（还原 <new> 搜索处理器）
+ * 为标题加上 [新] 与“N 天前”，首条标记为 [最新一条]。
+ */
+export function buildNewItemsResult(allItems) {
+  const records = newItemsRecord();
+  if (records.length === 0) return [];
+  const now = Date.now();
+  const byId = new Map();
+  for (const item of allItems) {
+    const id = itemId(item);
+    if (id != null && !byId.has(id)) byId.set(id, item);
+  }
+  const matched = records
+    // 过期记录不再展示（与 recordNewItems 的清理规则一致）
+    .filter((r) => Number(r.expires) > now)
+    .map((r) => ({ item: byId.get(r.id), expires: r.expires }))
+    .filter((x) => x.item)
+    .sort((a, b) => b.expires - a.expires);
+  if (matched.length === 0) return [];
+  const results = matched.map(({ item, expires }) => {
+    const daysAgo = Math.floor((now - (expires - NEW_DATA_EXPIRE_DAY_NUM * DAY_MS)) / DAY_MS);
+    const cleanTitle = String(item.title || "").split(NEW_ITEMS_TAG).join("");
+    // 不修改原数据，克隆一份用于展示
+    return {
+      item: { ...item, title: `${NEW_ITEMS_TAG}${cleanTitle} | ${daysAgo}天前` },
+      level: LEVEL_TITLE,
+    };
+  });
+  results[0].item.title = results[0].item.title
+    .split(NEW_ITEMS_TAG)
+    .join("[最新一条]");
+  return results;
+}
+
+// ========== 搜索引擎 ==========
 export class SearchEngine {
   constructor() {
     /** 全部数据项 */
     this.searchData = [];
-    /** 文本→拼音 映射缓存（会话级） */
-    this.textPinyinMap = {};
     /** 订阅列表 */
     this.subscribes = [];
+    /** 数据源中自定义的 fetchFun */
+    this.globalFetchFun = [];
+    /** 已处理过的 URL（防止重复/循环） */
+    this.processHistory = new Set();
+    /** 配置文件解析出、等待入队的子订阅任务（见 _runQueue） */
+    this._pendingChildJobs = [];
+    /** 上一次进度通知的时间戳（进度节流用） */
+    this._lastProgressNotifyAt = 0;
+    /** 文本→拼音 会话缓存 */
+    this.textPinyinMap = {};
+    /** 标签统计 */
+    this.tagsMap = {};
+    /** PRO 特殊路由 `^\s*$` → "问AI" 的待转发关键词（见 search / _proSearch） */
+    this._pendingRedirectKeyword = null;
+    /**
+     * PRO 特殊路由转发回调（还原 searchableSpecialRouting["^\\s*$"] 的
+     * triggerSearchHandle("问AI"+searchBoundary)）：主流程把输入框改写为
+     * "问AI : " 并重新触发搜索
+     */
+    this.onRedirect = null;
     /** 加载状态 */
     this.loading = false;
-    /** 已加载的订阅 URL（防止循环） */
-    this.loadedUrls = new Set();
+    this.loadedCount = 0;
+    this.failedUrls = [];
+    /**
+     * 数据块进度回调（还原油猴版 refreshNewData 中的 searchPlaceholder("UPDATE")）：
+     * 每解析完一个内容源都会调用一次，参数为当前已挂载的数据条数。
+     * 视图据此实时显示「🔁 数据库更新到 N条」，即原版的加载进度。
+     * @type {((count:number)=>void)|null}
+     */
+    this.onProgress = null;
   }
 
-  /**
-   * 文本转拼音（带缓存）
-   * @param {string} text
-   * @param {boolean} onlyFromCache 仅查缓存
-   */
+  /** 文本转拼音（带缓存，还原 String.toPinyin） */
   toPinyin(text, onlyFromCache = false) {
-    if (this.textPinyinMap[text] != null) {
-      return this.textPinyinMap[text];
-    }
+    if (text == null) return onlyFromCache ? null : "";
+    if (this.textPinyinMap[text] != null) return this.textPinyinMap[text];
     if (onlyFromCache) return null;
-    const safeText = text.replaceAll(SPACE_CHAR, SPACE);
-    const pinyinArr = pinyin(safeText, { toneType: "none", type: "array" });
-    const result = pinyinArr.join("").replaceAll(SPACE, SPACE_CHAR).toUpperCase();
+    const result = textToPinyin(text);
     this.textPinyinMap[text] = result;
     return result;
   }
 
+  // ---------- 缓存（还原 dataInitFun / cacheSearchData） ----------
   /**
-   * 递归加载订阅
-   * @param {string} url 订阅 URL
-   * @param {object} meta 订阅元信息（title/describe/fetchFun/defaultTag）
-   * @param {number} depth 递归深度
+   * 读取本地缓存（还原 registry.searchData.SEARCH_DATA_KEY）
+   * @returns {{data:Array, expire:number}|null}
    */
-  async loadSubscribe(url, meta = {}, depth = 0) {
-    if (depth > 6) return; // 防止无限递归
-    if (this.loadedUrls.has(url)) return; // 去重
-    this.loadedUrls.add(url);
+  _readCache() {
+    const pkg = storageGet(SEARCH_DATA_KEY, null);
+    if (pkg == null || !Array.isArray(pkg.data)) return null;
+    return pkg;
+  }
 
-    let text;
+  /** 写入本地缓存（相当于原版 cacheSearchData：带过期时间） */
+  _writeCache(data) {
     try {
-      text = await httpGet(url);
+      // 剥离派生索引字段（index / _titleUpper / _titlePinyin …）：
+      // 它们体积大且可由 _buildIndex 重建，不写入缓存以减小占用
+      const slim = data.map((item) => {
+        const copy = {};
+        for (const key of Object.keys(item)) {
+          if (key === "index" || key.startsWith("_")) continue;
+          copy[key] = item[key];
+        }
+        return copy;
+      });
+      storageSet(SEARCH_DATA_KEY, {
+        data: slim,
+        expire: Date.now() + EFFECTIVE_DURATION,
+      });
     } catch (e) {
-      console.warn(`订阅加载失败: ${url}`, e);
-      return;
+      console.warn("[我的搜索] 写入数据缓存失败:", e);
     }
-
-    // 解析 tis 标签（子订阅引用）
-    const tisTags = parseAllDesignatedSingTags(text, "tis");
-    if (tisTags.length > 0) {
-      for (const tag of tisTags) {
-        const childUrl = resolveUrl(url, tag.tabValue);
-        await this.loadSubscribe(childUrl, tag, depth + 1);
-      }
-    }
-
-    // 提取函数解析数据项
-    const fetchFunName = meta.fetchFun || "mLineFetchFun";
-    const fetchFun = getFetchFunByName(fetchFunName);
-    let items = [];
-    try {
-      items = fetchFun(text);
-    } catch (e) {
-      console.warn(`提取函数执行失败: ${url}`, e);
-    }
-
-    // 补充元信息（默认标签）
-    const defaultTag = meta.defaultTag || "";
-    for (const item of items) {
-      item.subscribe = meta.title || url;
-      item.sourceUrl = url;
-      if (defaultTag) {
-        item.tags = item.tags || [];
-        item.tags.push(defaultTag);
-      }
-      // 构建拼音索引（懒加载：首次搜索时构建）
-    }
-    this.searchData.push(...items);
   }
 
   /**
-   * 加载所有订阅
-   * @param {Array} subscribes 订阅列表 [{url, title, describe, fetchFun, defaultTag}]
+   * 获取当前缓存的过期时间戳，无有效缓存时返回 0。
+   * @returns {number} 过期时间戳（毫秒）或 0
    */
+  getCacheExpireMs() {
+    const pkg = this._readCache();
+    if (pkg == null || !Array.isArray(pkg.data) || pkg.data.length === 0) return 0;
+    const expire = Number(pkg.expire);
+    return Number.isFinite(expire) && expire > 0 ? expire : 0;
+  }
+
+  /** 清除数据缓存（还原 clearCache） */
+  _clearCache() {
+    storageRemove(SEARCH_DATA_KEY);
+    storageRemove(SUBSCRIBE_FINGERPRINT_KEY);
+  }
+
+  /**
+   * 缓存是否可用（还原 dataInitFun 的 isNotExpire 判断 + 订阅指纹比对）
+   * 过期 / 数据为空 / 订阅变化 → 不可用，需要重新加载
+   */
+  isCacheValid() {
+    const pkg = this._readCache();
+    if (pkg == null || pkg.data.length === 0) return false;
+    if (!(pkg.expire != null && pkg.expire > Date.now())) return false;
+    // 订阅变化 → 缓存失效（避免改了订阅还展示旧数据）
+    if (storageGet(SUBSCRIBE_FINGERPRINT_KEY, null) !== subscribeFingerprint(this.subscribes)) {
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * 挂载缓存数据（还原 setData + refreshIndex 的索引重建）：
+   * 缓存中不保存 _titleUpper / _titlePinyin 等派生的索引字段（体积大），
+   * 挂载时一次性重建，保证「直接用缓存」与「重新加载」的搜索结果完全一致。
+   */
+  _mountCache(pkg) {
+    this.searchData = pkg.data.map((item) => ({ ...item }));
+    this.loadedCount = 0;
+    this.failedUrls = [];
+    this.loading = false;
+    try {
+      parseScriptItem(this.searchData);
+    } catch (e) {
+      /* 脚本项解析失败不影响其它数据 */
+    }
+    this._buildIndex();
+    try {
+      storageSet(TAGS_KEY, Object.values(this.tagsMap));
+    } catch (e) {
+      /* ignore */
+    }
+    console.log(`[我的搜索] 使用数据缓存: ${this.searchData.length} 条`);
+    return this.searchData;
+  }
+
+  /**
+   * 启动时入口（还原 dataInitFun）：
+   * 缓存未过期 → 直接用缓存；否则（过期 / 订阅变化 / force）重新加载。
+   * 容错：若缓存已过期但重新加载失败（离线/全失败）且旧缓存仍有数据，
+   * 则回退到旧缓存，避免把已有数据清空（旧缓存不刷新过期时间，下次再试）。
+   * @param {Array} subscribes
+   * @param {{force?:boolean}} opts
+   */
+  async initData(subscribes, { force = false } = {}) {
+    this.subscribes = subscribes || [];
+    if (!force && this.isCacheValid()) return this._mountCache(this._readCache());
+
+    // 记住旧缓存（可能只是过期），用于加载失败时回退
+    const stalePkg = this._readCache();
+    const data = await this.loadAll(this.subscribes);
+    // 仅当「确实一个内容源都没加载成功」时才回退（区分网络故障 vs 标签过滤为空）
+    if (
+      (data == null || data.length === 0) &&
+      this.loadedCount === 0 &&
+      stalePkg != null &&
+      stalePkg.data.length > 0 &&
+      subscribeFingerprint(this.subscribes) === storageGet(SUBSCRIBE_FINGERPRINT_KEY, null)
+    ) {
+      console.warn("[我的搜索] 重新加载失败，回退到已过期的旧缓存");
+      return this._mountCache(stalePkg);
+    }
+    return data;
+  }
+
+  // ---------- 加载 ----------
+  async loadSubscribe(url, meta = {}, depth = 0) {
+    if (depth > 6) return;
+    const absolute = isUrl(url) ? url : resolveUrl(meta.parentUrl || "", url);
+    if (this.processHistory.has(absolute)) return;
+    this.processHistory.add(absolute);
+
+    let text;
+    try {
+      text = await httpGet(absolute);
+      if (text == null) throw new Error("empty");
+    } catch (e) {
+      this.failedUrls.push(absolute);
+      console.warn(`[我的搜索] 订阅加载失败: ${absolute}`, e);
+      return;
+    }
+
+    const fetchFunName = meta.fetchFun;
+
+    // 无 fetchFun => 是「配置」文件：解析自定义函数与子订阅
+    if (fetchFunName == null) {
+      const config = getConfigFromDataSource(text);
+      if (config.fetchFuns.length > 0) {
+        this.globalFetchFun.push(...config.fetchFuns);
+      }
+      // 子订阅并发加载（还原原版的行为等价结果，但不再逐个 await 串行）：
+      // 配置文件下的十几个内容源若串行，即使顶层并发再大，
+      // 也会退化为「一个配置内一个接一个」，整体加载时间被拉长。
+      // 这里把子 tis 直接塞回队列（继承 parentUrl 供相对路径解析）。
+      if (config.tis.length > 0) {
+        this._pendingChildJobs.push(
+          ...config.tis.map((tis) => ({
+            url: tis.tabValue,
+            meta: { ...tis, parentUrl: absolute },
+            depth: depth + 1,
+          }))
+        );
+      }
+      return;
+    }
+
+    // fetchFun 为空串 => 显式跳过
+    if (fetchFunName === "") return;
+
+    // 是「内容」文件：解析数据项
+    const fetchFun = getFetchFunByName(fetchFunName, this.globalFetchFun);
+    let items = [];
+    try {
+      // 与油猴版一致：先转义再解析
+      items = fetchFun(escapeText(text));
+    } catch (e) {
+      console.warn(`[我的搜索] 解析数据项失败: ${absolute}`, e);
+      return;
+    }
+
+    for (const item of items) {
+      if (item == null || item.title == null) continue;
+      contentRecovery(item);
+      defaultTagHandle(item, meta);
+      item.subscribe = meta.title || "";
+      // 与油猴版一致：过滤（USDRC 链上的 filterSearchData，weight=400）发生在
+      // 「一个数据块处理完」之时，而不是等全部加载完。这样进度提示里的条数
+      // 就是最终可搜索的条数（与加载完成后的数字一致）。
+      if (this._isUnfollowed(item)) continue;
+      this.searchData.push(item);
+    }
+    // 脚本项处理（还原 parseScriptItem）
+    parseScriptItem(items);
+    this.loadedCount++;
+    // 数据块就绪 → 上报进度（还原原版每解析完一块就 searchPlaceholder("UPDATE")）
+    this._notifyProgress();
+  }
+
+  /** 上报数据加载进度。
+   *
+   * 节流至 250ms 一次：并发提升后内容源会密集完成，
+   * 逐个回调会让占位提示与重搜高频抖动（视觉上“几十条几十条地蹦”）。
+   * 节流不丢最终进度——loadAll 收尾处会强制通知一次。
+   */
+  _notifyProgress() {
+    if (typeof this.onProgress !== "function") return;
+    const now = Date.now();
+    if (now - this._lastProgressNotifyAt < 250) return;
+    this._lastProgressNotifyAt = now;
+    try {
+      this.onProgress(this.searchData.length);
+    } catch (e) {
+      /* 进度回调异常不影响加载 */
+    }
+  }
+
+  /**
+   * 单项是否命中「不关注标签列表」（还原 filterDataByUserUnfollowList 的单项判断）
+   * @param {object} item
+   * @returns {boolean} true=应被过滤掉
+   */
+  _isUnfollowed(item) {
+    const unfollow = this._unfollowList();
+    if (unfollow.length === 0) return false;
+    const map = new Set(unfollow);
+    const tags = parseTags([item], (it) => it.title, {});
+    return tags.some((t) => map.has(t.name));
+  }
+
+  /** 当前「不关注标签」列表（未配置时回退到默认值） */
+  _unfollowList() {
+    const stored = storageGet(UNFOLLOW_KEY, null);
+    const unfollow = Array.isArray(stored) ? stored : DEFAULT_UNFOLLOW;
+    return Array.isArray(unfollow) ? unfollow : [];
+  }
+
+  /** 加载全部订阅 */
   async loadAll(subscribes) {
-    this.subscribes = subscribes;
+    this.subscribes = subscribes || [];
     this.searchData = [];
-    this.loadedUrls = new Set();
+    this.globalFetchFun = [];
+    this.processHistory = new Set();
+    this._pendingChildJobs = [];
+    this.textPinyinMap = {};
+    this.tagsMap = {};
+    this.loadedCount = 0;
+    this.failedUrls = [];
     this.loading = true;
     try {
-      for (const sub of subscribes) {
-        await this.loadSubscribe(sub.url, sub, 0);
+      // 并发加载（用队列实现，避免一次性打满）
+      const queue = this.subscribes.map((sub) => ({
+        url: sub.url,
+        meta: {
+          title: sub.title,
+          describe: sub.describe,
+          fetchFun: sub.fetchFun,
+          "default-tag": sub.defaultTag,
+          root: "true",
+        },
+        depth: 0,
+      }));
+      await this._runQueue(queue);
+      // 按“不关注标签”过滤（还原 filterSearchData）
+      this._applyUnfollowFilter();
+      this._buildIndex();
+      // 缓存标签统计，供配置窗口的“关注标签”使用（还原 DATA_ITEM_TAGS_CACHE_KEY）
+      try {
+        storageSet(TAGS_KEY, Object.values(this.tagsMap));
+      } catch (e) {
+        /* ignore */
       }
-      console.log(`[我的搜索] 数据加载完成: ${this.searchData.length} 条`);
+      // 记录新增数据（用于 <new> 特殊搜索）
+      try {
+        recordNewItems(this.searchData);
+      } catch (e) {
+        /* ignore */
+      }
+      // 写入数据缓存（带有效期；还原 cacheSearchData）
+      // 仅在确有数据时写：避免网络全失败时把上一次的好缓存覆盖为空
+      if (this.searchData.length > 0) {
+        this._writeCache(this.searchData);
+        try {
+          storageSet(SUBSCRIBE_FINGERPRINT_KEY, subscribeFingerprint(this.subscribes));
+        } catch (e) {
+          /* ignore */
+        }
+      }
+      console.log(
+        `[我的搜索] 数据加载完成: ${this.searchData.length} 条 / ${this.loadedCount} 个内容源` +
+          (this.failedUrls.length ? `，失败 ${this.failedUrls.length} 个` : "")
+      );
+      // 收尾强制上报最终进度（不受节流影响，保证最终条数一定刷出）
+      this._lastProgressNotifyAt = 0;
+      this._notifyProgress();
     } finally {
       this.loading = false;
     }
     return this.searchData;
   }
 
-  /**
-   * 重新加载（清理缓存）
+  /** 队列并发执行。
+   *
+   * 并发数取 20：订阅加载是纯 I/O（网络请求），每个内容源文件仅几十 KB，
+   * 单条请求的瓶颈在 RTT 而非带宽。20 路并发可以把「几十个内容源」
+   * 压到 1~2 轮完成，避免低并发下「每轮凑满一批才出数据」的
+   * 阶梯式加载观感（用户感知：数据几十条几十条地蹦出来）。
    */
+  async _runQueue(queue) {
+    const CONCURRENCY = 20;
+    let active = 0;
+    // 完成判定必须同时看三个地方：执行中、待执行队列、配置文件刚解析出的子订阅。
+    // 否则「最后一个配置文件完成」的瞬间，其子任务刚入 _pendingChildJobs，
+    // 只看 queue 会误判为全部完成而提前 resolve。
+    const isDrained = () =>
+      active === 0 && queue.length === 0 && this._pendingChildJobs.length === 0;
+    return new Promise((resolve) => {
+      const pump = () => {
+        // 配置文件解析出的子订阅入队（深度+1，depth>6 时由 loadSubscribe 自行剪枝）
+        if (this._pendingChildJobs.length > 0) {
+          queue.push(...this._pendingChildJobs.splice(0));
+        }
+        while (active < CONCURRENCY && queue.length > 0) {
+          const job = queue.shift();
+          active++;
+          this.loadSubscribe(job.url, job.meta, job.depth)
+            .catch(() => {})
+            .finally(() => {
+              active--;
+              pump();
+              if (isDrained()) resolve();
+            });
+        }
+        if (isDrained()) resolve();
+      };
+      pump();
+    });
+  }
+
+  /**
+   * 按用户维护的“不关注标签列表”过滤数据项（还原 filterSearchData）
+   * 标题中包含任一不关注标签的数据项将被移除。
+   * 注：单个数据块在 `loadSubscribe` 中已即时过滤，这里是全量兑底
+   * （保证与缓存/历史数据混用时的结果一致，幂等可重复调用）。
+   */
+  _applyUnfollowFilter() {
+    const unfollow = this._unfollowList();
+    if (unfollow.length === 0) return;
+    const map = new Set(unfollow);
+    this.searchData = this.searchData.filter((item) => {
+      const tags = parseTags([item], (it) => it.title, {});
+      return !tags.some((t) => map.has(t.name));
+    });
+  }
+
+  /**
+   * 构建检索索引（关键：一次性归一化，避免每次搜索重复计算）
+   * 为每条数据项补充内部字段（下划线前缀，仅运行时使用，不写入缓存）
+   */
+  _buildIndex() {
+    const tagsMap = {};
+    for (let i = 0; i < this.searchData.length; i++) {
+      const item = this.searchData[i];
+      item.index = i;
+
+      // 给URL包含 [[...keyword...]] 模板的项添加 [可搜索] 标签（还原 refreshTags）
+      // 必须在 title 变量捕获前执行，否则索引字段不包含该标签
+      if (this._isSearchableItem(item) && !item.title.includes(SEARCH_PRO_TAG)) {
+        item.title = SEARCH_PRO_TAG + item.title;
+      }
+
+      const title = String(item.title || "");
+      const desc = String(item.desc || "");
+      const resource = String(item.resource || "");
+
+      item._titleUpper = title.toUpperCase();
+      item._descUpper = desc.toUpperCase();
+      // 简洁写法：只传标题/描述，避免把索引字段自身作为参数传入了 toPinyin
+      item._titlePinyin = this.toPinyin(title);
+      item._descPinyin = this.toPinyin(desc);
+
+      // 内容（links + resource + vassal）前 4096 字符
+      const content = `${linksToString(item.links)}${resource}${item.vassal || ""}`;
+      item._contentUpper = content.substring(0, 4096).toUpperCase();
+
+      // 模糊匹配用：清理标签后的标题，以及 desc+tags
+      const { tags, cleaned } = extractTagsAndCleanContent(title);
+      item._cleanedTitleUpper = cleaned.toUpperCase();
+      item._descTagsUpper = `${desc}${tags.join()}`.toUpperCase();
+
+      // 采集标签统计
+      parseTags([item], (it) => it.title, tagsMap);
+    }
+    this.tagsMap = tagsMap;
+  }
+
   async reload() {
-    this.textPinyinMap = {};
+    // 手动重新加载：丢弃缓存，强制全量拉取
+    this._clearCache();
     return this.loadAll(this.subscribes);
   }
 
+  // ---------- 精确 / 拼音搜索（还原 searchUnitHandler） ----------
   /**
-   * 精确 + 拼音搜索
+   * 单轮精确搜索
+   * @param {Array} beforeData
    * @param {string} keyword
-   * @returns {Array<{item, level}>} level 0=标题命中 1=描述命中
+   * @returns {Array<{item, level}>}
    */
-  accurateSearch(keyword) {
-    const upperKeyword = keyword.toUpperCase();
-    const pinyinKeyword = keyword.length > 1 ? (this.toPinyin(keyword) ?? "") : "";
-    const searchLevelData = [[], []];
+  _searchUnit(beforeData, keyword) {
+    keyword = keyword.trim().toUpperCase();
+    if (keyword === "" || beforeData.length === 0) return [];
 
-    for (const item of this.searchData) {
-      const title = item.title || "";
-      const desc = item.desc || "";
-      const titlePinyin = this.toPinyin(title, true);
-      const descPinyin = this.toPinyin(desc, true);
+    // 多关键词：取最后一个关键词做本轮匹配，其余递归
+    const searchUnits = keyword.split(/\s+/);
+    keyword = searchUnits.pop();
+
+    // 仅当关键词长度 > 1 时才启用拼音（与油猴版一致）
+    const enablePinyin = keyword.length > 1;
+    const pinyinKeyword = enablePinyin ? textToPinyin(keyword) : "";
+
+    const level0 = [];
+    const level1 = [];
+    const level2 = [];
+
+    for (const item of beforeData) {
+      const titleUpper = item._titleUpper ?? String(item.title || "").toUpperCase();
+      const descUpper = item._descUpper ?? String(item.desc || "").toUpperCase();
+      const contentUpper =
+        item._contentUpper ??
+        String(`${linksToString(item.links)}${item.resource || ""}${item.vassal || ""}`)
+          .substring(0, 4096)
+          .toUpperCase();
 
       const titleHit =
-        title.toUpperCase().includes(upperKeyword) ||
-        (pinyinKeyword && titlePinyin && titlePinyin.includes(pinyinKeyword));
-      const descHit =
-        desc.toUpperCase().includes(upperKeyword) ||
-        (pinyinKeyword && descPinyin && descPinyin.includes(pinyinKeyword));
+        titleUpper.includes(keyword) ||
+        (enablePinyin && (item._titlePinyin || "").includes(pinyinKeyword));
+      if (titleHit) {
+        level0.push(item);
+        continue;
+      }
 
-      if (titleHit) searchLevelData[0].push({ item, level: 0 });
-      else if (descHit) searchLevelData[1].push({ item, level: 1 });
+      const descHit =
+        descUpper.includes(keyword) ||
+        (enablePinyin && (item._descPinyin || "").includes(pinyinKeyword));
+      if (descHit) {
+        level1.push(item);
+        continue;
+      }
+
+      if (contentUpper.includes(keyword)) level2.push(item);
     }
-    return [...searchLevelData[0], ...searchLevelData[1]];
+
+    const ordered = [
+      ...sortByWeight(level0).map((item) => ({ item, level: LEVEL_TITLE })),
+      ...sortByWeight(level1).map((item) => ({ item, level: LEVEL_DESC })),
+      ...sortByWeight(level2).map((item) => ({ item, level: LEVEL_CONTENT })),
+    ];
+
+    // 递归处理剩余关键词
+    if (
+      searchUnits.length > 0 &&
+      searchUnits[searchUnits.length - 1].trim() !== SEARCH_BOUNDARY.trim()
+    ) {
+      const nextData = ordered.map((r) => r.item);
+      return this._searchUnit(nextData, searchUnits.join(" "));
+    }
+    return ordered;
+  }
+
+  /** 精确搜索（对外） */
+  accurateSearch(keyword) {
+    return this._searchUnit(this.searchData, keyword);
   }
 
   /**
-   * 重叠匹配度搜索（无精确结果时兜底）
-   * @param {string} keyword
+   * 重叠匹配度搜索（还原 stringOverlapMatchingDegreeSearch）
+   * @param {string} rawKeyword
    */
-  fuzzySearch(keyword) {
-    const upperKeyword = keyword.toUpperCase();
+  fuzzySearch(rawKeyword) {
     const scoreList = [];
-    // overlapMatchingDegreeForObjectArray 返回过滤后的数据项数组，
-    // scoreList 通过 scopeForObjArrContainer 收集每项的匹配分数（与返回数组同序）
-    const matchedItems = overlapMatchingDegreeForObjectArray(
-      upperKeyword,
+    const matched = overlapMatchingDegreeForObjectArray(
+      String(rawKeyword).toUpperCase(),
       [...this.searchData],
-      (item) => [item.title || "", item.desc || ""],
+      (item) => {
+        const str2ScopeMap = {};
+        str2ScopeMap[(item._cleanedTitleUpper ?? "")] = 9;
+        str2ScopeMap[(item._descTagsUpper ?? "")] = 8;
+        str2ScopeMap[(item._contentUpper ?? "").substring(0, 4096)] = 2;
+        return str2ScopeMap;
+      },
       { onlyHasScope: true, scopeForObjArrContainer: scoreList }
     );
-    return matchedItems.map((item, i) => ({ item, level: 2, score: scoreList[i] }));
+    return matched.map((item, i) => ({
+      item,
+      level: LEVEL_FUZZY,
+      score: scoreList[i],
+    }));
+  }
+
+  // ========== 搜索PRO模式（子搜索模式） ==========
+
+  /**
+   * 判断是否为搜索PRO模式（还原 subSearch.isSubSearchMode）
+   * @param {string} rawKeyword
+   * @returns {boolean}
+   */
+  _isProSearchMode(rawKeyword) {
+    return String(rawKeyword ?? "").includes(SEARCH_BOUNDARY);
   }
 
   /**
-   * 综合搜索（三级）
-   * @param {string} keyword
+   * 获取父级关键词（还原 subSearch.getParentKeyword）
+   * @param {string} rawKeyword
+   * @returns {string}
    */
-  search(keyword) {
-    const kw = (keyword || "").trim();
-    if (!kw) return [];
+  _getParentKeyword(rawKeyword) {
+    return String(rawKeyword ?? "").split(SEARCH_BOUNDARY)[0].trim();
+  }
 
-    // 第一级：精确 + 拼音
-    const accurate = this.accurateSearch(kw);
-    if (accurate.length > 0) {
-      return accurate.slice(0, 50);
+  /**
+   * 判断数据项是否「可搜索」：URL 包含 [[...keyword...]] 模板且为 HTTP URL（还原 refreshTags）
+   * @param {object} item
+   * @returns {boolean}
+   */
+  _isSearchableItem(item) {
+    const resource = String(item.resource ?? "").trim();
+    if (!resource) return false;
+    // 是否 HTTP URL（粗略检测：包含 . 号）
+    const isHttpUrl = /^[^\n]*\.[^\n]*$/.test(resource);
+    if (!isHttpUrl) return false;
+    // 是否包含 [[...keyword...]] 搜索模板
+    return /\[\[[^\[\]]+keyword[^\[\]]+\]\]/.test(resource);
+  }
+
+  /**
+   * PRO 模式特殊路由（还原 searchableSpecialRouting）
+   * 返回 undefined 表示无特殊路由匹配，[] 表示已处理，数组表示搜索结果
+   * @param {string} parentKeyword
+   * @returns {Promise<Array|undefined>}
+   */
+  async _proSearchSpecialRouting(parentKeyword) {
+    const kw = parentKeyword.trim();
+    // 父关键词为 "问AI" → 精确搜索父关键词本身（还原 searchableSpecialRouting["^问AI$"]）
+    // （原版：search(keywordForFill0, { isAccurateSearch: true })，keywordForFill0 即父关键词）
+    if (kw === "问AI") {
+      const processed = kw.trim().split(/\s+/).reverse().join(" ");
+      return this._searchUnit(this.searchData, processed);
+    }
+    // 无特殊路由匹配
+    // （空父关键词的 `^\s*$` → "问AI" 转发改在 _proSearch 中处理：
+    //   需要把输入框改写为 "问AI : " 并重新触发搜索，与原版 triggerSearchHandle 一致）
+    return undefined;
+  }
+
+  /**
+   * 搜索PRO模式（还原 searchEven.event[".*"+searchBoundary+".*"]）
+   * 仅搜索带有 [可搜索] 标签的数据项
+   * @param {string} rawKeyword
+   * @returns {Promise<Array>}
+   */
+  async _proSearch(rawKeyword) {
+    const parentKeyword = this._getParentKeyword(rawKeyword);
+
+    // 先检查特殊路由
+    const specialResult = await this._proSearchSpecialRouting(parentKeyword);
+    // 无特殊路由但父关键词为空（输入框只有 " : "，如空内容按 Tab）：
+    // 还原原版特殊路由 `^\s*$` → "问AI"：把搜索框改写为 "问AI : " 并重新触发搜索
+    // （原版通过 searchableSpecialRouting["^\\s*$"] = "问AI" + triggerSearchHandle 转发实现）
+    if (specialResult === undefined && /^\s*$/.test(parentKeyword.trim())) {
+      this._pendingRedirectKeyword = "问AI" + SEARCH_BOUNDARY;
+      return [];
+    }
+    if (specialResult !== undefined) {
+      return specialResult;
     }
 
-    // 第二级：重叠匹配度
-    const fuzzy = this.fuzzySearch(kw);
-    if (fuzzy.length > 0) {
-      return fuzzy.slice(0, 50);
+    // 普通 PRO 模式：只搜索已标记 [可搜索] 的项
+    // 构造 `[可搜索] <parentKeyword>` 关键词，利用标题匹配过滤出标记项
+    const proKeyword = `${SEARCH_PRO_TAG} ${parentKeyword}`;
+    const processed = proKeyword.trim().split(/\s+/).reverse().join(" ");
+    let result = this._searchUnit(this.searchData, processed);
+    // 无结果时使用重叠匹配度兜底（仅搜索可搜索项）
+    if ((result == null || result.length === 0) && parentKeyword.trim().length > 0) {
+      // 对 parentKeyword 做模糊匹配，但限制在 [可搜索] 项内
+      const searchableItems = this.searchData.filter((item) => item.title.includes(SEARCH_PRO_TAG));
+      const scoreList = [];
+      const matched = overlapMatchingDegreeForObjectArray(
+        String(parentKeyword).toUpperCase(),
+        searchableItems,
+        (item) => {
+          const str2ScopeMap = {};
+          str2ScopeMap[(item._cleanedTitleUpper ?? "")] = 9;
+          str2ScopeMap[(item._descTagsUpper ?? "")] = 8;
+          str2ScopeMap[(item._contentUpper ?? "").substring(0, 4096)] = 2;
+          return str2ScopeMap;
+        },
+        { onlyHasScope: true, scopeForObjArrContainer: scoreList }
+      );
+      result = matched.map((item, i) => ({
+        item,
+        level: LEVEL_FUZZY,
+        score: scoreList[i],
+      }));
+    }
+    return result || [];
+  }
+
+  /** 搜索路由（还原 searchEven.event 与 searchAOP） */
+  async search(rawKeyword) {
+    const raw = String(rawKeyword ?? "");
+
+    // PRO模式（子搜索模式）：关键词包含 SEARCH_BOUNDARY（ : ）
+    if (this._isProSearchMode(raw)) {
+      const result = await this._proSearch(raw);
+      // 特殊路由 `^\s*$` → "问AI" 转发（还原 searchableSpecialRouting["^\\s*$"]）：
+      // 引擎通知主流程把输入框改写为 "问AI : " 并重新触发搜索
+      if (this._pendingRedirectKeyword != null) {
+        const redirect = this._pendingRedirectKeyword;
+        this._pendingRedirectKeyword = null;
+        this.onRedirect?.(redirect);
+      }
+      return result;
     }
 
-    return [];
+    // 特殊关键词直达
+    const special = this._specialSearch(raw);
+    if (special) return special;
+
+    // 逆序处理多关键词（与油猴版一致：rawKeyword.trim().split(/\s+/).reverse().join(" ")）
+    const processedKeyword = raw.trim().split(/\s+/).reverse().join(" ");
+
+    let result = this._searchUnit(this.searchData, processedKeyword);
+    // 精确无结果时，使用重叠匹配度兜底
+    if ((result == null || result.length === 0) && raw.trim().length > 0) {
+      result = this.fuzzySearch(raw);
+    }
+    return result || [];
+  }
+
+  _specialSearch(rawKeyword) {
+    const kw = rawKeyword.trim().toLowerCase();
+    if (kw === SPECIAL_KEYWORD.highFrequency.toLowerCase()) {
+      return highFrequencyList(this.searchData, 45).map((item) => ({
+        item,
+        level: LEVEL_TITLE,
+      }));
+    }
+    if (kw === SPECIAL_KEYWORD.history.toLowerCase()) {
+      return historyList(15).map((item) => ({ item, level: LEVEL_TITLE }));
+    }
+    if (kw === SPECIAL_KEYWORD.new.toLowerCase()) {
+      return buildNewItemsResult(this.searchData);
+    }
+    return null;
   }
 }

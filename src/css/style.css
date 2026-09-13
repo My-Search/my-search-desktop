@@ -20,14 +20,18 @@ html, body {
 }
 
 /* ========== 搜索框容器（还原 #my_search_box） ========== */
+/* 还原原版机制：不设 height，由内容（#searchBox/#matchResult/#text_show）自然撑开。
+   桌面版曾用 height:100%+flex 让容器吃满 WebView 视口，但冷启动首次搜索时
+   WebView2 视口更新滞后于窗口尺寸（SetBounds 与首帧合成时序错位），
+   容器会按旧视口 48px 渲染，表现为"搜索框下边框停在顶部、下方大片无边框空白"。
+   原版布局对外部容器尺寸零依赖，视口滞后时内容只是暂不重排，不会出现错位空白。 */
 #my_search_box {
   position: relative;
+  /* 还原脚本：2px 灰边框、直角（无圆角、无阴影） */
   border: 2px solid #cecece;
+  box-sizing: border-box;
   background: #ffffff;
   width: 100%;
-  height: 100%;
-  display: flex;
-  flex-direction: column;
   z-index: 2147383656;
 }
 
@@ -42,21 +46,24 @@ html, body {
   display: none;
 }
 
+/* ========== 字体（还原脚本 @font-face：HarmonyOS Medium，标题/描述均为 Medium 字重） ========== */
+@font-face {
+  font-family: 'HarmonyOS';
+  src: url('https://s1.hdslb.com/bfs/static/jinkela/long/font/HarmonyOS_Medium.a1.woff2');
+}
+
 /* ========== 搜索视图（还原 #my_search_view） ========== */
 #my_search_view {
   font-family: 'HarmonyOS', -apple-system, BlinkMacSystemFont, "Segoe UI",
     "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC",
     sans-serif !important;
-  display: flex;
-  flex-direction: column;
-  height: 100%;
+  /* 还原原版：普通文档流自然堆叠（不用 flex），高度由子元素决定 */
 }
 
 /* ========== 搜索框（还原 #searchBox） ========== */
 #searchBox {
-  /* 容器高度 = 窗口 47px - 上下边框 4px = 43px；固定高度避免 flex 拉伸 */
-  height: 43px;
-  flex-shrink: 0;
+  /* 单行：48px 容器 = 上下 2px 灰边框 + 44px 搜索行（避免下边框被裁） */
+  height: 44px;
   background: #ffffff;
   padding: 0 10px;
   box-sizing: border-box;
@@ -65,7 +72,6 @@ html, body {
   display: flex;
   align-items: center;
   flex-wrap: nowrap;
-  flex-shrink: 0;
   -webkit-app-region: drag; /* 拖拽区域 */
 }
 
@@ -154,11 +160,12 @@ html, body {
 }
 
 /* ========== 结果列表（还原 #matchResult） ========== */
+/* 还原原版：仅 display:none/block 切换，高度按 li 数量自然撑开，不参与 flex 分配 */
 #matchResult {
   display: none;
-  flex: 1;
-  overflow-y: auto;
-  overflow-x: hidden;
+  /* 还原脚本：结果区不出现滚动条。脚本列表最多固定显示 showSize=15 条，
+     且窗口高度随实际条数自适应（≤15 行），故无需滚动。 */
+  overflow: hidden;
 }
 
 #matchResult.show {
@@ -185,11 +192,6 @@ html, body {
   animation-duration: 0.5s;
   animation-name: resultItem;
   cursor: pointer;
-  border-radius: 4px;
-}
-
-#matchResult li:hover {
-  background: #f0f4ff;
 }
 
 #matchResult li.active {
@@ -257,13 +259,12 @@ html, body {
   color: #a8a8a8;
 }
 
-/* 结果项描述（还原 .item_desc） */
+/* 结果项描述（还原 .item_desc：与标题同字号，灰色；脚本未设 font-size） */
 #matchResult .item_desc {
   color: #474747;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12px;
   margin-left: 4px;
 }
 
@@ -318,23 +319,233 @@ html, body {
   100% { opacity: 1; }
 }
 
-/* 滚动条样式（还原原版） */
-#matchResult::-webkit-scrollbar {
+
+
+
+
+/* ========== 文本详情视图（简述内容 / 附加内容） ========== */
+/* 还原原版：文档流内自然块（原版 max-height:450 内部滚动）。
+   桌面版窗口高度上限 560（TEXT_VIEW_MAX_HEIGHT），扣除搜索框 48 后
+   内容区最大 510px：超过则 #text_show 内部滚动，窗口高度保持上限。
+   （此前由 flex:1 1 auto 提供的等价约束，去 flex 后改为显式 max-height） */
+#text_show {
+  display: none;
+  max-height: 510px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 10px 16px 16px;
+  font-size: 14px;
+  line-height: 1.75;
+  color: #24292f;
+  text-align: left;
+  user-select: text;
+  box-sizing: border-box;
+}
+
+#text_show .text-head {
+  padding-bottom: 8px;
+  margin-bottom: 10px;
+  border-bottom: 1px dashed #e1e4e8;
+  font-size: 13px;
+  color: #57606a;
+}
+
+#text_show .text-label {
+  color: #d93025;
+}
+
+#text_show .markdown-body h1,
+#text_show .markdown-body h2,
+#text_show .markdown-body h3,
+#text_show .markdown-body h4 {
+  margin: 12px 0 6px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+#text_show .markdown-body h1 { font-size: 19px; }
+#text_show .markdown-body h2 { font-size: 17px; }
+#text_show .markdown-body h3 { font-size: 15px; }
+
+#text_show .markdown-body p {
+  margin: 6px 0;
+}
+
+#text_show .markdown-body ul,
+#text_show .markdown-body ol {
+  margin: 6px 0;
+  padding-left: 22px;
+}
+
+#text_show .markdown-body li {
+  margin: 2px 0;
+  list-style: inherit;
+}
+
+#text_show .markdown-body blockquote {
+  margin: 8px 0;
+  padding: 4px 12px;
+  color: #57606a;
+  border-left: 4px solid #d0d7de;
+  background: #f6f8fa;
+}
+
+#text_show .markdown-body code {
+  padding: 1px 5px;
+  background: #f6f8fa;
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12.5px;
+}
+
+#text_show .markdown-body pre {
+  margin: 8px 0;
+  padding: 10px 12px;
+  background: #f6f8fa;
+  border-radius: 6px;
+  overflow-x: auto;
+}
+
+#text_show .markdown-body pre code {
+  background: transparent;
+  padding: 0;
+}
+
+#text_show .markdown-body pre .copy-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  background: #7f7f7fa1;
+  color: white;
+  border: none;
+  padding: 2px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: 4px;
+  opacity: 0.7;
+  transition: opacity 0.2s;
+  line-height: 1.6;
+  font-family: inherit;
+  z-index: 1;
+}
+
+#text_show .markdown-body pre .copy-btn:hover {
+  opacity: 1;
+  background: #6b6b6ba1;
+}
+
+#text_show .markdown-body pre .copy-btn:active {
+  background: #5a5a5aa1;
+}
+
+#text_show .markdown-body hr {
+  margin: 12px 0;
+  border: none;
+  border-top: 1px solid #e1e4e8;
+}
+
+#text_show .markdown-body a {
+  color: #0969da;
+  text-decoration: none;
+}
+
+#text_show .markdown-body a:hover {
+  text-decoration: underline;
+}
+
+#text_show .markdown-body img {
+  max-width: 100%;
+}
+
+/* ========== 滚动条（极简风格） ========== */
+
+#text_show::-webkit-scrollbar {
   -webkit-appearance: none;
-  width: 5px;
-  height: 5px;
+  width: 6px;
 }
 
-#matchResult::-webkit-scrollbar-track {
+#text_show::-webkit-scrollbar-track {
   background-color: #f1f1f1;
+  border-radius: 3px;
 }
 
-#matchResult::-webkit-scrollbar-thumb {
+#text_show::-webkit-scrollbar-thumb {
   background-color: #c1c1c1;
+  border-radius: 3px;
+  border: 1px solid #f1f1f1;
 }
 
-#matchResult::-webkit-scrollbar-thumb:hover {
+#text_show::-webkit-scrollbar-thumb:hover {
   background-color: #a8a8a8;
+}
+
+#text_show::-webkit-scrollbar-thumb:active {
+  background-color: #909090;
+}
+
+/* 内容区代码块水平滚动条 */
+#text_show .markdown-body pre::-webkit-scrollbar {
+  -webkit-appearance: none;
+  height: 4px;
+}
+
+#text_show .markdown-body pre::-webkit-scrollbar-track {
+  background-color: transparent;
+}
+
+#text_show .markdown-body pre::-webkit-scrollbar-thumb {
+  background-color: rgba(0, 0, 0, 0.08);
+  border-radius: 2px;
+}
+
+#text_show .markdown-body pre::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(0, 0, 0, 0.15);
+}
+
+/* ---- 配置窗口 ---- */
+#ms-config-view .cfg-nav::-webkit-scrollbar,
+#ms-config-view .cfg-body::-webkit-scrollbar,
+#ms-config-view .sub-list::-webkit-scrollbar,
+#ms-config-view .tis-hub .result-list::-webkit-scrollbar {
+  -webkit-appearance: none;
+  width: 6px;
+}
+
+#ms-config-view .cfg-nav::-webkit-scrollbar-track,
+#ms-config-view .cfg-body::-webkit-scrollbar-track,
+#ms-config-view .sub-list::-webkit-scrollbar-track,
+#ms-config-view .tis-hub .result-list::-webkit-scrollbar-track {
+  background-color: transparent;
+}
+
+#ms-config-view .cfg-nav:hover::-webkit-scrollbar-track,
+#ms-config-view .cfg-body:hover::-webkit-scrollbar-track,
+#ms-config-view .sub-list:hover::-webkit-scrollbar-track,
+#ms-config-view .tis-hub .result-list:hover::-webkit-scrollbar-track {
+  background-color: rgba(0, 0, 0, 0.04);
+}
+
+#ms-config-view .cfg-nav::-webkit-scrollbar-thumb,
+#ms-config-view .cfg-body::-webkit-scrollbar-thumb,
+#ms-config-view .sub-list::-webkit-scrollbar-thumb,
+#ms-config-view .tis-hub .result-list::-webkit-scrollbar-thumb {
+  background-color: rgba(0, 0, 0, 0.08);
+  border-radius: 3px;
+  transition: background-color 0.15s ease;
+}
+
+#ms-config-view .cfg-nav::-webkit-scrollbar-thumb:hover,
+#ms-config-view .cfg-body::-webkit-scrollbar-thumb:hover,
+#ms-config-view .sub-list::-webkit-scrollbar-thumb:hover,
+#ms-config-view .tis-hub .result-list::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(0, 0, 0, 0.14);
+}
+
+#ms-config-view .cfg-nav::-webkit-scrollbar-thumb:active,
+#ms-config-view .cfg-body::-webkit-scrollbar-thumb:active,
+#ms-config-view .sub-list::-webkit-scrollbar-thumb:active,
+#ms-config-view .tis-hub .result-list::-webkit-scrollbar-thumb:active {
+  background-color: rgba(0, 0, 0, 0.2);
 }
 
 /* ========== 空状态 ========== */
@@ -357,224 +568,1326 @@ html, body {
   color: #bdc1c6;
 }
 
-/* ========== 订阅面板（保留原功能，独立样式） ========== */
-.subscribe-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.45);
-  display: none;
-  align-items: center;
-  justify-content: center;
-  z-index: 2147383657;
+/* ========== 订阅管理窗口（独立窗口，现代化风格） ========== */
+/* 配置窗口需要可滚动 + 可选中文本（覆盖共享样式里的 html/body 限制） */
+html.ms-config-root {
+  height: auto;
+  overflow: hidden;
+  color-scheme: light dark;
+  background: var(--surface, #f5f6f8);
 }
 
-.subscribe-overlay.show {
-  display: flex;
+body.ms-config-body {
+  height: 100vh;
+  overflow: hidden;
+  user-select: auto;
+  background: var(--surface, #f5f6f8);
 }
 
-.subscribe-panel {
-  width: 520px;
-  max-height: 70vh;
-  background: #fff;
-  border: 2px solid #cecece;
-  border-radius: 8px;
+/* ========== 主题变量（默认浅色，深色由 prefers-color-scheme 覆盖） ========== */
+html.ms-config-root {
+  --brand: #5b5bd6;
+  --brand-hover: #4a4ab8;
+  --line: #e6e8ec;
+  --text: #1f2329;
+  --muted: #7a828e;
+  --surface: #f5f6f8;
+  --card: #ffffff;
+  --field: #fbfbfd;
+  --chip: #fafbfc;
+  --chip-count: #aab0ba;
+  --hover-border: #c9ccd4;
+  --hover-bg: #f7f8fa;
+  --code-bg: #eef0f4;
+  --seg-bg: #eef0f4;
+  --accent: #4a4ab8;
+  --accent-soft-bg: #eef0ff;
+  --accent-soft-border: #c7c8f5;
+  --accent-soft-count: #8a8ce0;
+  /* 选中标签：中性色，不带任何彩色倾向 */
+  --chip-on-bg: #3a3f47;
+  --chip-on-border: #3a3f47;
+  --chip-on-text: #ffffff;
+  --chip-on-count: rgba(255, 255, 255, 0.72);
+  --divider-soft: #f2f3f6;
+  --ok: #1a9c5b;
+  --err: #e02424;
+  --btn-shadow: 0 1px 3px rgba(91, 91, 214, 0.3);
+  --dialog-shadow: 0 12px 40px rgba(0, 0, 0, 0.2);
+}
+
+/* ========== 深色主题（跟随系统） ========== */
+@media (prefers-color-scheme: dark) {
+  html.ms-config-root {
+    --brand: #6c6ce0;
+    --brand-hover: #7f7ff2;
+    --line: #33363d;
+    --text: #e4e6ea;
+    --muted: #98a0ab;
+    --surface: #17191d;
+    --card: #212429;
+    --field: #1a1c21;
+    --chip: #1e2126;
+    --chip-count: #7f8792;
+    --hover-border: #4a4f58;
+    --hover-bg: #2a2d33;
+    --code-bg: #2a2d33;
+    --seg-bg: #2a2d33;
+    --accent: #a5a6ff;
+    --accent-soft-bg: #2c2d4a;
+    --accent-soft-border: #3f4170;
+    --accent-soft-count: #9a9cf0;
+    /* 选中标签：中性灰，不含彩色 */
+    --chip-on-bg: #363b43;
+    --chip-on-border: #4a505a;
+    --chip-on-text: #f2f4f7;
+    --chip-on-count: #b9c0ca;
+    --divider-soft: #2b2e34;
+    --ok: #3ddc84;
+    --err: #ff6b6b;
+    --btn-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+    --dialog-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+  }
+}
+
+#ms-config-view {
+  height: 100vh;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
     "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  color: var(--text);
+  background: var(--surface);
 }
 
-.panel-header {
+#ms-config-view button {
+  cursor: pointer;
+  font-family: inherit;
+}
+
+/* ---- 顶栏 ---- */
+#ms-config-view .cfg-header {
+  flex-shrink: 0;
+  height: 52px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 16px;
-  border-bottom: 1px solid #eee;
-  background: #fafafa;
+  padding: 0 18px;
+  background: var(--card);
+  border-bottom: 1px solid var(--line);
 }
 
-.panel-header h3 {
+#ms-config-view .cfg-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-size: 15px;
   font-weight: 600;
-  color: #202124;
 }
 
-.panel-header .icon-btn {
-  width: 26px;
-  height: 26px;
-  display: flex;
+#ms-config-view .cfg-logo {
+  display: inline-flex;
   align-items: center;
   justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: var(--accent-soft-bg);
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+#ms-config-view .cfg-logo svg {
+  width: 18px;
+  height: 18px;
+  display: block;
+}
+
+#ms-config-view .cfg-header-sub {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* ---- 主体：左菜单 + 右内容 ---- */
+#ms-config-view .cfg-main {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+#ms-config-view .cfg-nav {
+  flex-shrink: 0;
+  width: 148px;
+  padding: 12px 10px;
+  background: var(--card);
+  border-right: 1px solid var(--line);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+#ms-config-view .nav-item {
+  width: 100%;
+  text-align: left;
+  padding: 9px 12px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 500;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+#ms-config-view .nav-item:hover {
+  background: var(--hover-bg);
+}
+
+#ms-config-view .nav-item.on {
+  background: var(--accent-soft-bg);
+  color: var(--accent);
+}
+
+/* ---- 右侧内容区（可滚动） ---- */
+#ms-config-view .cfg-body {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 16px 18px 24px;
+}
+
+/* 面板由 JS 按需渲染：DOM 里同时只存在当前一个面板，无需再用 display 控制显隐 */
+
+#ms-config-view .cfg-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+}
+
+#ms-config-view .cfg-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+#ms-config-view .cfg-card-head h3 {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+#ms-config-view .cfg-hint {
+  font-size: 12px;
+  color: var(--muted);
+  margin-left: auto;
+  font-weight: 400;
+}
+
+#ms-config-view .cfg-hint code {
+  background: var(--code-bg);
+  border-radius: 3px;
+  padding: 0 4px;
+  font-family: Consolas, Menlo, monospace;
+}
+
+/* ---- 卡片头右侧的「?」提示图标 ---- */
+/* 长提示不再占用标题行，收纳为一个靠右的圆形图标，
+   说明文字走原生 title 气泡（悬停显示），无需 JS、不遮挡文本域。
+   图标默认低透明度（几乎隐形、鼠标悬停即可发现），聚焦 / 悬停时点亮；
+   用 opacity 而不是 display，避免出现 / 消失时把标题行撑来撑去。 */
+#ms-config-view .cfg-hint-icon {
+  margin-left: auto;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  color: var(--muted);
+  cursor: help;
+  opacity: 0.55;
+  transition: opacity 0.15s ease, color 0.15s ease;
+}
+
+#ms-config-view .cfg-card-head:hover .cfg-hint-icon,
+#ms-config-view .cfg-hint-icon:hover,
+#ms-config-view .cfg-hint-icon:focus-visible {
+  opacity: 1;
+  color: var(--text);
+  outline: none;
+}
+
+#ms-config-view .cfg-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  border-radius: 7px;
+  font-size: 13px;
+  color: var(--accent);
+  font-weight: 500;
+}
+
+#ms-config-view .cfg-back:hover {
+  background: var(--accent-soft-bg);
+  border-color: var(--accent-soft-border);
+}
+
+#ms-config-view .cfg-hub-link {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--brand);
+  text-decoration: none;
+}
+
+#ms-config-view .cfg-hub-link:hover {
+  text-decoration: underline;
+}
+
+/* ---- 订阅总览（条块管理） ---- */
+/* 面板整体撑满内容区：卡片列表随窗口高度自适应拉伸，
+   列表自身滚动，顶部工具条与底部提示固定。 */
+#ms-config-view .page.subscribes {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+#ms-config-view .page.subscribes .cfg-card {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 0;
+}
+
+#ms-config-view .page.subscribes .cfg-card-head {
+  flex-shrink: 0;
+}
+
+/* 顶部工具条：条块/源码视图切换 + 添加订阅 */
+#ms-config-view .sub-toolbar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+#ms-config-view .sub-toolbar .sub-count {
+  font-size: 12px;
+  color: var(--muted);
+  margin-right: auto;
+}
+
+/* 重置为默认订阅图标按钮 */
+#ms-config-view .sub-toolbar .sub-reset {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+#ms-config-view .sub-toolbar .sub-reset:hover {
+  color: var(--text);
+  border-color: var(--accent-soft-border);
+  background: var(--accent-soft-bg);
+}
+#ms-config-view .sub-toolbar .sub-reset:active {
+  opacity: 0.7;
+}
+
+#ms-config-view .sub-toolbar .sub-view-toggle {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  overflow: hidden;
+}
+
+#ms-config-view .sub-toolbar .sub-view-toggle button {
+  border: none;
+  background: var(--card);
+  color: var(--muted);
+  font-size: 12px;
+  padding: 6px 12px;
+}
+
+#ms-config-view .sub-toolbar .sub-view-toggle button.on {
+  background: var(--accent-soft-bg);
+  color: var(--brand);
+  font-weight: 500;
+}
+
+/* 订阅条块列表 */
+#ms-config-view .sub-list {
+  flex: 1 1 auto;
+  min-height: 140px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-right: 2px;
+}
+
+/* 单个订阅条块 */
+#ms-config-view .sub-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid var(--line);
+  background: var(--field);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+/* 拖拽手柄（条块左侧的握把图标） */
+#ms-config-view .sub-item .sub-drag {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 26px;
   border: none;
   background: transparent;
-  border-radius: 6px;
-  font-size: 15px;
-  color: #5f6368;
-  cursor: pointer;
+  color: var(--muted);
+  cursor: grab;
+  opacity: 0.55;
+  padding: 0;
 }
 
-.panel-header .icon-btn:hover {
-  background: #f1f3f4;
+#ms-config-view .sub-item .sub-drag:hover {
+  opacity: 1;
+  color: var(--text);
 }
 
-.panel-body {
+/* 拖拽中的条块与放置目标提示 */
+#ms-config-view .sub-item.dragging {
+  opacity: 0.45;
+  border-style: dashed;
+}
+
+#ms-config-view .sub-item.drag-over {
+  border-color: var(--brand);
+  box-shadow: 0 0 0 1px var(--brand) inset;
+}
+
+#ms-config-view .sub-item:hover {
+  border-color: var(--hover-border);
+  background: var(--card);
+}
+
+#ms-config-view .sub-item .sub-icon {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: var(--accent-soft-bg);
+  color: var(--brand);
+}
+
+#ms-config-view .sub-item .sub-icon svg {
+  display: block;
+}
+
+#ms-config-view .sub-item .sub-main {
   flex: 1;
-  overflow-y: auto;
-  padding: 10px 16px;
-  user-select: text;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
-.subscribe-item-row {
+#ms-config-view .sub-item .sub-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#ms-config-view .sub-item .sub-url {
+  font-size: 12px;
+  color: var(--muted);
+  font-family: Consolas, Menlo, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#ms-config-view .sub-item .sub-describe {
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#ms-config-view .sub-item .sub-ops {
+  flex-shrink: 0;
+  display: flex;
+  gap: 6px;
+}
+
+/* 行内编辑态：名称/描述/地址三个输入框竖排 */
+#ms-config-view .sub-item.editing .sub-main {
+  gap: 6px;
+}
+
+#ms-config-view .sub-item .sub-main input {
+  box-sizing: border-box;
+  width: 100%;
+  border: 1px solid var(--line);
+  background: var(--card);
+  border-radius: 6px;
+  padding: 5px 9px;
+  font-size: 12px;
+  color: var(--text);
+  outline: none;
+}
+
+#ms-config-view .sub-item .sub-main input:focus {
+  border-color: var(--brand);
+}
+
+#ms-config-view .sub-item .sub-main input.sub-edit-url {
+  font-family: Consolas, Menlo, monospace;
+  color: var(--muted);
+}
+
+#ms-config-view .sub-item .sub-op {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--muted);
+}
+
+#ms-config-view .sub-item .sub-op:hover {
+  border-color: var(--accent-soft-border);
+  background: var(--accent-soft-bg);
+  color: var(--brand);
+}
+
+#ms-config-view .sub-item .sub-op.danger:hover {
+  border-color: #f0b4b4;
+  background: #fdeeee;
+  color: #d24a4a;
+}
+
+@media (prefers-color-scheme: dark) {
+  #ms-config-view .sub-item .sub-op.danger:hover {
+    border-color: #5c3a3a;
+    background: #3a2b2b;
+    color: #ff7b7b;
+  }
+}
+
+/* 添加订阅：折叠的输入行 */
+#ms-config-view .sub-add {
+  flex-shrink: 0;
+  margin-top: 10px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: transparent;
+}
+
+#ms-config-view .sub-add.open {
+  border-style: solid;
+  background: var(--field);
+}
+
+#ms-config-view .sub-add input {
+  box-sizing: border-box;
+  width: 100%;
+  border: 1px solid var(--line);
+  background: var(--card);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text);
+  outline: none;
+}
+
+#ms-config-view .sub-add input:focus {
+  border-color: var(--brand);
+}
+
+#ms-config-view .sub-add input.sub-add-url {
+  font-family: Consolas, Menlo, monospace;
+}
+
+#ms-config-view .sub-add-row {
+  display: flex;
+  gap: 8px;
+}
+
+#ms-config-view .sub-add-row input {
+  flex: 1;
+}
+
+#ms-config-view .sub-add-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+#ms-config-view .sub-add-toggle {
+  width: 100%;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 9px 0;
+}
+
+#ms-config-view .sub-add-toggle:hover {
+  border-color: var(--accent-soft-border);
+  color: var(--brand);
+  background: var(--accent-soft-bg);
+}
+
+/* 空态 */
+#ms-config-view .sub-empty {
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  padding: 24px 12px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* 源码视图（高级）：保留原始文本域 */
+#ms-config-view #all_subscribe {
+  flex: 1 1 auto;
+  width: 100%;
+  height: auto;
+  min-height: 140px;
+  box-sizing: border-box;
+  border: 1px solid var(--line);
+  background: var(--field);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-family: Consolas, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text);
+  /* 高度由布局撑满，手动拖拽会把高度写死、破坏自适应 */
+  resize: none;
+  outline: none;
+  display: none;
+}
+
+#ms-config-view .page.subscribes.src-mode #all_subscribe {
+  display: block;
+}
+
+#ms-config-view .page.subscribes.src-mode .sub-list,
+#ms-config-view .page.subscribes.src-mode .sub-add-wrap,
+#ms-config-view .page.subscribes.src-mode .sub-empty {
+  display: none;
+}
+
+#ms-config-view #all_subscribe:focus {
+  border-color: var(--brand);
+  background: var(--card);
+}
+
+/* ---- 关注标签（chip，双列网格） ---- */
+#ms-config-view .tagsCheckBoxDiv {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+#ms-config-view .tag-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 12.5px;
+  background: var(--chip);
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.12s ease;
+}
+
+#ms-config-view .tag-chip .tag-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#ms-config-view .tag-chip .tag-count {
+  font-size: 11px;
+  color: var(--chip-count);
+}
+
+#ms-config-view .tag-chip:hover {
+  border-color: var(--hover-border);
+}
+
+#ms-config-view .tag-chip:has(input:checked),
+#ms-config-view .tag-chip.on {
+  background: var(--chip-on-bg);
+  border-color: var(--chip-on-border);
+  color: var(--chip-on-text);
+}
+
+#ms-config-view .tag-chip:has(input:checked) .tag-count,
+#ms-config-view .tag-chip.on .tag-count {
+  color: var(--chip-on-count);
+}
+
+#ms-config-view .tag-chip input {
+  margin: 0;
+  accent-color: var(--chip-on-border);
+}
+
+#ms-config-view .tags-empty {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+/* ---- 公共仓库按钮 ---- */
+#ms-config-view .cfg-btn-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+#ms-config-view .cfg-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  border-radius: 7px;
+  font-size: 13px;
+  padding: 7px 14px;
+  color: var(--text);
+  transition: all 0.12s ease;
+}
+
+#ms-config-view .cfg-btn:hover {
+  border-color: var(--hover-border);
+  background: var(--hover-bg);
+}
+
+#ms-config-view .cfg-btn.ghost {
+  color: var(--muted);
+}
+
+#ms-config-view .cfg-btn.primary {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #fff;
+}
+
+#ms-config-view .cfg-btn.primary:hover {
+  background: var(--brand-hover);
+}
+
+/* 卡片底部说明文字（仓库 / 缓存面板共用） */
+#ms-config-view .cfg-note {
+  margin-top: 12px;
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--muted);
+}
+
+/* ---- 快捷键设置 ---- */
+#ms-config-view .shortcut-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 8px;
-  border-bottom: 1px solid #f1f3f4;
-  gap: 10px;
+  gap: 16px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--divider-soft);
 }
 
-.subscribe-item-row:last-child {
+#ms-config-view .shortcut-row:last-of-type {
   border-bottom: none;
 }
 
-.sub-info {
+#ms-config-view .shortcut-info {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+#ms-config-view .shortcut-label {
+  font-size: 13.5px;
+  font-weight: 500;
+}
+
+#ms-config-view .shortcut-desc {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+#ms-config-view .shortcut-value {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 当前快捷键的键帽展示（kbd 胶囊） */
+#ms-config-view .shortcut-caps {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 20px;
+}
+
+#ms-config-view .kbd {
+  display: inline-block;
+  padding: 2px 8px;
+  border: 1px solid var(--hover-border);
+  border-bottom-width: 2px;
+  border-radius: 6px;
+  background: var(--chip);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
+}
+
+#ms-config-view .kbd-plus {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* 快捷键录入按钮：外观做成「值展示 + 可点击」的输入框样式 */
+#ms-config-view .shortcut-capture {
+  min-width: 168px;
+  padding: 7px 12px;
+  border: 1px dashed var(--hover-border);
+  border-radius: 7px;
+  background: var(--field);
+  color: var(--muted);
+  font-size: 12.5px;
+  text-align: center;
+  transition: border-color 0.12s ease, color 0.12s ease, background 0.12s ease;
+}
+
+#ms-config-view .shortcut-capture:hover {
+  border-color: var(--accent-soft-border);
+  color: var(--accent);
+  background: var(--accent-soft-bg);
+}
+
+/* 录入态：实线 + 呼吸光标提示 */
+#ms-config-view .shortcut-capture.capturing {
+  border-style: solid;
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft-bg);
+  animation: shortcut-capture-blink 1.2s ease-in-out infinite;
+}
+
+@keyframes shortcut-capture-blink {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0); }
+  50% { box-shadow: 0 0 0 3px var(--accent-soft-border); }
+}
+
+/* 录入非法组合（无修饰键 / 不支持的按键） */
+#ms-config-view .shortcut-capture.invalid {
+  border-style: solid;
+  border-color: var(--err);
+  color: var(--err);
+  background: transparent;
+  animation: none;
+}
+
+/* ---- 数据缓存 ---- */
+#ms-config-view .cache-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  background: var(--field);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin-bottom: 12px;
+}
+
+#ms-config-view .cache-summary-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+#ms-config-view .cache-summary-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+#ms-config-view .cache-summary-value {
+  font-size: 20px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+#ms-config-view .cache-list {
+  display: flex;
+  flex-direction: column;
+}
+
+#ms-config-view .cache-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 2px;
+  border-bottom: 1px solid var(--divider-soft);
+}
+
+#ms-config-view .cache-item:last-child {
+  border-bottom: none;
+}
+
+#ms-config-view .cache-item-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+#ms-config-view .cache-item-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13.5px;
+  font-weight: 500;
+}
+
+#ms-config-view .cache-badge {
+  font-size: 11px;
+  line-height: 17px;
+  height: 17px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--accent-soft-bg);
+  color: var(--accent);
+}
+
+#ms-config-view .cache-item-desc {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+#ms-config-view .cache-item-meta {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+#ms-config-view .cache-size {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+#ms-config-view .cache-count {
+  font-size: 11.5px;
+  color: var(--muted);
+  /* 剩余时间每秒刷新，等宽数字避免右侧文字抖动 */
+  font-variant-numeric: tabular-nums;
+}
+
+/* 已过期 / 无有效期：弱化处理，与「剩余 xx」区分 */
+#ms-config-view .cache-item.expired .cache-count {
+  color: var(--err);
+  opacity: 0.85;
+}
+
+#ms-config-view .cache-item.empty .cache-size {
+  color: var(--muted);
+}
+
+#ms-config-view .badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  font-size: 11px;
+  background: var(--accent-soft-bg);
+  color: var(--accent);
+}
+
+/* ---- 页面层底栏（保存并应用）---- */
+/* 底栏固定在窗口底部、横跨整个窗口（含左菜单），按钮靠右（与内容区右内边距齐平）；
+   只服务于订阅管理 / 关注标签两个页面，其余页面无底栏（JS 切换 .show）。 */
+#ms-config-view .cfg-footer {
+  display: none;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: flex-end;
+  height: 52px;
+  /* 与 .cfg-body 的左右内边距（18px）保持一致，按钮与内容卡片右边缘对齐 */
+  padding: 0 18px;
+  background: var(--card);
+  border-top: 1px solid var(--line);
+}
+
+#ms-config-view .cfg-footer.show {
+  display: flex;
+}
+
+#ms-config-view .btn-save {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: var(--brand);
+  color: #fff;
+  box-shadow: var(--btn-shadow);
+  transition: background 0.12s ease, transform 0.08s ease;
+}
+
+#ms-config-view .btn-save:hover {
+  background: var(--brand-hover);
+}
+
+#ms-config-view .btn-save:active {
+  transform: scale(0.94);
+}
+
+#ms-config-view .btn-save:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+#ms-config-view .btn-save svg {
+  display: block;
+  pointer-events: none;
+}
+
+/* ---- 浮动提示（无底部栏，不占地）---- */
+#ms-config-view .cfg-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 20px;
+  transform: translate(-50%, 8px);
+  max-width: 82%;
+  padding: 9px 16px;
+  border-radius: 999px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  box-shadow: var(--dialog-shadow);
+  font-size: 12.5px;
+  color: var(--text);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease, transform 0.18s ease;
+  z-index: 20;
+}
+
+#ms-config-view .cfg-toast.show {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+#ms-config-view .cfg-toast.ok {
+  color: var(--ok);
+}
+
+#ms-config-view .cfg-toast.error {
+  color: var(--err);
+}
+
+/* ---- 订阅市场 ---- */
+/* 面板纵排：卡片（logo + 搜索框 + 分段控件）自然高度，结果列表吃下剩余高度。
+   这里必须用 height 而不是 min-height：min-height: 100% 允许页面被列表内容撑高，
+   一旦页面变高，flex: 1 就再无可分配空间，列表会直接长到上千像素把页面撑爆、
+   内部滚动永远不生效。锁定为内容区高度后，「剩余空间」才是确定的。
+   窗口太矮时列表收敛到 300px 下限并溢出页面，按惯例交给 .cfg-body 滚动。 */
+#ms-config-view .page.tis-hub {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+#ms-config-view .page.tis-hub > .cfg-card {
+  flex-shrink: 0;
+}
+
+#ms-config-view .hub-search {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+#ms-config-view .hub-logo {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+
+#ms-config-view .tis-hub .keyword {
+  display: flex;
   flex: 1;
   min-width: 0;
 }
 
-.sub-title {
-  font-size: 14px;
-  color: #202124;
-  font-weight: 500;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.sub-url {
-  font-size: 11px;
-  color: #9aa0a6;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.sub-actions {
-  display: flex;
-  gap: 6px;
-  flex-shrink: 0;
-}
-
-.sub-actions button {
-  border: 1px solid #dadce0;
-  background: #fff;
-  border-radius: 4px;
-  font-size: 12px;
-  padding: 3px 10px;
-  cursor: pointer;
-  color: #5f6368;
-}
-
-.sub-actions button:hover {
-  background: #f1f3f4;
-}
-
-.sub-actions button.remove {
-  color: #d93025;
-  border-color: #f4c7c3;
-}
-
-.sub-actions button.remove:hover {
-  background: #fce8e6;
-}
-
-.panel-footer {
-  display: flex;
-  gap: 8px;
-  padding: 12px 16px;
-  border-top: 1px solid #eee;
-  background: #fafafa;
-}
-
-.panel-footer input {
+#ms-config-view .tis-hub .keyword input {
   flex: 1;
-  border: 1px solid #dadce0;
-  border-radius: 4px;
-  padding: 7px 10px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-right: none;
+  border-radius: 7px 0 0 7px;
+  padding: 0 12px;
+  line-height: 34px;
+  height: 34px;
   font-size: 13px;
   outline: none;
+  background: var(--card);
+  color: var(--text);
 }
 
-.panel-footer input:focus {
-  border-color: #4285f4;
+#ms-config-view .tis-hub .keyword input:focus {
+  border-color: var(--brand);
 }
 
-.panel-footer button {
-  border: none;
-  background: #4285f4;
+#ms-config-view .tis-hub .keyword button {
+  padding: 0 16px;
+  border: 1px solid var(--brand);
+  border-radius: 0 7px 7px 0;
+  background: var(--brand);
   color: #fff;
-  border-radius: 4px;
-  padding: 7px 14px;
   font-size: 13px;
+  line-height: 32px;
+  height: 34px;
+}
+
+#ms-config-view .tis-hub .keyword button:hover {
+  background: var(--brand-hover);
+}
+
+#ms-config-view .search-type.segmented {
+  display: inline-flex;
+  margin-top: 12px;
+  padding: 3px;
+  background: var(--seg-bg);
+  border-radius: 8px;
+}
+
+#ms-config-view .search-type.segmented label {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 18px;
+  font-size: 13px;
+  color: var(--muted);
+  border-radius: 6px;
   cursor: pointer;
+  user-select: none;
 }
 
-.panel-footer button:hover {
-  background: #3367d6;
+#ms-config-view .search-type.segmented label:has(input:checked),
+#ms-config-view .search-type.segmented label.on {
+  background: var(--card);
+  color: var(--text);
+  font-weight: 500;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
 }
 
-.panel-footer button.btn-close {
-  background: #f1f3f4;
-  color: #5f6368;
+#ms-config-view .search-type.segmented input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
 }
 
-.panel-footer button.btn-close:hover {
-  background: #e8eaed;
+#ms-config-view .tis-hub .result-list {
+  /* 结果列表撑满卡片（搜索区）以外的剩余高度：窗口拉高/拉低时列表跟着变高，
+     条目多时在列表内部滚动，而不是整页一起滚、底部留一大片空白。
+     min-height 既是「窗口很矮时」的下限，也顺带把 flex 项默认的
+     min-height: auto（拒绝收缩到内容高度以下）换成具体值。 */
+  flex: 1 1 auto;
+  min-height: 300px;
+  overflow-y: auto;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 6px 14px;
 }
 
-/* ========== 配置窗口（独立窗口） ========== */
-.config-window {
-  width: 100%;
-  height: 100%;
+#ms-config-view .tis-hub .result-list .loading {
+  color: var(--muted);
+  font-size: 13px;
+  padding: 40px 0;
+  text-align: center;
+}
+
+#ms-config-view .tis-hub .hub-tis {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 2px;
+  border-bottom: 1px solid var(--divider-soft);
+}
+
+#ms-config-view .tis-hub .hub-tis:last-child {
+  border-bottom: none;
+}
+
+#ms-config-view .tis-hub .hub-tis .tis-info {
   display: flex;
   flex-direction: column;
-  background: #fff;
-  border: 2px solid #cecece;
-  box-sizing: border-box;
+  min-width: 0;
 }
 
-.config-window .panel-header,
-.config-window .panel-body,
-.config-window .panel-footer {
-  border-radius: 0;
+#ms-config-view .tis-hub .hub-tis .title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent);
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-/* ========== 无结果提示弹框（问题②） ========== */
-#matchItems .no-result-toast {
-  display: flex;
+#ms-config-view .tis-hub .hub-tis .title:hover {
+  text-decoration: underline;
+}
+
+#ms-config-view .tis-hub .hub-tis .describe {
+  display: block;
+  font-size: 12px;
+  margin-top: 4px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+#ms-config-view .tis-hub .hub-tis .tis-button {
+  flex-shrink: 0;
+  font-size: 12.5px;
+  line-height: 28px;
+  height: 28px;
+  padding: 0 16px;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--accent);
+}
+
+#ms-config-view .tis-hub .hub-tis .tis-button:hover {
+  background: var(--accent-soft-bg);
+  border-color: var(--accent-soft-border);
+}
+
+/* ---- Token 输入弹层 ---- */
+#ms-config-view .token-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(17, 20, 26, 0.45);
+  display: none;
   align-items: center;
   justify-content: center;
+  z-index: 10;
+  backdrop-filter: blur(2px);
+}
+
+#ms-config-view .token-overlay.show {
+  display: flex;
+}
+
+#ms-config-view .token-dialog {
+  width: 400px;
+  max-width: 90vw;
+  background: var(--card);
+  border-radius: 12px;
+  padding: 20px 22px;
+  box-sizing: border-box;
+  box-shadow: var(--dialog-shadow);
+}
+
+#ms-config-view .token-dialog h3 {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+#ms-config-view .token-dialog p {
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.6;
+  margin: 0 0 12px;
+}
+
+#ms-config-view .token-dialog input {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 9px 12px;
+  font-size: 13px;
+  outline: none;
+  background: var(--field);
+  color: var(--text);
+}
+
+#ms-config-view .token-dialog input:focus {
+  border-color: var(--brand);
+}
+
+#ms-config-view .token-actions {
+  margin-top: 16px;
+  display: flex;
+  justify-content: flex-end;
   gap: 8px;
-  padding: 18px 12px;
-  color: #5f6368;
-  font-size: 14px;
-  background: #f8f9fa;
-  border-radius: 6px;
-  margin: 8px 15px;
-  border: 1px solid #e8eaed;
-  list-style: none;
-  height: auto;
-  line-height: 1.5;
-  cursor: default;
-}
-
-.no-result-toast .no-result-icon {
-  font-size: 16px;
-}
-
-.no-result-toast .no-result-text {
-  color: #5f6368;
 }
 
 /* ========== vassal 关联内容（问题⑤） ========== */
