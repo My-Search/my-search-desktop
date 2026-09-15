@@ -8,7 +8,7 @@
  *  1. 随加载推进而更新（条数单调不减）；
  *  2. 在加载完成后自然停止上报（不会永远停留在「加载中」）。
  */
-import { SearchEngine } from "../src/lib/search-engine.js";
+import { SearchEngine } from "../src/lib/search-engine.ts";
 
 const store = new Map();
 globalThis.localStorage = {

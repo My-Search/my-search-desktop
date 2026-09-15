@@ -17,7 +17,7 @@
  */
 
 import { pinyin } from "pinyin-pro";
-import { httpGet } from "./tauri-bridge.js";
+import { httpGet } from "./tauri-bridge.ts";
 import {
   getConfigFromDataSource,
   getFetchFunByName,
@@ -26,10 +26,15 @@ import {
   defaultTagHandle,
   parseScriptItem,
   escapeText,
-} from "./subscribe-parser.js";
-import { parseTags, extractTagsAndCleanContent } from "./tags.js";
-import { overlapMatchingDegreeForObjectArray } from "./overlap.js";
-import { storageGet, storageSet, storageRemove, isUrl } from "./util.js";
+} from "./subscribe-parser.ts";
+import type { DesignatedSingTag } from "./subscribe-parser.ts";
+import { parseTags, extractTagsAndCleanContent } from "./tags.ts";
+import { overlapMatchingDegreeForObjectArray } from "./overlap.ts";
+import { storageGet, storageSet, storageRemove, isUrl } from "./util.ts";
+import type { SearchItem, SearchResult, SubscribeItem, TagStat } from "../types/index.ts";
+
+/** 搜索结果包装（对外导出，便于视图层引用） */
+export type { SearchItem, SearchResult } from "../types/index.ts";
 
 /** 检索层级：0=标题命中 1=描述命中 2=内容命中 */
 export const LEVEL_TITLE = 0;
@@ -51,8 +56,20 @@ export const EFFECTIVE_DURATION = 1000 * 60 * 60 * 12;
 /** 订阅列表指纹（用于判断订阅是否变化，变化则立即失效缓存） */
 const SUBSCRIBE_FINGERPRINT_KEY = "SUBSCRIBE_FINGERPRINT_CACHE_KEY";
 
+/** 数据缓存包结构 */
+export interface SearchDataCache {
+  data: SearchItem[];
+  expire: number;
+}
+
+/** 新数据记录 */
+interface NewItemRecord {
+  id: string;
+  expires: number;
+}
+
 /** 订阅列表指纹：按内容计算，订阅增删改都会变化（顺序无关） */
-export function subscribeFingerprint(subscribes) {
+export function subscribeFingerprint(subscribes: SubscribeItem[] | null | undefined): string {
   return (subscribes || [])
     .map((s) => `${s.url ?? ""}|${s.title ?? ""}|${s.fetchFun ?? ""}|${s.defaultTag ?? ""}`)
     .sort()
@@ -64,7 +81,7 @@ export const SPECIAL_KEYWORD = {
   new: "<new>",
   history: "<history>",
   highFrequency: "<highFrequency>",
-};
+} as const;
 
 /** 子搜索分隔符（还原 subSearch.searchBoundary） */
 export const SEARCH_BOUNDARY = " : ";
@@ -73,23 +90,23 @@ export const SEARCH_BOUNDARY = " : ";
 export const SEARCH_PRO_TAG = "[可搜索]";
 
 /** 数据项唯一 id（还原 registry.searchData.idFun） */
-export function itemId(item) {
+export function itemId(item: SearchItem | null | undefined): string | null {
   if (item == null || !(item instanceof Object && item.title != null)) return null;
   return item.title.replace(/\[.*\]/, "").trim() + ("" + item.desc).trim();
 }
 
 /** links 搜索字符串（还原 links.stringifyForSearch） */
-export function linksToString(links) {
+export function linksToString(links: unknown): string {
   if (!Array.isArray(links)) return "";
-  return links.map((l) => `${l.text ?? ""}${l.title ?? ""}${l.url ?? ""}`).join("\n");
+  return links.map((l) => `${l?.text ?? ""}${l?.title ?? ""}${l?.url ?? ""}`).join("\n");
 }
 
 /** 文本转拼音（无空格、大写） */
-export function textToPinyin(text) {
+export function textToPinyin(text: string | null | undefined): string {
   if (text == null) return "";
   const safe = String(text).replaceAll(SPACE_CHAR, SPACE);
   try {
-    const arr = pinyin(safe, { toneType: "none", type: "array" });
+    const arr = pinyin(safe, { toneType: "none", type: "array" }) as string[];
     return arr.join("").replaceAll(SPACE, SPACE_CHAR).toUpperCase();
   } catch (e) {
     return "";
@@ -115,19 +132,19 @@ const NEW_ITEMS_TAG = "[新]";
 const DAY_MS = 1000 * 60 * 60 * 24;
 
 /** 给被点击项加分（还原 DataWeightScorer.select） */
-export function scoreSelect(item) {
+export function scoreSelect(item: SearchItem | null | undefined): void {
   if (item == null) return;
   const key = itemId(item);
   if (key == null) return;
-  const data = storageGet(WEIGHT_KEY, {}) || {};
+  const data = storageGet<Record<string, number>>(WEIGHT_KEY, {}) || {};
   data[key] = (data[key] ?? 0) + 1;
   storageSet(WEIGHT_KEY, data);
 }
 
 /** 稳定排序：先按层内权重降序，保持同权重原顺序 */
-function sortByWeight(items) {
+function sortByWeight(items: SearchItem[]): SearchItem[] {
   // 一次读取权重表，避免每条数据都读一遍 localStorage
-  const data = storageGet(WEIGHT_KEY, {}) || {};
+  const data = storageGet<Record<string, number>>(WEIGHT_KEY, {}) || {};
   return items
     .map((item, i) => {
       const key = itemId(item);
@@ -138,12 +155,12 @@ function sortByWeight(items) {
 }
 
 /** 记录选择历史（还原 SelectHistoryRecorder.select） */
-export function historySelect(item) {
+export function historySelect(item: SearchItem | null | undefined): void {
   if (item == null || itemId(item) == null) return;
   const key = itemId(item);
-  let history = storageGet(HISTORY_KEY, []) || [];
+  let history = storageGet<SearchItem[]>(HISTORY_KEY, []) || [];
   history = history.filter((_item) => itemId(_item) !== key);
-  const copy = { ...item };
+  const copy: SearchItem = { ...item };
   delete copy.index;
   delete copy._titleUpper;
   delete copy._descUpper;
@@ -156,24 +173,27 @@ export function historySelect(item) {
   storageSet(HISTORY_KEY, history.slice(0, 60));
 }
 
-export function historyList(count) {
-  const history = storageGet(HISTORY_KEY, []) || [];
+/** 历史记录列表 */
+export function historyList(count?: number): SearchItem[] {
+  const history = storageGet<SearchItem[]>(HISTORY_KEY, []) || [];
   return count == null ? history : history.slice(0, count);
 }
 
 /** 高频项（还原 DataWeightScorer.highFrequency） */
-export function highFrequencyList(allItems, count) {
-  const data = storageGet(WEIGHT_KEY, {}) || {};
+export function highFrequencyList(allItems: SearchItem[], count?: number): SearchItem[] {
+  const data = storageGet<Record<string, number>>(WEIGHT_KEY, {}) || {};
   const keys = Object.keys(data).sort((a, b) => data[b] - data[a]);
   const picked = count != null ? keys.slice(0, count) : keys;
-  const map = new Map();
+  const map = new Map<string | null, SearchItem>();
   for (const item of allItems) map.set(itemId(item), item);
-  return picked.map((k) => map.get(k)).filter(Boolean);
+  return picked
+    .map((k) => map.get(k))
+    .filter((x): x is SearchItem => Boolean(x));
 }
 
 /** 读取「新数据」记录 [{id, expires}] */
-export function newItemsRecord() {
-  return storageGet(NEW_ITEMS_KEY, []) || [];
+export function newItemsRecord(): NewItemRecord[] {
+  return storageGet<NewItemRecord[]>(NEW_ITEMS_KEY, []) || [];
 }
 
 /**
@@ -187,10 +207,10 @@ export function newItemsRecord() {
  *    原版遍历旧记录时用 `item.expires > currentTime` 过滤，到期即消失；
  *    否则 [新] 标签会永久累积。
  */
-function recordNewItems(allItems) {
-  const oldIdsRaw = storageGet(OLD_DATA_KEY, null);
+function recordNewItems(allItems: SearchItem[]): void {
+  const oldIdsRaw = storageGet<string[] | null>(OLD_DATA_KEY, null);
   // 收集本次加载的全部 id（后续无论哪条分支都要更新，作为下次比较的基线）
-  const currentIds = [];
+  const currentIds: string[] = [];
   for (const item of allItems) {
     const id = itemId(item);
     if (id != null) currentIds.push(id);
@@ -207,10 +227,10 @@ function recordNewItems(allItems) {
   const now = Date.now();
   const currentSet = new Set(currentIds);
   // 旧记录：丢弃已过期、以及数据里已不存在的条目
-  const existing = new Map(
-    (storageGet(NEW_ITEMS_KEY, []) || [])
+  const existing = new Map<string, NewItemRecord>(
+    (storageGet<NewItemRecord[]>(NEW_ITEMS_KEY, []) || [])
       .filter((r) => r != null && Number(r.expires) > now && currentSet.has(r.id))
-      .map((r) => [r.id, r])
+      .map((r) => [r.id, r] as [string, NewItemRecord])
   );
   for (const id of currentIds) {
     if (!oldIds.has(id) && !existing.has(id)) {
@@ -220,15 +240,16 @@ function recordNewItems(allItems) {
   storageSet(NEW_ITEMS_KEY, [...existing.values()]);
   storageSet(OLD_DATA_KEY, currentIds);
 }
+
 /**
  * 构建「新数据」结果（还原 <new> 搜索处理器）
  * 为标题加上 [新] 与“N 天前”，首条标记为 [最新一条]。
  */
-export function buildNewItemsResult(allItems) {
+export function buildNewItemsResult(allItems: SearchItem[]): SearchResult[] {
   const records = newItemsRecord();
   if (records.length === 0) return [];
   const now = Date.now();
-  const byId = new Map();
+  const byId = new Map<string | null, SearchItem>();
   for (const item of allItems) {
     const id = itemId(item);
     if (id != null && !byId.has(id)) byId.set(id, item);
@@ -237,10 +258,10 @@ export function buildNewItemsResult(allItems) {
     // 过期记录不再展示（与 recordNewItems 的清理规则一致）
     .filter((r) => Number(r.expires) > now)
     .map((r) => ({ item: byId.get(r.id), expires: r.expires }))
-    .filter((x) => x.item)
+    .filter((x): x is { item: SearchItem; expires: number } => Boolean(x.item))
     .sort((a, b) => b.expires - a.expires);
   if (matched.length === 0) return [];
-  const results = matched.map(({ item, expires }) => {
+  const results: SearchResult[] = matched.map(({ item, expires }) => {
     const daysAgo = Math.floor((now - (expires - NEW_DATA_EXPIRE_DAY_NUM * DAY_MS)) / DAY_MS);
     const cleanTitle = String(item.title || "").split(NEW_ITEMS_TAG).join("");
     // 不修改原数据，克隆一份用于展示
@@ -249,54 +270,76 @@ export function buildNewItemsResult(allItems) {
       level: LEVEL_TITLE,
     };
   });
-  results[0].item.title = results[0].item.title
+  results[0].item.title = (results[0].item.title as string)
     .split(NEW_ITEMS_TAG)
     .join("[最新一条]");
   return results;
 }
 
+/** 加载队列任务 */
+interface LoadJob {
+  url: string;
+  /** meta.fetchFun 缺省（undefined）= 配置文件；空串 = 显式跳过；其余 = 内容文件 */
+  meta: Record<string, string | undefined>;
+  depth: number;
+}
+
 // ========== 搜索引擎 ==========
 export class SearchEngine {
+  /** 全部数据项 */
+  searchData: SearchItem[];
+  /** 订阅列表 */
+  subscribes: SubscribeItem[];
+  /** 数据源中自定义的 fetchFun */
+  globalFetchFun: Array<{ name: string; fetchFun: string }>;
+  /** 已处理过的 URL（防止重复/循环） */
+  processHistory: Set<string>;
+  /** 配置文件解析出、等待入队的子订阅任务（见 _runQueue） */
+  _pendingChildJobs: LoadJob[];
+  /** 上一次进度通知的时间戳（进度节流用） */
+  _lastProgressNotifyAt: number;
+  /** 文本→拼音 会话缓存 */
+  textPinyinMap: Record<string, string>;
+  /** 标签统计 */
+  tagsMap: Record<string, TagStat>;
+  /** PRO 特殊路由 `^\s*$` → "问AI" 的待转发关键词（见 search / _proSearch） */
+  _pendingRedirectKeyword: string | null;
+  /**
+   * PRO 特殊路由转发回调（还原 searchableSpecialRouting["^\\s*$"] 的
+   * triggerSearchHandle("问AI"+searchBoundary)）：主流程把输入框改写为
+   * "问AI : " 并重新触发搜索
+   */
+  onRedirect: ((keyword: string) => void) | null;
+  /** 加载状态 */
+  loading: boolean;
+  loadedCount: number;
+  failedUrls: string[];
+  /**
+   * 数据块进度回调（还原油猴版 refreshNewData 中的 searchPlaceholder("UPDATE")）：
+   * 每解析完一个内容源都会调用一次，参数为当前已挂载的数据条数。
+   * 视图据此实时显示「🔁 数据库更新到 N条」，即原版的加载进度。
+   */
+  onProgress: ((count: number) => void) | null;
+
   constructor() {
-    /** 全部数据项 */
     this.searchData = [];
-    /** 订阅列表 */
     this.subscribes = [];
-    /** 数据源中自定义的 fetchFun */
     this.globalFetchFun = [];
-    /** 已处理过的 URL（防止重复/循环） */
     this.processHistory = new Set();
-    /** 配置文件解析出、等待入队的子订阅任务（见 _runQueue） */
     this._pendingChildJobs = [];
-    /** 上一次进度通知的时间戳（进度节流用） */
     this._lastProgressNotifyAt = 0;
-    /** 文本→拼音 会话缓存 */
     this.textPinyinMap = {};
-    /** 标签统计 */
     this.tagsMap = {};
-    /** PRO 特殊路由 `^\s*$` → "问AI" 的待转发关键词（见 search / _proSearch） */
     this._pendingRedirectKeyword = null;
-    /**
-     * PRO 特殊路由转发回调（还原 searchableSpecialRouting["^\\s*$"] 的
-     * triggerSearchHandle("问AI"+searchBoundary)）：主流程把输入框改写为
-     * "问AI : " 并重新触发搜索
-     */
     this.onRedirect = null;
-    /** 加载状态 */
     this.loading = false;
     this.loadedCount = 0;
     this.failedUrls = [];
-    /**
-     * 数据块进度回调（还原油猴版 refreshNewData 中的 searchPlaceholder("UPDATE")）：
-     * 每解析完一个内容源都会调用一次，参数为当前已挂载的数据条数。
-     * 视图据此实时显示「🔁 数据库更新到 N条」，即原版的加载进度。
-     * @type {((count:number)=>void)|null}
-     */
     this.onProgress = null;
   }
 
   /** 文本转拼音（带缓存，还原 String.toPinyin） */
-  toPinyin(text, onlyFromCache = false) {
+  toPinyin(text: string | null | undefined, onlyFromCache = false): string | null {
     if (text == null) return onlyFromCache ? null : "";
     if (this.textPinyinMap[text] != null) return this.textPinyinMap[text];
     if (onlyFromCache) return null;
@@ -308,26 +351,25 @@ export class SearchEngine {
   // ---------- 缓存（还原 dataInitFun / cacheSearchData） ----------
   /**
    * 读取本地缓存（还原 registry.searchData.SEARCH_DATA_KEY）
-   * @returns {{data:Array, expire:number}|null}
    */
-  _readCache() {
-    const pkg = storageGet(SEARCH_DATA_KEY, null);
+  _readCache(): SearchDataCache | null {
+    const pkg = storageGet<SearchDataCache | null>(SEARCH_DATA_KEY, null);
     if (pkg == null || !Array.isArray(pkg.data)) return null;
     return pkg;
   }
 
   /** 写入本地缓存（相当于原版 cacheSearchData：带过期时间） */
-  _writeCache(data) {
+  _writeCache(data: SearchItem[]): void {
     try {
       // 剥离派生索引字段（index / _titleUpper / _titlePinyin …）：
       // 它们体积大且可由 _buildIndex 重建，不写入缓存以减小占用
       const slim = data.map((item) => {
-        const copy = {};
+        const copy: Record<string, unknown> = {};
         for (const key of Object.keys(item)) {
           if (key === "index" || key.startsWith("_")) continue;
           copy[key] = item[key];
         }
-        return copy;
+        return copy as SearchItem;
       });
       storageSet(SEARCH_DATA_KEY, {
         data: slim,
@@ -340,9 +382,9 @@ export class SearchEngine {
 
   /**
    * 获取当前缓存的过期时间戳，无有效缓存时返回 0。
-   * @returns {number} 过期时间戳（毫秒）或 0
+   * @returns 过期时间戳（毫秒）或 0
    */
-  getCacheExpireMs() {
+  getCacheExpireMs(): number {
     const pkg = this._readCache();
     if (pkg == null || !Array.isArray(pkg.data) || pkg.data.length === 0) return 0;
     const expire = Number(pkg.expire);
@@ -350,7 +392,7 @@ export class SearchEngine {
   }
 
   /** 清除数据缓存（还原 clearCache） */
-  _clearCache() {
+  _clearCache(): void {
     storageRemove(SEARCH_DATA_KEY);
     storageRemove(SUBSCRIBE_FINGERPRINT_KEY);
   }
@@ -359,7 +401,7 @@ export class SearchEngine {
    * 缓存是否可用（还原 dataInitFun 的 isNotExpire 判断 + 订阅指纹比对）
    * 过期 / 数据为空 / 订阅变化 → 不可用，需要重新加载
    */
-  isCacheValid() {
+  isCacheValid(): boolean {
     const pkg = this._readCache();
     if (pkg == null || pkg.data.length === 0) return false;
     if (!(pkg.expire != null && pkg.expire > Date.now())) return false;
@@ -375,7 +417,7 @@ export class SearchEngine {
    * 缓存中不保存 _titleUpper / _titlePinyin 等派生的索引字段（体积大），
    * 挂载时一次性重建，保证「直接用缓存」与「重新加载」的搜索结果完全一致。
    */
-  _mountCache(pkg) {
+  _mountCache(pkg: SearchDataCache): SearchItem[] {
     this.searchData = pkg.data.map((item) => ({ ...item }));
     this.loadedCount = 0;
     this.failedUrls = [];
@@ -400,12 +442,13 @@ export class SearchEngine {
    * 缓存未过期 → 直接用缓存；否则（过期 / 订阅变化 / force）重新加载。
    * 容错：若缓存已过期但重新加载失败（离线/全失败）且旧缓存仍有数据，
    * 则回退到旧缓存，避免把已有数据清空（旧缓存不刷新过期时间，下次再试）。
-   * @param {Array} subscribes
-   * @param {{force?:boolean}} opts
    */
-  async initData(subscribes, { force = false } = {}) {
+  async initData(
+    subscribes: SubscribeItem[] | null | undefined,
+    { force = false }: { force?: boolean } = {}
+  ): Promise<SearchItem[]> {
     this.subscribes = subscribes || [];
-    if (!force && this.isCacheValid()) return this._mountCache(this._readCache());
+    if (!force && this.isCacheValid()) return this._mountCache(this._readCache() as SearchDataCache);
 
     // 记住旧缓存（可能只是过期），用于加载失败时回退
     const stalePkg = this._readCache();
@@ -425,13 +468,17 @@ export class SearchEngine {
   }
 
   // ---------- 加载 ----------
-  async loadSubscribe(url, meta = {}, depth = 0) {
+  async loadSubscribe(
+    url: string,
+    meta: Record<string, string | undefined> = {},
+    depth = 0
+  ): Promise<void> {
     if (depth > 6) return;
     const absolute = isUrl(url) ? url : resolveUrl(meta.parentUrl || "", url);
     if (this.processHistory.has(absolute)) return;
     this.processHistory.add(absolute);
 
-    let text;
+    let text: string;
     try {
       text = await httpGet(absolute);
       if (text == null) throw new Error("empty");
@@ -455,7 +502,7 @@ export class SearchEngine {
       // 这里把子 tis 直接塞回队列（继承 parentUrl 供相对路径解析）。
       if (config.tis.length > 0) {
         this._pendingChildJobs.push(
-          ...config.tis.map((tis) => ({
+          ...config.tis.map((tis: DesignatedSingTag) => ({
             url: tis.tabValue,
             meta: { ...tis, parentUrl: absolute },
             depth: depth + 1,
@@ -470,7 +517,7 @@ export class SearchEngine {
 
     // 是「内容」文件：解析数据项
     const fetchFun = getFetchFunByName(fetchFunName, this.globalFetchFun);
-    let items = [];
+    let items: SearchItem[] = [];
     try {
       // 与油猴版一致：先转义再解析
       items = fetchFun(escapeText(text));
@@ -503,7 +550,7 @@ export class SearchEngine {
    * 逐个回调会让占位提示与重搜高频抖动（视觉上“几十条几十条地蹦”）。
    * 节流不丢最终进度——loadAll 收尾处会强制通知一次。
    */
-  _notifyProgress() {
+  _notifyProgress(): void {
     if (typeof this.onProgress !== "function") return;
     const now = Date.now();
     if (now - this._lastProgressNotifyAt < 250) return;
@@ -517,26 +564,25 @@ export class SearchEngine {
 
   /**
    * 单项是否命中「不关注标签列表」（还原 filterDataByUserUnfollowList 的单项判断）
-   * @param {object} item
-   * @returns {boolean} true=应被过滤掉
+   * @returns true=应被过滤掉
    */
-  _isUnfollowed(item) {
+  _isUnfollowed(item: SearchItem): boolean {
     const unfollow = this._unfollowList();
     if (unfollow.length === 0) return false;
     const map = new Set(unfollow);
-    const tags = parseTags([item], (it) => it.title, {});
+    const tags = parseTags<SearchItem>([item], (it) => String(it.title ?? ""), {});
     return tags.some((t) => map.has(t.name));
   }
 
   /** 当前「不关注标签」列表（未配置时回退到默认值） */
-  _unfollowList() {
-    const stored = storageGet(UNFOLLOW_KEY, null);
+  _unfollowList(): string[] {
+    const stored = storageGet<string[] | null>(UNFOLLOW_KEY, null);
     const unfollow = Array.isArray(stored) ? stored : DEFAULT_UNFOLLOW;
     return Array.isArray(unfollow) ? unfollow : [];
   }
 
   /** 加载全部订阅 */
-  async loadAll(subscribes) {
+  async loadAll(subscribes: SubscribeItem[] | null | undefined): Promise<SearchItem[]> {
     this.subscribes = subscribes || [];
     this.searchData = [];
     this.globalFetchFun = [];
@@ -549,11 +595,13 @@ export class SearchEngine {
     this.loading = true;
     try {
       // 并发加载（用队列实现，避免一次性打满）
-      const queue = this.subscribes.map((sub) => ({
+      const queue: LoadJob[] = this.subscribes.map((sub) => ({
         url: sub.url,
         meta: {
           title: sub.title,
           describe: sub.describe,
+          // 注意：fetchFun 缺省必须是 undefined（代表「配置文件」），
+          // 不能归一成 ""（那代表「显式跳过」，会导致订阅被整体忽略）
           fetchFun: sub.fetchFun,
           "default-tag": sub.defaultTag,
           root: "true",
@@ -606,7 +654,7 @@ export class SearchEngine {
    * 压到 1~2 轮完成，避免低并发下「每轮凑满一批才出数据」的
    * 阶梯式加载观感（用户感知：数据几十条几十条地蹦出来）。
    */
-  async _runQueue(queue) {
+  async _runQueue(queue: LoadJob[]): Promise<void> {
     const CONCURRENCY = 20;
     let active = 0;
     // 完成判定必须同时看三个地方：执行中、待执行队列、配置文件刚解析出的子订阅。
@@ -621,10 +669,10 @@ export class SearchEngine {
           queue.push(...this._pendingChildJobs.splice(0));
         }
         while (active < CONCURRENCY && queue.length > 0) {
-          const job = queue.shift();
+          const job = queue.shift() as LoadJob;
           active++;
           this.loadSubscribe(job.url, job.meta, job.depth)
-            .catch(() => {})
+            .catch((e) => console.warn("[我的搜索] 订阅加载失败:", job.url, e))
             .finally(() => {
               active--;
               pump();
@@ -643,12 +691,12 @@ export class SearchEngine {
    * 注：单个数据块在 `loadSubscribe` 中已即时过滤，这里是全量兑底
    * （保证与缓存/历史数据混用时的结果一致，幂等可重复调用）。
    */
-  _applyUnfollowFilter() {
+  _applyUnfollowFilter(): void {
     const unfollow = this._unfollowList();
     if (unfollow.length === 0) return;
     const map = new Set(unfollow);
     this.searchData = this.searchData.filter((item) => {
-      const tags = parseTags([item], (it) => it.title, {});
+      const tags = parseTags<SearchItem>([item], (it) => String(it.title ?? ""), {});
       return !tags.some((t) => map.has(t.name));
     });
   }
@@ -657,16 +705,16 @@ export class SearchEngine {
    * 构建检索索引（关键：一次性归一化，避免每次搜索重复计算）
    * 为每条数据项补充内部字段（下划线前缀，仅运行时使用，不写入缓存）
    */
-  _buildIndex() {
-    const tagsMap = {};
+  _buildIndex(): void {
+    const tagsMap: Record<string, TagStat> = {};
     for (let i = 0; i < this.searchData.length; i++) {
       const item = this.searchData[i];
       item.index = i;
 
       // 给URL包含 [[...keyword...]] 模板的项添加 [可搜索] 标签（还原 refreshTags）
       // 必须在 title 变量捕获前执行，否则索引字段不包含该标签
-      if (this._isSearchableItem(item) && !item.title.includes(SEARCH_PRO_TAG)) {
-        item.title = SEARCH_PRO_TAG + item.title;
+      if (this._isSearchableItem(item) && !(item.title ?? "").includes(SEARCH_PRO_TAG)) {
+        item.title = SEARCH_PRO_TAG + (item.title ?? "");
       }
 
       const title = String(item.title || "");
@@ -676,8 +724,8 @@ export class SearchEngine {
       item._titleUpper = title.toUpperCase();
       item._descUpper = desc.toUpperCase();
       // 简洁写法：只传标题/描述，避免把索引字段自身作为参数传入了 toPinyin
-      item._titlePinyin = this.toPinyin(title);
-      item._descPinyin = this.toPinyin(desc);
+      item._titlePinyin = this.toPinyin(title) ?? "";
+      item._descPinyin = this.toPinyin(desc) ?? "";
 
       // 内容（links + resource + vassal）前 4096 字符
       const content = `${linksToString(item.links)}${resource}${item.vassal || ""}`;
@@ -689,12 +737,12 @@ export class SearchEngine {
       item._descTagsUpper = `${desc}${tags.join()}`.toUpperCase();
 
       // 采集标签统计
-      parseTags([item], (it) => it.title, tagsMap);
+      parseTags<SearchItem>([item], (it) => String(it.title ?? ""), tagsMap);
     }
     this.tagsMap = tagsMap;
   }
 
-  async reload() {
+  async reload(): Promise<SearchItem[]> {
     // 手动重新加载：丢弃缓存，强制全量拉取
     this._clearCache();
     return this.loadAll(this.subscribes);
@@ -703,25 +751,22 @@ export class SearchEngine {
   // ---------- 精确 / 拼音搜索（还原 searchUnitHandler） ----------
   /**
    * 单轮精确搜索
-   * @param {Array} beforeData
-   * @param {string} keyword
-   * @returns {Array<{item, level}>}
    */
-  _searchUnit(beforeData, keyword) {
-    keyword = keyword.trim().toUpperCase();
+  _searchUnit(beforeData: SearchItem[], keywordRaw: string): SearchResult[] {
+    let keyword = keywordRaw.trim().toUpperCase();
     if (keyword === "" || beforeData.length === 0) return [];
 
     // 多关键词：取最后一个关键词做本轮匹配，其余递归
     const searchUnits = keyword.split(/\s+/);
-    keyword = searchUnits.pop();
+    keyword = searchUnits.pop() as string;
 
     // 仅当关键词长度 > 1 时才启用拼音（与油猴版一致）
     const enablePinyin = keyword.length > 1;
     const pinyinKeyword = enablePinyin ? textToPinyin(keyword) : "";
 
-    const level0 = [];
-    const level1 = [];
-    const level2 = [];
+    const level0: SearchItem[] = [];
+    const level1: SearchItem[] = [];
+    const level2: SearchItem[] = [];
 
     for (const item of beforeData) {
       const titleUpper = item._titleUpper ?? String(item.title || "").toUpperCase();
@@ -751,7 +796,7 @@ export class SearchEngine {
       if (contentUpper.includes(keyword)) level2.push(item);
     }
 
-    const ordered = [
+    const ordered: SearchResult[] = [
       ...sortByWeight(level0).map((item) => ({ item, level: LEVEL_TITLE })),
       ...sortByWeight(level1).map((item) => ({ item, level: LEVEL_DESC })),
       ...sortByWeight(level2).map((item) => ({ item, level: LEVEL_CONTENT })),
@@ -769,23 +814,22 @@ export class SearchEngine {
   }
 
   /** 精确搜索（对外） */
-  accurateSearch(keyword) {
+  accurateSearch(keyword: string): SearchResult[] {
     return this._searchUnit(this.searchData, keyword);
   }
 
   /**
    * 重叠匹配度搜索（还原 stringOverlapMatchingDegreeSearch）
-   * @param {string} rawKeyword
    */
-  fuzzySearch(rawKeyword) {
-    const scoreList = [];
-    const matched = overlapMatchingDegreeForObjectArray(
+  fuzzySearch(rawKeyword: string): SearchResult[] {
+    const scoreList: number[] = [];
+    const matched = overlapMatchingDegreeForObjectArray<SearchItem>(
       String(rawKeyword).toUpperCase(),
       [...this.searchData],
       (item) => {
-        const str2ScopeMap = {};
-        str2ScopeMap[(item._cleanedTitleUpper ?? "")] = 9;
-        str2ScopeMap[(item._descTagsUpper ?? "")] = 8;
+        const str2ScopeMap: Record<string, number> = {};
+        str2ScopeMap[item._cleanedTitleUpper ?? ""] = 9;
+        str2ScopeMap[item._descTagsUpper ?? ""] = 8;
         str2ScopeMap[(item._contentUpper ?? "").substring(0, 4096)] = 2;
         return str2ScopeMap;
       },
@@ -802,28 +846,22 @@ export class SearchEngine {
 
   /**
    * 判断是否为搜索PRO模式（还原 subSearch.isSubSearchMode）
-   * @param {string} rawKeyword
-   * @returns {boolean}
    */
-  _isProSearchMode(rawKeyword) {
+  _isProSearchMode(rawKeyword: string | null | undefined): boolean {
     return String(rawKeyword ?? "").includes(SEARCH_BOUNDARY);
   }
 
   /**
    * 获取父级关键词（还原 subSearch.getParentKeyword）
-   * @param {string} rawKeyword
-   * @returns {string}
    */
-  _getParentKeyword(rawKeyword) {
+  _getParentKeyword(rawKeyword: string | null | undefined): string {
     return String(rawKeyword ?? "").split(SEARCH_BOUNDARY)[0].trim();
   }
 
   /**
    * 判断数据项是否「可搜索」：URL 包含 [[...keyword...]] 模板且为 HTTP URL（还原 refreshTags）
-   * @param {object} item
-   * @returns {boolean}
    */
-  _isSearchableItem(item) {
+  _isSearchableItem(item: SearchItem): boolean {
     const resource = String(item.resource ?? "").trim();
     if (!resource) return false;
     // 是否 HTTP URL（粗略检测：包含 . 号）
@@ -836,10 +874,10 @@ export class SearchEngine {
   /**
    * PRO 模式特殊路由（还原 searchableSpecialRouting）
    * 返回 undefined 表示无特殊路由匹配，[] 表示已处理，数组表示搜索结果
-   * @param {string} parentKeyword
-   * @returns {Promise<Array|undefined>}
    */
-  async _proSearchSpecialRouting(parentKeyword) {
+  async _proSearchSpecialRouting(
+    parentKeyword: string
+  ): Promise<SearchResult[] | undefined> {
     const kw = parentKeyword.trim();
     // 父关键词为 "问AI" → 精确搜索父关键词本身（还原 searchableSpecialRouting["^问AI$"]）
     // （原版：search(keywordForFill0, { isAccurateSearch: true })，keywordForFill0 即父关键词）
@@ -856,10 +894,8 @@ export class SearchEngine {
   /**
    * 搜索PRO模式（还原 searchEven.event[".*"+searchBoundary+".*"]）
    * 仅搜索带有 [可搜索] 标签的数据项
-   * @param {string} rawKeyword
-   * @returns {Promise<Array>}
    */
-  async _proSearch(rawKeyword) {
+  async _proSearch(rawKeyword: string): Promise<SearchResult[]> {
     const parentKeyword = this._getParentKeyword(rawKeyword);
 
     // 先检查特殊路由
@@ -883,15 +919,17 @@ export class SearchEngine {
     // 无结果时使用重叠匹配度兜底（仅搜索可搜索项）
     if ((result == null || result.length === 0) && parentKeyword.trim().length > 0) {
       // 对 parentKeyword 做模糊匹配，但限制在 [可搜索] 项内
-      const searchableItems = this.searchData.filter((item) => item.title.includes(SEARCH_PRO_TAG));
-      const scoreList = [];
-      const matched = overlapMatchingDegreeForObjectArray(
+      const searchableItems = this.searchData.filter((item) =>
+        (item.title ?? "").includes(SEARCH_PRO_TAG)
+      );
+      const scoreList: number[] = [];
+      const matched = overlapMatchingDegreeForObjectArray<SearchItem>(
         String(parentKeyword).toUpperCase(),
         searchableItems,
         (item) => {
-          const str2ScopeMap = {};
-          str2ScopeMap[(item._cleanedTitleUpper ?? "")] = 9;
-          str2ScopeMap[(item._descTagsUpper ?? "")] = 8;
+          const str2ScopeMap: Record<string, number> = {};
+          str2ScopeMap[item._cleanedTitleUpper ?? ""] = 9;
+          str2ScopeMap[item._descTagsUpper ?? ""] = 8;
           str2ScopeMap[(item._contentUpper ?? "").substring(0, 4096)] = 2;
           return str2ScopeMap;
         },
@@ -907,7 +945,7 @@ export class SearchEngine {
   }
 
   /** 搜索路由（还原 searchEven.event 与 searchAOP） */
-  async search(rawKeyword) {
+  async search(rawKeyword: string | null | undefined): Promise<SearchResult[]> {
     const raw = String(rawKeyword ?? "");
 
     // PRO模式（子搜索模式）：关键词包含 SEARCH_BOUNDARY（ : ）
@@ -938,7 +976,7 @@ export class SearchEngine {
     return result || [];
   }
 
-  _specialSearch(rawKeyword) {
+  _specialSearch(rawKeyword: string): SearchResult[] | null {
     const kw = rawKeyword.trim().toLowerCase();
     if (kw === SPECIAL_KEYWORD.highFrequency.toLowerCase()) {
       return highFrequencyList(this.searchData, 45).map((item) => ({

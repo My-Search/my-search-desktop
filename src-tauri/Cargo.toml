@@ -1,6 +1,6 @@
 [package]
 name = "my-search-desktop"
-version = "7.9.12"
+version = "7.9.15"
 description = "我的搜索桌面版 - 订阅式搜索工具"
 authors = ["zhuangjie"]
 edition = "2021"
@@ -20,10 +20,10 @@ tauri-plugin-opener = "2"
 tauri-plugin-store = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", features = ["json", "blocking", "rustls-tls"], default-features = false }
+reqwest = { version = "0.12", features = ["json", "blocking", "rustls-tls", "stream"], default-features = false }
 tokio = { version = "1", features = ["full"] }
-dirs = "5"
 base64 = "0.22"
+futures-util = "0.3"
 
 # 托盘菜单导致鼠标光标消失的修复（见 src/lib.rs 的 force_cursor_visible）
 # 仅 Windows 需要；复用 tauri 依赖树中已有的 windows-sys，不额外引入 winapi

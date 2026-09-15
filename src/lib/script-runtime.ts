@@ -11,7 +11,8 @@
  * 因此这里按原版语义实现，并对每个接口做可测试的纯函数式封装。
  */
 
-import { md2html, scopeCss } from "./util.js";
+import { md2html, scopeCss } from "./util.ts";
+import type { SearchItem } from "../types/index.ts";
 
 /** 脚本视图容器选择器（脚本样式只作用于该容器内部） */
 export const SCRIPT_VIEW_PREFIX = "#text_show .script-view";
@@ -22,14 +23,16 @@ export const SCRIPT_VIEW_PREFIX = "#text_show .script-view";
 
 /**
  * 去掉数组重复项（还原 removeDuplicates）
- * @param {Array} objs
- * @param {string[]} props 参与比较的属性
- * @returns {Array}
+ * @param objs
+ * @param props 参与比较的属性
  */
-export function removeDuplicates(objs, props = ["title", "desc"]) {
+export function removeDuplicates<T extends Record<string, unknown>>(
+  objs: T[],
+  props: string[] = ["title", "desc"]
+): T[] {
   if (!Array.isArray(objs) || objs.length === 0) return [];
-  const seen = new Set();
-  const result = [];
+  const seen = new Set<string>();
+  const result: T[] = [];
   for (const item of objs) {
     const key = props.map((p) => String(item?.[p] ?? "\u0000")).join("\u0001");
     if (seen.has(key)) continue;
@@ -41,15 +44,58 @@ export function removeDuplicates(objs, props = ["title", "desc"]) {
 
 /**
  * 解析子搜索关键词（还原 registry.searchData.subSearch.getSubSearchKeyword）
- * @param {string} keyword 完整关键词，形如 `父关键词 : 子关键词`
- * @param {string} boundary 分隔符
- * @returns {string|undefined}
+ * @param keyword 完整关键词，形如 `父关键词 : 子关键词`
+ * @param boundary 分隔符
  */
-export function getSubSearchKeyword(keyword, boundary) {
+export function getSubSearchKeyword(keyword: string, boundary: string): string | undefined {
   const parts = String(keyword ?? "").split(boundary);
   if (parts.length < 2) return undefined;
   const sub = parts[1].trim();
   return sub === "" ? undefined : sub;
+}
+
+/** 脚本环境里的 HTTP 请求实现签名 */
+export type ScriptRequestFn = (
+  type?: string,
+  url?: string,
+  opts?: Record<string, unknown>
+) => Promise<string>;
+
+/** 脚本环境里的缓存接口 */
+export interface ScriptCacheApi {
+  get: (k: string) => unknown;
+  set: (k: string, v: unknown) => void;
+  remove: (k: string) => void;
+}
+
+/** 构造 ScriptViewContext 的选项 */
+export interface ScriptViewContextOptions {
+  /** 全部数据项 */
+  getData?: () => SearchItem[];
+  /** 类 AI 匹配度搜索 */
+  matchSearch?: ((raw: string) => Promise<SearchItem[]>) | null;
+  /** 缓存接口 */
+  cache?: ScriptCacheApi | null;
+  /** HTTP 请求（走 Rust 代理） */
+  request?: ScriptRequestFn | null;
+  /** 让用户选择页面文本 */
+  getSelectedText?: ((msg?: string) => Promise<string> | undefined) | null;
+}
+
+/** 脚本视图对应的 MS_SCRIPT_ENV（供官方脚本读取 window.MS_SCRIPT_ENV） */
+export interface ScriptEnv {
+  event: { sendListener: Array<(msg: string) => void> };
+  cache: ScriptCacheApi | null;
+  getSearchDB: () => SearchItem[];
+  getSelectedText: (msg?: string) => Promise<string> | undefined;
+  md2html: (raw: unknown) => string;
+  request: (type?: string, url?: string, opts?: Record<string, unknown>) => Promise<string>;
+  matchSearch: (kw: string) => Promise<SearchItem[]>;
+  data: {
+    get: () => SearchItem[];
+    matchSearch: () => SearchItem[];
+    distinct: (items: SearchItem[]) => SearchItem[];
+  };
 }
 
 /**
@@ -57,45 +103,47 @@ export function getSubSearchKeyword(keyword, boundary) {
  * 以便把原版注册表里的脚本接口拆成可测试的纯逻辑。
  */
 export class ScriptViewContext {
-  /**
-   * @param {object} opts
-   * @param {() => Array} opts.getData 全部数据项
-   * @param {(raw:string)=>Promise<Array>} [opts.matchSearch] 类 AI 匹配度搜索
-   * @param {object} [opts.cache] 缓存接口
-   * @param {(type,url,opts)=>Promise<string>} [opts.request] HTTP 请求（走 Rust 代理）
-   * @param {()=>Promise<string>} [opts.getSelectedText] 让用户选择页面文本
-   */
+  getData: () => SearchItem[];
+  matchSearchImpl: ((raw: string) => Promise<SearchItem[]>) | null;
+  cache: ScriptCacheApi | null;
+  requestImpl: ScriptRequestFn | null;
+  getSelectedTextImpl: ((msg?: string) => Promise<string> | undefined) | null;
+  /** 脚本页监听 IPush 事件（还原 MS_SCRIPT_ENV.event.sendListener） */
+  sendListener: Array<(msg: string) => void>;
+  /** 视图是否已挂载（view.mount() 调用后为 true） */
+  mounted: boolean;
+  private _env: ScriptEnv | null;
+
   constructor({
     getData = () => [],
     matchSearch = null,
     cache = null,
     request = null,
     getSelectedText = null,
-  } = {}) {
+  }: ScriptViewContextOptions = {}) {
     this.getData = getData;
     this.matchSearchImpl = matchSearch;
     this.cache = cache;
     this.requestImpl = request;
     this.getSelectedTextImpl = getSelectedText;
-    /** 脚本页监听 IPush 事件（还原 MS_SCRIPT_ENV.event.sendListener） */
     this.sendListener = [];
-    /** 视图是否已挂载（view.mount() 调用后为 true） */
     this.mounted = false;
+    this._env = null;
   }
 
   /** 是否已开启会话（还原 SESSION_MS_SCRIPT_ENV !== undefined） */
-  get opened() {
+  get opened(): boolean {
     return this._env != null;
   }
 
   /** 开启会话并返回脚本环境对象（还原 openSessionForMSSE） */
-  openSession() {
+  openSession(): ScriptEnv {
     this._env = this.buildEnv();
     return this._env;
   }
 
   /** 结束会话：清空监听器（还原 clearMSSE + 退出视图后的清理） */
-  clearMSSE() {
+  clearMSSE(): void {
     this.sendListener.length = 0;
     this._env = null;
     this.mounted = false;
@@ -106,7 +154,7 @@ export class ScriptViewContext {
    * 字段与官方脚本用的完全一致：cache / getSearchDB / getSelectedText / md2html /
    * request / matchSearch / data / event。
    */
-  buildEnv() {
+  buildEnv(): ScriptEnv {
     return {
       event: { sendListener: this.sendListener },
       cache: this.cache,
@@ -114,23 +162,27 @@ export class ScriptViewContext {
       getSelectedText: (msg) => (this.getSelectedTextImpl ? this.getSelectedTextImpl(msg) : undefined),
       md2html: (raw) => md2html(raw),
       request: (type, url, opts) =>
-        this.requestImpl ? this.requestImpl(type, url, opts) : Promise.reject(new Error("request 不可用")),
+        this.requestImpl
+          ? this.requestImpl(type, url, opts)
+          : Promise.reject(new Error("request 不可用")),
       matchSearch: (kw) => (this.matchSearchImpl ? this.matchSearchImpl(kw) : Promise.resolve([])),
       data: {
         get: () => [...this.getData()],
         matchSearch: () => [],
-        distinct: (items) => removeDuplicates(items),
+        distinct: (items) => removeDuplicates(items as unknown as Record<string, unknown>[]) as unknown as SearchItem[],
       },
     };
   }
 
   /**
    * 把输入框里的「子搜索关键词」推送给脚本（还原 tryRunTextViewHandler）
-   * @param {string} rawKeyword 输入框当前内容（原版为 input.val()）
-   * @param {string} boundary 子搜索分隔符
-   * @returns {{handled:boolean, parentKeyword:string, msg?:string}}
+   * @param rawKeyword 输入框当前内容（原版为 input.val()）
+   * @param boundary 子搜索分隔符
    */
-  pushSubKeyword(rawKeyword, boundary) {
+  pushSubKeyword(
+    rawKeyword: string,
+    boundary: string
+  ): { handled: boolean; parentKeyword: string; msg?: string } {
     // 仅在脚本视图展示中才处理（原版 seeNowMode() === SHOW_ITEM_DETAIL）
     if (!this.mounted) return { handled: false, parentKeyword: rawKeyword };
     const msg = getSubSearchKeyword(rawKeyword, boundary);
@@ -158,10 +210,8 @@ export class ScriptViewContext {
  * - `*` / `html` / `body` / `:root` 映射到容器自身，绝不污染应用界面
  * - 其余选择器统一加容器前缀
  * - @keyframes 等嵌套内容不加前缀（由 scopeCss 处理）
- * @param {string} css
- * @param {string} [prefix]
  */
-export function scopeScriptCss(css, prefix = SCRIPT_VIEW_PREFIX) {
+export function scopeScriptCss(css: string, prefix: string = SCRIPT_VIEW_PREFIX): string {
   return scopeCss(css, prefix);
 }
 
@@ -169,22 +219,32 @@ export function scopeScriptCss(css, prefix = SCRIPT_VIEW_PREFIX) {
  * 3. 执行脚本（script 段）与视图（view:* 段）
  * ============================================================ */
 
+/** 脚本视图对象（还原 showView 分支里的 view 对象） */
+export interface ScriptView {
+  mountBefore(handle: () => void): ScriptView;
+  mountAfter(handle: () => void): ScriptView;
+  mount(): void;
+  /** 内部：标记 mount() 是否已被调用（还原旧版 __mounted 守卫） */
+  __mounted?: boolean;
+}
+
 /**
  * 脚本视图对象（还原 showView 分支里的 view 对象）
- * @param {object} handlers
- * @param {Function} handlers.mount 真正的挂载实现（渲染 view:html/css/js）
+ * @param handlers.mount 真正的挂载实现（渲染 view:html/css/js）
  */
-export function createScriptView(handlers = {}) {
-  let beforeCallback = null;
-  let afterCallback = null;
-  return {
+export function createScriptView(
+  handlers: { mount?: (afterCallback: (() => void) | null) => void } = {}
+): ScriptView {
+  let beforeCallback: (() => void) | null = null;
+  let afterCallback: (() => void) | null = null;
+  const view: ScriptView = {
     /** 挂载前回调（还原 mountBefore） */
-    mountBefore(handle) {
+    mountBefore(handle: () => void) {
       if (typeof handle === "function") beforeCallback = handle;
       return this;
     },
     /** 挂载后回调（还原 mountAfter） */
-    mountAfter(handle) {
+    mountAfter(handle: () => void) {
       if (typeof handle === "function") afterCallback = handle;
       return this;
     },
@@ -192,17 +252,20 @@ export function createScriptView(handlers = {}) {
     mount() {
       if (beforeCallback != null) beforeCallback();
       if (typeof handlers.mount === "function") handlers.mount(afterCallback);
+      view.__mounted = true;
     },
   };
+  return view;
 }
 
 /**
  * 生成「外部打开」工具（还原 open(url).simulator(...)）：
  * 桌面版没有页面模拟器，simulator 退化为直接打开目标地址。
- * @param {(url:string)=>void} openExternal
  */
-export function createScriptOpen(openExternal) {
-  return function open(url) {
+export function createScriptOpen(
+  openExternal: (url: string) => void
+): (url: string) => { simulator: () => unknown } {
+  return function open(url: string) {
     const openUrl = url;
     return {
       simulator() {
@@ -213,6 +276,14 @@ export function createScriptOpen(openExternal) {
   };
 }
 
+/** runScriptFunction 的返回值 */
+export interface ScriptRunVerdict {
+  ok: boolean;
+  error?: Error;
+  result?: unknown;
+  mounted: boolean;
+}
+
 /**
  * 执行脚本项的 `-- script --` 段（还原 showView 分支）
  *
@@ -220,21 +291,25 @@ export function createScriptOpen(openExternal) {
  * 脚本函数自行决定是否调用 view.mount() 挂载视图，
  * 因此这里只负责构造 obj 并调用，返回值用于可测试性。
  *
- * @param {string} script `-- script --` 段源码
- * @param {object} obj 传给脚本函数的对象
- * @returns {{ok:boolean, error?:Error, result?:any, mounted:boolean}}
+ * @param script `-- script --` 段源码
+ * @param obj 传给脚本函数的对象
  */
-export function runScriptFunction(script, obj, { view = null } = {}) {
+export function runScriptFunction(
+  script: string | null | undefined,
+  obj: Record<string, unknown>,
+  { view = null }: { view?: ScriptView | null } = {}
+): ScriptRunVerdict {
   if (script == null || String(script).trim() === "") {
     return { ok: false, error: new Error("脚本为空"), mounted: false };
   }
   try {
     // 与原版一致：函数源码整体求值后立即调用
-    const fn = new Function("obj", `(${script})(obj)`);
+    // （动态源码无法静态类型化，返回值按 unknown 处理）
+    const fn = new Function("obj", `(${script})(obj)`) as (o: unknown) => unknown;
     const result = fn(obj);
     return { ok: true, result, mounted: view != null ? view.__mounted === true : false };
   } catch (error) {
-    return { ok: false, error, mounted: false };
+    return { ok: false, error: error as Error, mounted: false };
   }
 }
 
@@ -245,26 +320,27 @@ export function runScriptFunction(script, obj, { view = null } = {}) {
  * 即在浏览器里以 IIFE 执行；这里等价地用 new Function 包一层 IIFE，
  * 这样变量/函数不会泄漏到模块作用域，且同一脚本视图可重复执行。
  *
- * @param {string} viewJs `-- view:js --` 段源码
- * @param {object} obj 传给视图脚本的对象（cache/$/view/registry/open 等）
- * @returns {{ok:boolean, error?:Error}}
+ * @param viewJs `-- view:js --` 段源码
+ * @param obj 传给视图脚本的对象（cache/$/view/registry/open 等）
  */
-export function runViewScript(viewJs, obj) {
+export function runViewScript(
+  viewJs: string | null | undefined,
+  obj: Record<string, unknown>
+): { ok: boolean; error?: Error } {
   if (viewJs == null || String(viewJs).trim() === "") return { ok: true };
   try {
-    const fn = new Function("obj", `(function(){\n${viewJs}\n})()`);
+    const fn = new Function("obj", `(function(){\n${viewJs}\n})()`) as (o: unknown) => unknown;
     fn(obj);
     return { ok: true };
   } catch (error) {
-    return { ok: false, error };
+    return { ok: false, error: error as Error };
   }
 }
 
 /**
  * 判定脚本项是否需要挂载脚本视图（还原 showView 分支的判断）
- * @param {object} resourceObj
  */
-export function hasScriptView(resourceObj) {
+export function hasScriptView(resourceObj: Record<string, unknown> | null | undefined): boolean {
   if (resourceObj == null) return false;
   return Boolean(resourceObj["view:html"] || resourceObj["view:js"] || resourceObj["view:css"]);
 }

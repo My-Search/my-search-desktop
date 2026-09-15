@@ -1,6 +1,6 @@
-import { SearchEngine } from "../src/lib/search-engine.js";
-import { renderTitleTags, titleContentHandler, clearHideTagForTitle } from "../src/lib/tags.js";
-import { escapeHtml } from "../src/lib/util.js";
+import { SearchEngine } from "../src/lib/search-engine.ts";
+import { renderTitleTags, titleContentHandler, clearHideTagForTitle } from "../src/lib/tags.ts";
+import { escapeHtml } from "../src/lib/util.ts";
 
 const e = new SearchEngine();
 await e.loadAll([

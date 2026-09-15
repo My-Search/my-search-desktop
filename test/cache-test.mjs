@@ -19,7 +19,7 @@ globalThis.localStorage = {
 };
 
 const { SearchEngine, EFFECTIVE_DURATION, SEARCH_DATA_KEY, subscribeFingerprint } =
-  await import("../src/lib/search-engine.js");
+  await import("../src/lib/search-engine.ts");
 
 const SUBS = [
   {

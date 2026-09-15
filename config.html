@@ -14,11 +14,39 @@
         document.documentElement.style.backgroundColor = dark
           ? "#17191d"
           : "#f5f6f8";
+
+        // ---- 兜底安全网（防御性，正常情况下不会触发） ----
+        // 若主模块脚本因异常未能挂载 Vue（#app 始终为空），8 秒后显示提示，
+        // 并注册不依赖 Vue 的 Esc 关窗，避免「空白页且关不掉」的最坏情况。
+        var fallbackTimer = setTimeout(function () {
+          var app = document.getElementById("app");
+          if (!app || app.hasChildNodes()) return;
+          app.innerHTML =
+            '<div style="padding:24px;text-align:center;font-family:sans-serif;font-size:14px;line-height:1.6;color:#e02424">' +
+            '<p style="font-size:18px;font-weight:600;margin-bottom:8px">我的搜索 - 设置</p>' +
+            '<p>页面加载失败，请重启应用。</p>' +
+            '<p style="color:#7a828e;font-size:12px">（按 Esc 关闭窗口）</p>' +
+            "</div>";
+          document.addEventListener("keydown", function (e) {
+            if (e.key !== "Escape") return;
+            e.preventDefault();
+            e.stopPropagation();
+            try {
+              window.__TAURI_INTERNALS__.invoke("plugin:window|close", { label: "config" });
+            } catch (_) {
+              window.close();
+            }
+          });
+        }, 8000);
+        // Vue 成功挂载后由 config.ts 调用，取消上面的兜底
+        window.__cancelConfigFallback = function () {
+          clearTimeout(fallbackTimer);
+        };
       })();
     </script>
   </head>
   <body class="ms-config-body">
     <div id="app"></div>
-    <script type="module" src="./src/config.js"></script>
+    <script type="module" src="/src/config.ts"></script>
   </body>
 </html>

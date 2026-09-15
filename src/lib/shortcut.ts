@@ -1,5 +1,5 @@
 /**
- * 全局快捷键录入/展示的纯函数集合（设置窗口「快捷键设置」面板使用）。
+ * 全局快捷键录入/展示的纯函数集合（设置窗口「快捷键」面板使用）。
  *
  * 快捷键在后端的存储/注册形式与 global-hotkey 的字符串解析一致：
  * 小写、以「+」连接、修饰键在前、主键在最后，如 "ctrl+alt+s"、"ctrl+shift+f9"。
@@ -16,7 +16,7 @@
  */
 
 /** 修饰键：e.code -> 快捷键字符串中的小写名（global-hotkey 识别 ctrl/alt/shift/super） */
-const MODIFIER_CODES = {
+const MODIFIER_CODES: Record<string, string> = {
   ControlLeft: "ctrl",
   ControlRight: "ctrl",
   AltLeft: "alt",
@@ -79,7 +79,7 @@ const MAIN_KEY_EXACT = new Set([
 export const CANCEL_KEY = "escape";
 
 /** 主键是否在白名单内（e.code 或回退时用 e.key 推断的 code 形式） */
-export function isSupportedMainKey(code) {
+export function isSupportedMainKey(code: string | null | undefined): boolean {
   if (typeof code !== "string" || code === "") return false;
   if (code in MODIFIER_CODES) return false;
   if (MAIN_KEY_EXACT.has(code)) return true;
@@ -95,7 +95,10 @@ export function isSupportedMainKey(code) {
  * @param {string[]} modifiers 已收集的修饰键名（ctrl/alt/shift/super）
  * @param {string} mainKey 主键 code（白名单内）
  */
-export function validateCombo(modifiers, mainKey) {
+export function validateCombo(
+  modifiers: string[],
+  mainKey: string | null | undefined
+): { ok: boolean; reason?: string } {
   if (!(modifiers.length > 0)) return { ok: false, reason: "至少需要一个修饰键（Ctrl / Alt / Shift / Win）" };
   if (mainKey == null || !isSupportedMainKey(mainKey)) {
     return { ok: false, reason: "不支持该按键，请换一个" };
@@ -117,7 +120,24 @@ export function validateCombo(modifiers, mainKey) {
  * @param {{code?: string, key?: string, ctrlKey?: boolean, altKey?: boolean,
  *          shiftKey?: boolean, metaKey?: boolean}} ev 只取用到的字段，便于测试
  */
-export function interpretKeydown(ev) {
+export interface ShortcutKeydownEvent {
+  code?: string;
+  key?: string;
+  ctrlKey?: boolean;
+  altKey?: boolean;
+  shiftKey?: boolean;
+  metaKey?: boolean;
+}
+
+/** interpretKeydown 的解析结果 */
+export type KeydownVerdict =
+  | { kind: "modifier-only" }
+  | { kind: "cancel" }
+  | { kind: "clear" }
+  | { kind: "combo"; modifiers: string[]; mainKey: string; mainKeyLabel: string }
+  | { kind: "ignore" };
+
+export function interpretKeydown(ev: ShortcutKeydownEvent): KeydownVerdict {
   const code = typeof ev.code === "string" ? ev.code : "";
   const key = typeof ev.key === "string" ? ev.key : "";
 
@@ -127,12 +147,12 @@ export function interpretKeydown(ev) {
   // code 缺失时用 key 判断是否修饰键（个别环境异常事件，无 ctrlKey 标志可依）
   if (!code && MODIFIER_KEYS.has(key)) return { kind: "modifier-only" };
 
-  const modifierNames = [
+  const modifierNames: string[] = [
     ev.ctrlKey ? "ctrl" : null,
     ev.altKey ? "alt" : null,
     ev.shiftKey ? "shift" : null,
     ev.metaKey ? "super" : null,
-  ].filter(Boolean);
+  ].filter((v): v is string => Boolean(v));
 
   // Esc 取消录入；未带修饰键的 Backspace 表示清空
   if (code === "Escape" || key === "Escape") return { kind: "cancel" };
@@ -160,7 +180,7 @@ export function interpretKeydown(ev) {
  * @param {string} shortcut
  * @returns {string[]}
  */
-export function shortcutToCaps(shortcut) {
+export function shortcutToCaps(shortcut: string | null | undefined): string[] {
   return String(shortcut ?? "")
     .split("+")
     .map((t) => t.trim())
@@ -190,7 +210,7 @@ export function shortcutToCaps(shortcut) {
  * @param {string[]} modifiers
  * @param {string} mainKey
  */
-export function comboToString(modifiers, mainKey) {
+export function comboToString(modifiers: string[], mainKey: string | null | undefined): string {
   let key = String(mainKey ?? "").toLowerCase();
   const letter = key.match(/^key([a-z])$/);
   if (letter) key = letter[1];

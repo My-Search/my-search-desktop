@@ -4,13 +4,13 @@
  * 背景：Rust 端 convert_raw_to_jsdelivr/convert_raw_to_api 原实现用
  * `parts.len() < 5` 判断，把 `owner/repo/branch/file`（4 段，文件在仓库根目录）
  * 误判为「无法转换」，导致这类订阅直连失败时无法回退 CDN。
- * JS 端（tauri-bridge.js）同款逻辑还存在 `refs/tags` 不识别、
+ * JS 端（tauri-bridge.ts）同款逻辑也修掉了 `refs/tags` 不识别、
  * 缺文件名时拼出 `@refs/heads/dev` 非法 URL 的问题。
  *
  * 本测试与 Rust 侧 `cargo test` 的 tests 模块一一对应，
  * 保证两端行为一致（同一组输入 → 同一组输出）。
  */
-import { parseRawGithubUrl } from "../src/lib/tauri-bridge.js";
+import { parseRawGithubUrl } from "../src/lib/tauri-bridge.ts";
 
 const failures = [];
 const check = (name, actual, expected) => {

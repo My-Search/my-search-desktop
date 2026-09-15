@@ -1,20 +1,19 @@
 /**
- * 真实浏览器验证：失焦自动隐藏的联动
- * （用户反馈：① 结果列表展示中，点窗口外应该隐藏 —— 本次调整；
- *   ② 查看附加内容 / 打开脚本应用时，点了应用外面的地方不应该隐藏窗口 —— 原行为保留）。
+ * 真实浏览器验证：失焦隐藏不再按视图状态「豁免」
+ * （用户规则：点窗口外面时，不管在干什么都先隐藏；唤醒后再原样显示）。
  *
- * 做法：用 CDP 打开构建产物 index.html，注入假的 `window.__TAURI_INTERNALS__`
- * 来录制前端同步给 Rust 的 `set_hide_on_blur` 值（Rust 侧失焦判定读的就是这个值），
- * 再走真实交互路径验证：
+ * 旧实现里前端会按当前视图调用 `set_hide_on_blur(hide)` 同步给 Rust，
+ * 详情视图/搜索中/`:debug` 会同步 `false`（即「失焦不隐藏」）。
+ * 新实现把「失焦即隐藏」完全交给 Rust 侧无条件执行（`on_window_event`
+ * 收到 `Focused(false)` 即隐藏），前端**不再**发送任何 `set_hide_on_blur`。
  *
- * 1. 结果列表展示中 → hide=true（桌面版调整，原版 `!isWaitSearch` 为 false）
- * 2. 打开「附加内容」（vassal）→ hide=false（原行为保留）
- * 3. 打开脚本应用（脚本项 view:html/css/js）→ hide=false + 视图真的挂上了
- * 4. 输入其它关键词退出详情 → 仍展示结果 → hide=true
- * 5. 无结果 → 什么都不显示（不出提示），仍回到等待搜索 hide=true
- * 6. 输入 `:debug` → hide=false
- * 7. 清空回到等待搜索 → hide=true（恢复失焦自动隐藏）
- * 8. 点击 URL 结果 → 显式收起窗口（原版 viewVisibilityController(false) + window.open）
+ * 因此本测试用假 `window.__TAURI_INTERNALS__` 录制全部 IPC，走真实交互路径验证：
+ *  1. 结果列表展示中：不发送 set_hide_on_blur（Rust 无条件隐藏，无需同步）
+ *  2. 打开「附加内容」（vassal）→ 视图真的挂上，且**不发送** set_hide_on_blur
+ *  3. 打开脚本应用（脚本项 view:html/css/js）→ 视图真的挂上，且不发送
+ *  4. 输入 `:debug` → 不发送
+ *  5. 全程 IPC 里从未出现 set_hide_on_blur / setHideOnBlur（旧门控已彻底移除）
+ *  6. 运行期间无未捕获页面异常
  *
  * 用法: npm run build && node test/blur-hide-ui.test.mjs
  * 需要本机装有 Chrome / Edge；找不到浏览器时跳过（退出码 0）。
@@ -159,18 +158,10 @@ const check = (name, pass, detail) => {
   console.log(`${pass ? "PASS" : "FAIL"}  ${name}${detail ? "  — " + detail : ""}`);
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const waitFor = async (expr, timeout = 5000) => {
-  const t0 = Date.now();
-  while (Date.now() - t0 < timeout) {
-    if (await evalJs(expr)) return true;
-    await sleep(100);
-  }
-  return false;
-};
 
-/** 前端最后一次同步给 Rust 的 hide 值（null = 从未同步） */
-const readHide = () =>
-  evalJs(`(() => { const l = window.__hideCalls || []; return l.length ? l[l.length - 1] : null; })()`);
+/** 前端是否发送过旧的状态门控 IPC（新实现应当全程为 0 次） */
+const blurSyncCount = () =>
+  evalJs(`(window.__invoked || []).filter(c => c === 'set_hide_on_blur' || c === 'setHideOnBlur').length`);
 
 /** 在搜索框里输入并等待结果渲染 */
 const typeKeyword = async (kw) => {
@@ -196,13 +187,11 @@ const clickResultByTitle = (title) =>
 // ---- 注入 Tauri 桥（页面脚本执行前生效）----
 await S("Page.addScriptToEvaluateOnNewDocument", {
   source: `
-    window.__hideCalls = [];
     window.__invoked = [];
     window.__openedUrls = [];
     window.__TAURI_INTERNALS__ = {
       invoke(cmd, args) {
         window.__invoked.push(cmd);
-        if (cmd === 'set_hide_on_blur') { window.__hideCalls.push(args.hide); return Promise.resolve(null); }
         if (cmd === 'set_window_height') { return Promise.resolve(null); }
         if (cmd === 'open_url') { window.__openedUrls.push(args.url); return Promise.resolve(null); }
         return Promise.resolve(null);
@@ -225,7 +214,6 @@ const SEED = `(() => {
     },
     {
       title: "[h'脚本']脚本应用测试项", desc: '脚本项', type: 'sketch',
-      // 脚本项的 resource 由 "-- xxx --" 分段（parseScriptItem 解析成 resourceObj）
       resource: [
         '-- env --',
         '',
@@ -246,7 +234,6 @@ const SEED = `(() => {
   }));
   localStorage.setItem('my-search-desktop:SUBSCRIBES', JSON.stringify(subs));
   localStorage.setItem('my-search-desktop:subscribes', JSON.stringify(subs));
-  // 订阅指纹：与 subscribeFingerprint 的格式一致（url|title|fetchFun|defaultTag）
   localStorage.setItem(
     'my-search-desktop:SUBSCRIBE_FINGERPRINT_CACHE_KEY',
     JSON.stringify('https://example.com/test.ms|测试订阅||')
@@ -261,28 +248,18 @@ await evalJs(SEED);
 await S("Page.navigate", { url: base + "/index.html" });
 await sleep(1200);
 
-// 打印一次启动诊断（数据条数 / 同步过的 IPC）
 console.log("boot:", await evalJs(`JSON.stringify({
   invoked: [...new Set(window.__invoked)],
-  hideCalls: window.__hideCalls,
   hasInput: !!document.getElementById('my_search_input'),
 })`));
 
-// ---- 0. 初始（等待搜索，无结果）→ 未搜索时不同步 hide（按需同步）----
-// （注：前端只在状态变化时发 IPC，初始就是可隐藏状态，Rust 侧初值也是 true）
-console.log("初始 hideCalls:", await evalJs(`JSON.stringify(window.__hideCalls)`));
-
-// ---- 1. 结果列表展示中 → hide=true（本次调整：点窗口外即收起） ----
+// ---- 1. 结果列表展示中：不发送旧的状态门控 IPC ----
 await typeKeyword("测试");
 const resultShown = await evalJs(`document.getElementById('matchResult').style.display === 'block'`);
 check("搜索结果已渲染", resultShown === true);
-check(
-  "结果列表展示中：hide=true（失焦隐藏）",
-  (await readHide()) === true,
-  `hide=${await readHide()}`
-);
+check("结果列表展示中：不发送 set_hide_on_blur（失焦隐藏由 Rust 无条件执行）", (await blurSyncCount()) === 0);
 
-// ---- 2. 打开「附加内容」（vassal）→ hide=false（原行为保留）----
+// ---- 2. 打开「附加内容」（vassal）→ 视图挂上，且不发送 ----
 const vassalClicked = await evalJs(`(() => {
   const a = document.querySelector('#matchItems a.vassal');
   if (!a) return false;
@@ -296,13 +273,13 @@ check(
   vassalClicked === true && vassalVisible === true,
   `clicked=${vassalClicked} visible=${vassalVisible}`
 );
-check("查看附加内容：hide=false（点应用外面不会隐藏）", (await readHide()) === false, `hide=${await readHide()}`);
+check("查看附加内容：不再发送「不隐藏」标志", (await blurSyncCount()) === 0);
 check(
   "附加内容正文已渲染",
   (await evalJs(`document.getElementById('text_show').textContent.includes('附加内容正文')`)) === true
 );
 
-// ---- 3. 打开脚本应用 → hide=false ----
+// ---- 3. 打开脚本应用 → 视图挂上，且不发送 ----
 await typeKeyword("");
 await typeKeyword("脚本应用");
 const scriptClicked = await clickResultByTitle("脚本应用测试项");
@@ -313,50 +290,23 @@ check(
   scriptClicked === true && scriptViewVisible === true,
   `clicked=${scriptClicked} view=${scriptViewVisible}`
 );
-check("打开脚本应用：hide=false（点应用外面不会隐藏）", (await readHide()) === false, `hide=${await readHide()}`);
+check("打开脚本应用：不再发送「不隐藏」标志", (await blurSyncCount()) === 0);
 check("脚本应用 view:js 已执行", (await evalJs(`window.__scriptViewRan === true`)) === true);
 
-// ---- 4. 退出详情（输入别的关键词，仍有结果）→ hide=true（回到结果列表）----
-await typeKeyword("纯链接");
-check("退出详情、结果列表展示中：hide=true", (await readHide()) === true, `hide=${await readHide()}`);
-
-// ---- 5. 无结果 → 什么都不显示（不出提示），仍回到等待搜索 hide=true ----
-await typeKeyword("@@@@@@"); // 必定搜不到的关键词
-const noResultState = await evalJs(`JSON.stringify({
-  toast: !!document.querySelector('#matchItems .no-result-toast'),
-  listEmpty: document.getElementById('matchItems').innerHTML.trim() === '',
-  resultHidden: document.getElementById('matchResult').style.display === 'none',
-})`).then(JSON.parse);
-check(
-  "无结果：不显示任何提示、列表为空",
-  noResultState.toast === false && noResultState.listEmpty === true && noResultState.resultHidden === true,
-  JSON.stringify(noResultState)
-);
-check("无结果（等待搜索态）：hide=true", (await readHide()) === true, `hide=${await readHide()}`);
-
-// ---- 6. `:debug` 指令模式 → hide=false ----
+// ---- 4. 输入 `:debug` → 不再发送「不隐藏」标志 ----
 await typeKeyword(":debug");
-check(":debug 指令模式：hide=false", (await readHide()) === false, `hide=${await readHide()}`);
+check("`:debug` 指令模式：不再发送「不隐藏」标志", (await blurSyncCount()) === 0);
 
-// ---- 7. 清空 → 等待搜索 → hide=true（恢复自动隐藏）----
-await typeKeyword("");
-check("清空回到等待搜索：hide=true", (await readHide()) === true, `hide=${await readHide()}`);
-
-// ---- 8. 点击 URL 结果 → 显式收起窗口 ----
-await typeKeyword("纯链接");
-await clickResultByTitle("纯链接项");
-await sleep(500);
-const afterOpenUrl = await evalJs(`JSON.stringify({
-  inputEmpty: document.getElementById('my_search_input').value === '',
-  resultHidden: document.getElementById('matchResult').style.display === 'none',
-  opened: window.__openedUrls,
-  hideAfter: window.__hideCalls[window.__hideCalls.length - 1],
-})`).then(JSON.parse);
+// ---- 5. 全程 IPC 里从未出现旧的状态门控命令 ----
+const allInvoked = await evalJs(`JSON.stringify([...new Set(window.__invoked)])`).then(JSON.parse);
 check(
-  "点 URL 结果：视图被收起、链接已打开、并恢复 hide=true",
-  afterOpenUrl.inputEmpty && afterOpenUrl.resultHidden && afterOpenUrl.opened.length > 0 && afterOpenUrl.hideAfter === true,
-  JSON.stringify(afterOpenUrl)
+  "全程 IPC 未出现 set_hide_on_blur（旧门控已彻底移除）",
+  !allInvoked.includes("set_hide_on_blur") && !allInvoked.includes("setHideOnBlur"),
+  JSON.stringify(allInvoked)
 );
+
+// ---- 6. 无页面异常 ----
+check("无未捕获页面异常", pageErrors.length === 0, pageErrors.join(" | ").slice(0, 300));
 
 console.log("\n=== PAGE ERRORS ===");
 console.log(pageErrors.length ? pageErrors.join("\n") : "(none)");

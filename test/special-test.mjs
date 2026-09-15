@@ -7,7 +7,7 @@
  *   （否则第一次装好就会把全部数据标成「新」，与用户直觉不符）
  * - **再次加载且数据未变**：应返回 0 条（正确去重）。
  */
-import { SearchEngine, SPECIAL_KEYWORD } from "../src/lib/search-engine.js";
+import { SearchEngine, SPECIAL_KEYWORD } from "../src/lib/search-engine.ts";
 
 const SUBS = [
   { url: "https://cdn.jsdelivr.net/gh/My-Search/official-subscribe@dev/only-system-index.ms", title: "系统项" },
@@ -28,7 +28,7 @@ const nw = await e.search(SPECIAL_KEYWORD.new);
 check("<new> 首次加载应为 0 条", nw.length === 0, `实际 ${nw.length}`);
 
 // ---- 加分 + 历史 ----
-const { scoreSelect, historySelect } = await import("../src/lib/search-engine.js");
+const { scoreSelect, historySelect } = await import("../src/lib/search-engine.ts");
 const item = e.searchData[0];
 scoreSelect(item);
 historySelect(item);

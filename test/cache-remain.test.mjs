@@ -13,7 +13,7 @@ import {
   formatRemainDuration,
   formatClockTime,
   formatCacheCountText,
-} from "../src/lib/util.js";
+} from "../src/lib/util.ts";
 
 let pass = 0;
 let fail = 0;

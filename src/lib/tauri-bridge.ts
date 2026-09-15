@@ -4,6 +4,16 @@
  */
 
 import { invoke } from "@tauri-apps/api/core";
+import type {
+  HttpRequestOptions,
+  RawGithubUrl,
+  UpdateCompletePayload,
+  UpdateInfo,
+  UpdateProgress,
+} from "../types/index.ts";
+
+/** 取消监听函数（Tauri listen 的返回值） */
+export type UnlistenFn = () => void;
 
 /** 是否运行在 Tauri 环境 */
 export const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -19,19 +29,19 @@ export const DEFAULT_SUBSCRIBE_TEXT = `
  * Rust 端内置 jsDelivr -> raw.githubusercontent -> GitHub API 回退，
  * 因此即便直连 GitHub 被墙也能拿到订阅内容。
  */
-export async function httpGet(url) {
+export async function httpGet(url: string): Promise<string> {
   if (isTauri) {
-    return await invoke("http_get", { url });
+    return await invoke<string>("http_get", { url });
   }
   // 浏览器开发环境：与 Rust 端一致的回退策略
   // （jsDelivr CDN 优先，raw.githubusercontent 直连兜底）
-  const candidates = [];
+  const candidates: string[] = [];
   if (url.includes("raw.githubusercontent.com/")) {
     const cdn = rawToJsDelivr(url);
     if (cdn) candidates.push(cdn);
   }
   candidates.push(url);
-  let lastErr = null;
+  let lastErr: unknown = null;
   for (const candidate of candidates) {
     try {
       const resp = await fetch(candidate);
@@ -48,11 +58,14 @@ export async function httpGet(url) {
  * 通用 HTTP 请求（供 TisHub 订阅市场使用）
  * Tauri 环境走 Rust 代理（绕开 CORS、可带 GitHub Token）；
  * 浏览器环境直接 fetch（受 CORS 限制，仅便于开发调试）。
- * @returns {Promise<any>} 已解析的 JSON（解析失败时返回文本）
+ * @returns 已解析的 JSON（解析失败时返回文本）
  */
-export async function httpRequest(url, { method = "GET", headers = {}, body } = {}) {
+export async function httpRequest(
+  url: string,
+  { method = "GET", headers = {}, body }: HttpRequestOptions = {}
+): Promise<unknown> {
   if (isTauri) {
-    const text = await invoke("http_request", {
+    const text = await invoke<string>("http_request", {
       method,
       url,
       headers,
@@ -70,7 +83,7 @@ export async function httpRequest(url, { method = "GET", headers = {}, body } = 
   return parseMaybeJson(text);
 }
 
-function parseMaybeJson(text) {
+function parseMaybeJson(text: string | null): unknown {
   if (text == null || text === "") return null;
   try {
     return JSON.parse(text);
@@ -86,14 +99,14 @@ function parseMaybeJson(text) {
  *   - `{owner}/{repo}/refs/{heads|tags}/{ref}/{path...}`
  * 缺少文件名时返回 null（不拼非法 URL）。
  */
-export function parseRawGithubUrl(url) {
+export function parseRawGithubUrl(url: string): RawGithubUrl | null {
   const prefix = "https://raw.githubusercontent.com/";
   if (typeof url !== "string" || !url.startsWith(prefix)) return null;
   const parts = url.slice(prefix.length).split("/").filter(Boolean);
   if (parts.length < 4) return null;
   const [owner, repo] = parts;
-  let branch;
-  let pathStart;
+  let branch: string;
+  let pathStart: number;
   if (parts[2] === "refs") {
     if (parts.length < 6 || (parts[3] !== "heads" && parts[3] !== "tags")) return null;
     branch = parts[4];
@@ -106,7 +119,7 @@ export function parseRawGithubUrl(url) {
 }
 
 /** raw.githubusercontent -> jsDelivr CDN */
-function rawToJsDelivr(url) {
+function rawToJsDelivr(url: string): string | null {
   const parsed = parseRawGithubUrl(url);
   if (!parsed) return null;
   const { owner, repo, branch, path } = parsed;
@@ -114,7 +127,7 @@ function rawToJsDelivr(url) {
 }
 
 /** 打开外部链接（默认浏览器） */
-export async function openExternal(url) {
+export async function openExternal(url: string): Promise<void> {
   if (!url) return;
   if (isTauri) {
     try {
@@ -128,23 +141,23 @@ export async function openExternal(url) {
 }
 
 /** 退出应用 */
-export async function quitApp() {
+export async function quitApp(): Promise<void> {
   if (isTauri) {
     await invoke("quit_app");
   }
 }
 
 /** 打开独立配置窗口（订阅管理） */
-export async function openConfigWindow() {
+export async function openConfigWindow(): Promise<void> {
   if (isTauri) {
     await invoke("open_config_window");
   }
 }
 
 /** 获取默认订阅原文本 */
-export async function getDefaultSubscribeText() {
+export async function getDefaultSubscribeText(): Promise<string> {
   if (isTauri) {
-    return await invoke("get_default_subscribe_text");
+    return await invoke<string>("get_default_subscribe_text");
   }
   return DEFAULT_SUBSCRIBE_TEXT;
 }
@@ -156,10 +169,10 @@ const DEFAULT_TOGGLE_SHORTCUT = "ctrl+alt+s";
  * 获取当前「呼出/隐藏」全局快捷键字符串（如 "ctrl+alt+s"）。
  * 非 Tauri 环境（浏览器调试）返回默认值。
  */
-export async function getToggleShortcut() {
+export async function getToggleShortcut(): Promise<string> {
   if (isTauri) {
     try {
-      return await invoke("get_toggle_shortcut");
+      return await invoke<string>("get_toggle_shortcut");
     } catch (e) {
       console.warn("读取快捷键设置失败:", e);
     }
@@ -169,10 +182,10 @@ export async function getToggleShortcut() {
 
 /**
  * 设置「呼出/隐藏」全局快捷键（Rust 端立即重新注册并持久化）。
- * @param {string} shortcut 如 "ctrl+alt+s"
+ * @param shortcut 如 "ctrl+alt+s"
  * @throws 设置失败时抛错（如组合键被其它程序占用）
  */
-export async function setToggleShortcut(shortcut) {
+export async function setToggleShortcut(shortcut: string): Promise<void> {
   if (isTauri) {
     await invoke("set_toggle_shortcut", { shortcut });
   }
@@ -189,9 +202,9 @@ export async function setToggleShortcut(shortcut) {
  *
  * 提供 flushWindowHeight() 立即下发（如详情视图高度变化需要立即可见时）。
  *
- * @param {number} height 目标高度（逻辑像素）
+ * @param height 目标高度（逻辑像素）
  */
-export async function setWindowHeight(height) {
+export async function setWindowHeight(height: number): Promise<void> {
   if (!isTauri) return;
   pendingHeight = height;
   if (heightFlushTimer != null) {
@@ -203,7 +216,7 @@ export async function setWindowHeight(height) {
 }
 
 /** 立即下发当前 pending 的窗口高度（用于详情视图等需要立即生效的场景） */
-export function flushWindowHeight() {
+export function flushWindowHeight(): void {
   if (!isTauri) return;
   if (heightFlushTimer != null) {
     clearTimeout(heightFlushTimer);
@@ -220,18 +233,16 @@ export function flushWindowHeight() {
 /** 防抖尾沿时长（ms）——50ms 足以合并不在同一帧内的多次调整 */
 const HEIGHT_DEBOUNCE_MS = 50;
 /** 待下发的目标高度（null = 没有待下发） */
-let pendingHeight = null;
+let pendingHeight: number | null = null;
 /** 防抖定时器 */
-let heightFlushTimer = null;
+let heightFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
 /**
  * 监听主窗口“重新显示”事件（Rust 端 toggle_window 显示窗口时广播）。
  * 用于前端在每次呼出时复位残留的详情/结果视图与窗口高度，避免上次搜索的高窗口残留。
  * 注意：输入框内容属于用户会话，前端复位时会保留未处理完的输入并重新触发搜索。
- * @param {() => void} handler
- * @returns {Promise<(() => void)|null>} 取消监听函数；非 Tauri 环境返回 null
  */
-export async function onMainWindowShown(handler) {
+export async function onMainWindowShown(handler: () => void): Promise<UnlistenFn | null> {
   if (!isTauri) return null;
   try {
     const { listen } = await import("@tauri-apps/api/event");
@@ -247,10 +258,8 @@ export async function onMainWindowShown(handler) {
  * 托盘菜单无 WebView，无法直接操作 localStorage，因此 Rust 端通过事件
  * 通知前端执行清理；前端收到后删除可重建缓存键（订阅数据 + 订阅指纹），
  * 主窗口下次唤出时检测到缓存失效会自动重新加载。
- * @param {() => void} handler
- * @returns {Promise<(() => void)|null>} 取消监听函数；非 Tauri 环境返回 null
  */
-export async function onClearCache(handler) {
+export async function onClearCache(handler: () => void): Promise<UnlistenFn | null> {
   if (!isTauri) return null;
   try {
     const { listen } = await import("@tauri-apps/api/event");
@@ -262,25 +271,11 @@ export async function onClearCache(handler) {
 }
 
 /**
- * 同步「主窗口失焦时是否自动隐藏」到 Rust 侧（失焦判定在 Rust 的 window 事件里）。
- *
- * 对应油猴版 showView() 中输入框 blur 的判定：只有处于「等待搜索」状态才隐藏；
- * 显示搜索结果 / 简述内容 / 附加内容 / 脚本应用、搜索进行中都**不隐藏**。
- * 非 Tauri 环境无需同步（浏览器里没有悬浮窗）。
- * @param {boolean} hide true=失焦自动隐藏
+ * 隐藏窗口（悬浮窗失焦自动隐藏，前端也可主动调用）
+ * @see 失焦隐藏现由 Rust 侧无条件执行（`on_window_event` 收到 Focused(false) 即隐藏），
+ *      前端无需再同步「是否允许隐藏」。
  */
-export async function setHideOnBlur(hide) {
-  if (!isTauri) return;
-  try {
-    await invoke("set_hide_on_blur", { hide: !!hide });
-  } catch (e) {
-    // 同步失败时保持 Rust 侧旧值，不应影响搜索主流程
-    console.warn("同步失焦隐藏状态失败:", e);
-  }
-}
-
-/** 隐藏窗口（悬浮窗失焦自动隐藏，前端也可主动调用） */
-export async function hideWindow() {
+export async function hideWindow(): Promise<void> {
   if (isTauri) {
     const { getCurrentWindow } = await import("@tauri-apps/api/window");
     const win = getCurrentWindow();
@@ -291,7 +286,7 @@ export async function hideWindow() {
 }
 
 /** 拖动窗口（用于搜索框拖拽） */
-export async function startDragging() {
+export async function startDragging(): Promise<void> {
   if (isTauri) {
     try {
       const { getCurrentWindow } = await import("@tauri-apps/api/window");
@@ -300,4 +295,104 @@ export async function startDragging() {
       /* ignore */
     }
   }
+}
+
+/** 监听窗口焦点变化（用于自动聚焦输入框） */
+export async function onWindowFocusChanged(
+  handler: (focused: boolean) => void
+): Promise<UnlistenFn | null> {
+  if (!isTauri) return null;
+  try {
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    return await getCurrentWindow().onFocusChanged(({ payload }) => handler(payload));
+  } catch (e) {
+    console.warn("监听窗口焦点变化失败:", e);
+    return null;
+  }
+}
+
+/** 当前窗口是否可见（非 Tauri 环境视为可见） */
+export async function isWindowVisible(): Promise<boolean> {
+  if (!isTauri) return true;
+  try {
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    return await getCurrentWindow().isVisible();
+  } catch (e) {
+    return true;
+  }
+}
+
+// ===================== 版本更新 =====================
+
+const EMPTY_UPDATE_INFO: UpdateInfo = {
+  has_update: false,
+  latest_version: "",
+  current_version: "",
+  download_url: "",
+  release_url: "",
+};
+
+/**
+ * 检查 GitHub Releases 是否有新版本。
+ */
+export async function checkUpdate(): Promise<UpdateInfo> {
+  if (!isTauri) return { ...EMPTY_UPDATE_INFO };
+  try {
+    return await invoke<UpdateInfo>("check_update");
+  } catch (e) {
+    console.warn("检查更新失败:", e);
+    return { ...EMPTY_UPDATE_INFO };
+  }
+}
+
+/**
+ * 开始下载更新包（自动推送到安装目录，完成后打开安装文件）。
+ * @param downloadUrl 下载地址
+ */
+export async function startUpdateDownload(downloadUrl: string): Promise<void> {
+  if (!isTauri) return;
+  await invoke("start_update_download", { downloadUrl });
+}
+
+/**
+ * 监听下载进度。
+ */
+export async function onUpdateProgress(
+  handler: (progress: UpdateProgress) => void
+): Promise<UnlistenFn | null> {
+  if (!isTauri) return null;
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    return await listen<UpdateProgress>("update://progress", (event) => handler(event.payload));
+  } catch (e) {
+    console.warn("监听下载进度失败:", e);
+    return null;
+  }
+}
+
+/**
+ * 监听下载完成事件。
+ */
+export async function onUpdateComplete(
+  handler: (payload: UpdateCompletePayload) => void
+): Promise<UnlistenFn | null> {
+  if (!isTauri) return null;
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    return await listen<UpdateCompletePayload>("update://complete", (event) =>
+      handler(event.payload)
+    );
+  } catch (e) {
+    console.warn("监听下载完成事件失败:", e);
+    return null;
+  }
+}
+
+/**
+ * 打开已下载好的安装文件（由用户在界面点击「安装更新」时调用）。
+ * 会先校验文件是否存在再打开安装程序。
+ */
+export async function openInstaller(): Promise<void> {
+  if (!isTauri) return;
+  await invoke("open_installer");
 }

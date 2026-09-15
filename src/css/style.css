@@ -113,8 +113,10 @@ html, body {
   font-weight: 400;
   margin: 0px;
   -webkit-app-region: no-drag;
-  animation-duration: 1s;
-  animation-name: my_search_view;
+  /* 不还原原版的 @keyframes my_search_view（width 0→100% 的「从左到右展开」）：
+     原版脚本里这段动画随页面加载就跑完了，用户看不到；桌面版因 WebView 常驻、
+     呼出只做 hide/show（DOM 不重建），反而会在冷启动首次呼出时被看到「划出」一下。
+     按需求彻底移除——输入框任何时刻都直接满宽显示。 */
   box-shadow: none;
 }
 
@@ -128,23 +130,14 @@ html, body {
   color: #757575;
 }
 
-/* 输入框展开动画（还原 @keyframes my_search_view） */
-@keyframes my_search_view {
-  0% { width: 0px; }
-  50% { width: 50%; }
-  100% { width: 100%; }
-}
-
 /* 输入框右边 logo 按钮（还原 #logoButton） */
 #logoButton {
-  position: absolute;
   font-size: 12px;
-  right: 5px;
   padding: 0px;
   border: none;
   display: block;
   background: rgba(255, 255, 255, 0);
-  margin: 0px 7px 0px 0px;
+  margin: 0px;
   cursor: pointer !important;
   outline: none;
   -webkit-app-region: no-drag;
@@ -157,6 +150,69 @@ html, body {
 #logoButton img {
   display: block;
   width: 25px;
+}
+
+/* logo 外层容器：相对定位，与 #logoButton 共享同一区域用于在两者间切换 */
+.logo-wrapper {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 25px;
+  height: 25px;
+  margin: 0px 4px 0px 0px;
+  -webkit-app-region: no-drag;
+}
+
+/* 升级徽章：替换原叶子 logo。icon 在中心，环形进度条紧贴外围。
+   整体尺寸比 #logoButton 略大，让环能在原 logo 范围内可见。 */
+.update-badge {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+  animation: badge-pop 0.3s ease-out;
+  transition: transform 0.15s ease;
+}
+.update-badge:hover {
+  transform: scale(1.1);
+}
+
+.update-badge .update-badge-icon {
+  width: 24px;
+  height: 24px;
+  display: block;
+  pointer-events: none;
+}
+
+.update-badge .update-badge-ring {
+  position: absolute;
+  inset: -3px;
+  width: calc(100% + 6px);
+  height: calc(100% + 6px);
+  display: block;
+  pointer-events: none;
+}
+
+.update-badge .ring-bg {
+  stroke: #e0e0e0;
+  opacity: 0.6;
+}
+.update-badge .ring-fg {
+  stroke: #0f82ff;
+  transition: stroke-dashoffset 0.2s ease-out;
+}
+.update-badge.done .ring-fg {
+  stroke: #4caf50;
+}
+
+@keyframes badge-pop {
+  0% { transform: scale(0); opacity: 0; }
+  60% { transform: scale(1.2); }
+  100% { transform: scale(1); opacity: 1; }
 }
 
 /* ========== 结果列表（还原 #matchResult） ========== */
@@ -457,6 +513,41 @@ html, body {
   max-width: 100%;
 }
 
+/* 表格（showdown tables:true，对齐原版 github-markdown-css 的基础表格样式） */
+#text_show .markdown-body table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  margin: 8px 0;
+  border-collapse: collapse;
+  overflow-x: auto;
+}
+
+#text_show .markdown-body th,
+#text_show .markdown-body td {
+  padding: 5px 10px;
+  border: 1px solid #d0d7de;
+  text-align: left;
+  vertical-align: top;
+}
+
+#text_show .markdown-body th {
+  background: #f6f8fa;
+  font-weight: 600;
+}
+
+#text_show .markdown-body tr:nth-child(2n) td {
+  background: #f6f8fa;
+}
+
+/*
+ * <summary> 收纳三角标题：UA 样式表不保证 cursor: pointer，桌面端 WebView2 偶尔掉手型。
+ * 这里只补 cursor：其他外观（背景框 / 字体 / 分割线）保持浏览器原生，避免视觉污染。
+ */
+#text_show .markdown-body summary {
+  cursor: pointer;
+}
+
 /* ========== 滚动条（极简风格） ========== */
 
 #text_show::-webkit-scrollbar {
@@ -708,6 +799,29 @@ html.ms-config-root {
   color: var(--muted);
 }
 
+/* 顶栏 GitHub 图标 */
+#ms-config-view .cfg-github-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  color: var(--muted);
+  text-decoration: none;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+#ms-config-view .cfg-github-link:hover {
+  background: var(--accent-soft-bg);
+  color: var(--accent);
+}
+#ms-config-view .cfg-github-link svg {
+  width: 20px;
+  height: 20px;
+  display: block;
+}
+
 /* ---- 主体：左菜单 + 右内容 ---- */
 #ms-config-view .cfg-main {
   flex: 1;
@@ -729,6 +843,9 @@ html.ms-config-root {
 
 #ms-config-view .nav-item {
   width: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
   text-align: left;
   padding: 9px 12px;
   border: none;
@@ -737,7 +854,18 @@ html.ms-config-root {
   color: var(--text);
   font-size: 13.5px;
   font-weight: 500;
+  cursor: pointer;
   transition: background 0.12s ease, color 0.12s ease;
+}
+
+#ms-config-view .nav-item svg {
+  flex-shrink: 0;
+  opacity: 0.72;
+  transition: opacity 0.12s ease;
+}
+
+#ms-config-view .nav-item.on svg {
+  opacity: 1;
 }
 
 #ms-config-view .nav-item:hover {
@@ -1123,6 +1251,12 @@ html.ms-config-root {
   background: var(--field);
 }
 
+/* 折叠态：表单 DOM 常驻（折叠按钮与表单切换即时生效、便于程序化填值），
+   但必须隐藏 —— 默认界面只显示「＋ 添加订阅」按钮 */
+#ms-config-view .sub-add:not(.open) {
+  display: none;
+}
+
 #ms-config-view .sub-add input {
   box-sizing: border-box;
   width: 100%;
@@ -1331,7 +1465,7 @@ html.ms-config-root {
   color: var(--muted);
 }
 
-/* ---- 快捷键设置 ---- */
+/* ---- 快捷键 ---- */
 #ms-config-view .shortcut-row {
   display: flex;
   align-items: center;
@@ -1437,6 +1571,132 @@ html.ms-config-root {
   color: var(--err);
   background: transparent;
   animation: none;
+}
+
+/* ---- 关于软件 ---- */
+#ms-config-view .page.about .about-info {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 24px 14px 16px;
+  text-align: center;
+}
+#ms-config-view .about-logo {
+  width: 56px;
+  height: 56px;
+  margin-bottom: 4px;
+}
+#ms-config-view .about-logo svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+#ms-config-view .about-app-name {
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text);
+}
+#ms-config-view .about-version {
+  font-size: 13px;
+  color: var(--muted);
+  font-family: monospace;
+}
+#ms-config-view .about-desc {
+  font-size: 13px;
+  color: var(--muted);
+  margin-top: 4px;
+  line-height: 1.5;
+}
+#ms-config-view .about-links {
+  display: flex;
+  gap: 14px;
+  margin-top: 8px;
+}
+#ms-config-view .about-links a {
+  font-size: 12px;
+  color: var(--accent);
+  text-decoration: none;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: var(--accent-soft-bg);
+  transition: all 0.2s ease;
+}
+#ms-config-view .about-links a:hover {
+  background: var(--accent-soft-border);
+  color: var(--accent);
+}
+#ms-config-view .about-update {
+  border-top: 1px solid var(--line);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+#ms-config-view .about-update-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+}
+#ms-config-view .about-update-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: default;
+}
+#ms-config-view .about-update-row.clickable {
+  cursor: pointer;
+}
+#ms-config-view .about-update-icon {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+#ms-config-view .about-update-row.clickable .about-update-icon {
+  color: var(--accent);
+}
+#ms-config-view .about-update-status {
+  font-size: 12px;
+  color: var(--muted);
+}
+#ms-config-view .about-update-status.checking {
+  color: var(--muted);
+}
+#ms-config-view .about-update-status.latest {
+  color: var(--ok);
+}
+#ms-config-view .about-update-status.new-version {
+  color: var(--accent);
+}
+#ms-config-view .about-update-status.error {
+  color: var(--err);
+}
+/* 链接样式的按钮（与 .about-links 内的 a 标签一致） */
+#ms-config-view .about-links button.about-link-btn {
+  font-size: 12px;
+  color: var(--accent);
+  text-decoration: none;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: var(--accent-soft-bg);
+  transition: all 0.2s ease;
+  border: none;
+  font-family: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  line-height: 1.5;
+}
+#ms-config-view .about-links button.about-link-btn:hover {
+  background: var(--accent-soft-border);
+  color: var(--accent);
+}
+#ms-config-view .about-links button.about-link-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 /* ---- 数据缓存 ---- */

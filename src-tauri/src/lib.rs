@@ -11,11 +11,13 @@
 //! - WebView 数据目录固定化：保证 localStorage（订阅/历史/权重）持久化
 //! - 订阅/配置存储（JSON 文件，基于 tauri-plugin-store）
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tauri_plugin_store::StoreExt;
+
+/// 存储已下载的安装文件路径，供 open_installer 使用
+struct DownloadedInstallerPath(Mutex<Option<String>>);
 
 /// 全局快捷键组合：呼出/隐藏主窗口的**默认值**（用户可在「设置 → 快捷键设置」自定义，
 /// 自定义值持久化在 settings.json，见 get_toggle_shortcut / set_toggle_shortcut）
@@ -34,31 +36,6 @@ const EVENT_MAIN_WINDOW_SHOWN: &str = "my-search://main-window-shown";
 /// 48 = 2(上边框)+44(#searchBox)+2(下边框)，缩放下取整对称、上下灰边等厚。
 const COLLAPSED_WINDOW_HEIGHT: f64 = 48.0;
 
-/// 主窗口失焦时是否自动隐藏（前端通过 `set_hide_on_blur` 同步）。
-///
-/// 取值对应油猴版 `showView()` 里输入框 blur 的判定：
-/// 等待搜索，以及**结果列表展示中**都隐藏（结果列表失焦收起是桌面版相对原版的调整）；
-/// 显示简述内容、附加内容、脚本应用（脚本视图）等详情视图，
-/// 以及搜索进行中、`:debug` 模式都不隐藏。
-/// 详见 README「失焦隐藏」与 `src/lib/util.js` 的 `shouldHideOnBlur()`。
-/// 初值 true：前端尚未同步时保持旧版行为（失焦即隐藏），
-/// 避免出现「窗口置顶且怎么点都不消失」的最坏情况。
-#[derive(Debug)]
-struct BlurHideState(AtomicBool);
-
-impl Default for BlurHideState {
-    fn default() -> Self {
-        Self(AtomicBool::new(true))
-    }
-}
-
-/// 写入「失焦是否自动隐藏」标志（命令与窗口显示复位共用）
-fn set_hide_on_blur_flag(app: &tauri::AppHandle, hide: bool) {
-    app.state::<BlurHideState>()
-        .0
-        .store(hide, Ordering::Relaxed);
-}
-
 // ===================== 窗口定位 =====================
 /// 选择目标显示器：优先取鼠标所在屏幕（多显示器下更符合直觉），
 /// 取不到时回退到窗口当前所在屏幕。
@@ -73,21 +50,33 @@ fn target_monitor(window: &tauri::WebviewWindow) -> Option<tauri::Monitor> {
 
 /// 将窗口移动到目标显示器的顶部居中位置（y 约为屏幕高度的 22%），
 /// 与原版一致：呼出时显示在屏幕偏上的居中位置，而不是跟随鼠标。
-fn position_window_top_center(window: &tauri::WebviewWindow) {
-    let Some(monitor) = target_monitor(window) else {
-        let _ = window.center();
-        return;
-    };
+///
+/// `monitor`：由调用方选定并显式传入，避免此处再次查询（多显示器下鼠标可能
+/// 已移动）导致「按 A 屏定宽、却按 B 屏居中」。
+/// `logical_width`：即将设置的窗口逻辑宽度。显式传入而不用 `outer_size()` 回读，
+/// 因为 Windows 上刚 `set_size` 后回读可能仍是旧尺寸（本项目曾因此出现首帧错位），
+/// 会导致居中偏左/偏右。传入目标宽度后按显示器缩放换算成物理像素参与居中。
+fn position_window_top_center(
+    window: &tauri::WebviewWindow,
+    monitor: &tauri::Monitor,
+    logical_width: f64,
+) {
     let screen = monitor.size();
     let origin = monitor.position();
-    let Ok(size) = window.outer_size() else {
-        return;
+    let scale = monitor.scale_factor();
+    let scale = if scale > 0.0 { scale } else { 1.0 };
+    let win_w = (logical_width * scale).round().max(0.0) as u32;
+    // 宽度未知时退回回读值，保证仍能居中
+    let win_w = if win_w == 0 {
+        window.outer_size().map(|s| s.width).unwrap_or(screen.width)
+    } else {
+        win_w
     };
+    let win_h = window.outer_size().map(|s| s.height).unwrap_or(0);
     // 考虑显示器自身偏移，保证多显示器下也居中于所在屏幕
-    let x = origin.x + ((screen.width.saturating_sub(size.width)) / 2) as i32;
+    let x = origin.x + ((screen.width.saturating_sub(win_w)) / 2) as i32;
     let y = origin.y
-        + ((screen.height as f64 * 0.22) as u32).min(screen.height.saturating_sub(size.height))
-            as i32;
+        + ((screen.height as f64 * 0.22) as u32).min(screen.height.saturating_sub(win_h)) as i32;
     let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
 }
 
@@ -98,12 +87,18 @@ fn toggle_window(app: &tauri::AppHandle) {
             collapse_main_window(&window);
             let _ = window.hide();
         } else {
-            // 每次显示都把「失焦隐藏」复位为允许：
-            // 前端收到 EVENT_MAIN_WINDOW_SHOWN 后会复位视图并重新同步真实状态，
-            // 这样即使前端因异常未能同步，也不会出现「置顶窗口怎么点都不消失」。
-            set_hide_on_blur_flag(app, true);
-            // 呼出：先定位到屏幕偏上的居中位置，再显示并聚焦
-            position_window_top_center(&window);
+            // 呼出：先选定目标屏幕（鼠标所在屏，回退窗口当前屏），
+            // 按该屏宽度比例定宽，再居中定位，最后显示并聚焦。
+            // 宽度与居中必须用同一块屏幕、且先定宽再定位，
+            // 否则会按旧宽度居中而偏左/偏右（多显示器下更明显）。
+            if let Some(monitor) = target_monitor(&window) {
+                let width = target_window_width(&monitor);
+                let _ = window.set_size(tauri::LogicalSize::new(width, COLLAPSED_WINDOW_HEIGHT));
+                position_window_top_center(&window, &monitor, width);
+            } else {
+                collapse_main_window(&window);
+                let _ = window.center();
+            }
             let _ = window.show();
             let _ = window.set_focus();
             // 通知前端：窗口重新显示（前端据此复位残留的详情/结果视图与高度，
@@ -329,16 +324,6 @@ async fn http_get(url: String) -> Result<String, String> {
     Err(format!("请求失败（{}）", errors.join("；")))
 }
 
-/// 同步「主窗口失焦时是否自动隐藏」。
-///
-/// 前端按当前视图状态计算后调用（见 src/main.js 的 syncBlurHide，
-/// 规则见 README「失焦隐藏」）：等待搜索 / 结果列表展示中可隐藏；
-/// 查看简述内容 / 附加内容 / 脚本应用、搜索进行中都不隐藏。
-#[tauri::command]
-fn set_hide_on_blur(app: tauri::AppHandle, hide: bool) {
-    set_hide_on_blur_flag(&app, hide);
-}
-
 /// 通用 HTTP 请求代理：供前端访问 GitHub API（TisHub 订阅市场）
 ///
 /// - 绕开 WebView 的 CORS 限制
@@ -438,33 +423,64 @@ fn convert_raw_to_api(url: &str) -> Option<String> {
 }
 
 // ===================== 窗口尺寸 =====================
-/// 窗口宽度约束：最小 320px，最大 720px，且不超过屏幕宽度的 90%
+/// 窗口宽度（还原油猴版 `#my_search_box` 的媒体查询分档，见 `我的搜索-7.9.5.js`）：
+/// 原脚本用 `position: fixed` + `left/right` 等值百分比让搜索框居中，
+/// 并按视口宽度分档取屏幕占比——`>1400px` 取 52%、`>1200px` 取 60%、
+/// `>800px` 取 70%、更窄取 80%。桌面版窗口即视口，故以所在显示器宽度作为
+/// 分档依据，直接算出目标宽度（不再是固定像素）。
+/// 额外用屏幕宽度的 90% 兜底（原脚本无此限制，桌面版避免超宽屏/多显示器下过宽）。
 const MIN_WINDOW_WIDTH: f64 = 320.0;
-const MAX_WINDOW_WIDTH: f64 = 720.0;
 const MAX_SCREEN_WIDTH_RATIO: f64 = 0.9;
 
-fn clamp_window_width(window: &tauri::WebviewWindow) -> f64 {
-    let current = window.outer_size().unwrap_or_default().width as f64;
-    let mut max = MAX_WINDOW_WIDTH;
-    if let Some(monitor) = window.current_monitor().unwrap_or(None) {
-        let screen_w = monitor.size().width as f64;
-        max = max.min(screen_w * MAX_SCREEN_WIDTH_RATIO);
+/// 原脚本媒体查询分档：屏幕宽度 → 搜索框占屏幕宽度的比例
+fn box_width_ratio(screen_w: f64) -> f64 {
+    if screen_w > 1400.0 {
+        0.52
+    } else if screen_w > 1200.0 {
+        0.60
+    } else if screen_w > 800.0 {
+        0.70
+    } else {
+        0.80
     }
-    current.clamp(MIN_WINDOW_WIDTH, max)
 }
 
-/// 调整主窗口尺寸（前端根据结果数量动态展开/收起，高度可变、宽度受约束）
+/// 计算主窗口目标宽度（逻辑像素）：按原脚本分档取屏幕占比，
+/// 并限制在 [320px, 屏幕宽度 90%] 内。
+///
+/// `monitor`：由调用方选定并显式传入，与本函数配套的居中定位共用同一块屏幕，
+/// 避免多显示器下「按 A 屏定宽、却按 B 屏居中」。
+/// 注意 `monitor.size()` 是物理像素，而窗口用 `LogicalSize` 设置，
+/// 高 DPI（如 150% 缩放）下必须换算成逻辑宽度，否则分档与 90% 限制都会失真。
+fn target_window_width(monitor: &tauri::Monitor) -> f64 {
+    let scale = monitor.scale_factor();
+    let screen_w = monitor.size().width as f64 / if scale > 0.0 { scale } else { 1.0 };
+    let target = screen_w * box_width_ratio(screen_w);
+    let max = (screen_w * MAX_SCREEN_WIDTH_RATIO).max(MIN_WINDOW_WIDTH);
+    target.clamp(MIN_WINDOW_WIDTH, max)
+}
+
+/// 按窗口当前所在屏幕计算目标宽度（不重新定位时使用）
+fn window_width_for(window: &tauri::WebviewWindow) -> f64 {
+    window
+        .current_monitor()
+        .unwrap_or(None)
+        .map(|m| target_window_width(&m))
+        .unwrap_or(MIN_WINDOW_WIDTH)
+}
+
+/// 调整主窗口尺寸（前端根据结果数量动态展开/收起，高度可变、宽度按屏幕分档）
 #[tauri::command]
 fn set_window_height(app: tauri::AppHandle, height: f64) {
     if let Some(window) = app.get_webview_window("main") {
-        let width = clamp_window_width(&window);
+        let width = window_width_for(&window);
         let _ = window.set_size(tauri::LogicalSize::new(width, height));
     }
 }
 
 /// 把主窗口收回到搜索框高度（隐藏时调用，避免下次呼出残留上次的高窗口）
 fn collapse_main_window(window: &tauri::WebviewWindow) {
-    let width = clamp_window_width(window);
+    let width = window_width_for(window);
     let _ = window.set_size(tauri::LogicalSize::new(width, COLLAPSED_WINDOW_HEIGHT));
 }
 
@@ -490,8 +506,15 @@ fn quit_app(app: tauri::AppHandle) {
 /// 桌面版的设置是独立窗口，而主窗口是置顶悬浮窗（alwaysOnTop），
 /// 若不先收起，主窗口会盖在设置窗口上（油猴版是同一页面内的面板，不存在此问题）。
 /// 所以打开设置前先把主窗口收起，观感与旧版「失焦即隐藏」一致。
+///
+/// **必须是 async 命令**：Tauri 官方文档（WebviewWindowBuilder 的 Known issues）明确说明：
+/// 在 Windows 上，同步命令中创建 webview 窗口会发生**死锁**（WebView2 已知问题，wry#583）。
+/// 同步命令运行在事件循环线程上，而 `builder.build()` 创建 WebView2 需要事件循环
+/// 继续运转来派发窗口创建/导航消息，两者互相等待 → 窗口停留在 about:blank、
+/// 永不导航、页面永久空白且 Esc 无法关闭（用户反馈的「设置页空白卡死」）。
+/// 改成 async 后命令体在异步运行时线程执行，事件循环保持自由，窗口正常创建。
 #[tauri::command]
-fn open_config_window(app: tauri::AppHandle) {
+async fn open_config_window(app: tauri::AppHandle) {
     use tauri::window::Color;
     use tauri::WebviewWindowBuilder;
 
@@ -523,7 +546,7 @@ fn open_config_window(app: tauri::AppHandle) {
         Color(245, 246, 248, 255) // #f5f6f8 —— 与浅色主题 --surface 一致
     };
 
-let config_url = tauri::WebviewUrl::App("config.html".into());
+    let config_url = tauri::WebviewUrl::App("config.html".into());
     // 注意：不要为配置窗口设置自定义 data_directory。
     // Tauri 默认以 app identifier 作为 WebView 数据目录，两个窗口共享同一份
     // localStorage（Windows/macOS 会自动同步），订阅列表才能互通。
@@ -547,6 +570,289 @@ let config_url = tauri::WebviewUrl::App("config.html".into());
     if let Err(e) = builder.build() {
         eprintln!("创建配置窗口失败: {e}");
     }
+}
+
+// ===================== 版本更新 =====================
+
+/// 版本更新信息
+#[derive(serde::Serialize, serde::Deserialize)]
+struct UpdateInfo {
+    /// 是否有新版本
+    has_update: bool,
+    /// 最新版本号（无更新时为空）
+    latest_version: String,
+    /// 当前版本号
+    current_version: String,
+    /// 下载地址（无更新时为空）
+    download_url: String,
+    /// 发布页地址
+    release_url: String,
+}
+
+/// 下载进度（实时推送到前端）
+#[derive(serde::Serialize, Clone)]
+struct DownloadProgress {
+    /// 已下载字节
+    downloaded: u64,
+    /// 总字节（0 表示未知）
+    total: u64,
+    /// 百分比（0-100，总字节未知时为 0）
+    percent: u8,
+    /// 状态：downloading / done / error
+    status: String,
+    /// 错误信息（status=error 时）
+    error: Option<String>,
+}
+
+/// 检查 GitHub Releases 是否有新版本。
+///
+/// 调用 GitHub API `GET /repos/{owner}/{repo}/releases/latest`，
+/// 解析最新 tag 与当前版本比较，并匹配当前平台的下载资产。
+#[tauri::command]
+async fn check_update() -> Result<UpdateInfo, String> {
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    let owner = "My-Search";
+    let repo = "my-search-desktop";
+    let api_url = format!("https://api.github.com/repos/{owner}/{repo}/releases/latest");
+
+    let client = build_client(10, UA)?;
+    let resp = client
+        .get(&api_url)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| format!("请求 GitHub API 失败: {e}"))?;
+
+    if !resp.status().is_success() {
+        // API 限流 / 无 Release 时静默返回无更新
+        return Ok(UpdateInfo {
+            has_update: false,
+            latest_version: String::new(),
+            current_version: current.clone(),
+            download_url: String::new(),
+            release_url: String::new(),
+        });
+    }
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("解析响应 JSON 失败: {e}"))?;
+
+    let tag_name = json["tag_name"].as_str().unwrap_or("").trim_start_matches('v');
+    let release_url = json["html_url"].as_str().unwrap_or("").to_string();
+
+    // 比较版本号（去掉前置 v）
+    let latest = tag_name.to_string();
+    let has_update = compare_versions(&latest, &current) > 0;
+
+    if !has_update {
+        return Ok(UpdateInfo {
+            has_update: false,
+            latest_version: latest,
+            current_version: current,
+            download_url: String::new(),
+            release_url,
+        });
+    }
+
+    // 匹配当前平台的下载资产
+    let target_ext = if cfg!(target_os = "windows") {
+        ".msi"
+    } else if cfg!(target_os = "macos") {
+        ".dmg"
+    } else {
+        ".AppImage"
+    };
+
+    let download_url = json["assets"]
+        .as_array()
+        .and_then(|assets| {
+            assets.iter().find_map(|asset| {
+                let name = asset["name"].as_str()?;
+                if name.ends_with(target_ext) {
+                    asset["browser_download_url"].as_str().map(|s| s.to_string())
+                } else {
+                    None
+                }
+            })
+        })
+        .unwrap_or_default();
+
+    Ok(UpdateInfo {
+        has_update: true,
+        latest_version: latest,
+        current_version: current,
+        download_url,
+        release_url,
+    })
+}
+
+/// 语义化版本比较：a > b 返回正数，a == b 返回 0，a < b 返回负数。
+/// 支持 `x.y.z` / `vx.y.z` / `x.y.z-beta` 等常见格式。
+fn compare_versions(a: &str, b: &str) -> i32 {
+    fn parse_segments(v: &str) -> Vec<i32> {
+        v.trim_start_matches('v')
+            .split(&['.', '-', '+', '_'][..])
+            .filter_map(|s| s.parse::<i32>().ok())
+            .collect()
+    }
+    let sa = parse_segments(a);
+    let sb = parse_segments(b);
+    for i in 0..sa.len().max(sb.len()) {
+        let va = sa.get(i).copied().unwrap_or(0);
+        let vb = sb.get(i).copied().unwrap_or(0);
+        if va != vb {
+            return va - vb;
+        }
+    }
+    0
+}
+
+/// 下载更新文件到系统临时目录，并通过事件实时推送进度。
+///
+/// 下载完成后自动用系统默认程序打开安装文件（由用户确认安装）。
+#[tauri::command]
+async fn start_update_download(
+    app: tauri::AppHandle,
+    download_url: String,
+) -> Result<(), String> {
+    if download_url.is_empty() {
+        return Err("下载地址为空".into());
+    }
+
+    // 从 URL 中提取文件名，并做安全处理：
+    // - 过滤掉路径穿越段（..）
+    // - 仅保留安全的 basename，丢弃路径前缀
+    let raw_name = download_url.split('/').last().unwrap_or("update.msi");
+    let safe_name = raw_name
+        .split(['/', '\\'])
+        .filter(|s| *s != ".." && *s != ".")
+        .last()
+        .unwrap_or("update.msi");
+    let file_name = if safe_name.is_empty() { "update.msi" } else { safe_name };
+    let temp_dir = std::env::temp_dir();
+    let dest_path = temp_dir.join(file_name);
+
+    let client = build_client(300, UA)?;
+    let resp = client
+        .get(&download_url)
+        .send()
+        .await
+        .map_err(|e| format!("下载请求失败: {e}"))?;
+
+    // 必须检查 HTTP 状态码：404/5xx 时 body 是错误页面 HTML，
+    // 不能把它当作安装文件保存（否则 open_installer 会打开一个 HTML）。
+    if !resp.status().is_success() {
+        return Err(format!("下载失败（HTTP {}）", resp.status().as_u16()));
+    }
+
+    // 文件大小上限：500 MB（防止无 Content-Length 的分块传输耗尽磁盘）
+    const MAX_DOWNLOAD_BYTES: u64 = 500 * 1024 * 1024;
+    if let Some(cl) = resp.content_length() {
+        if cl > MAX_DOWNLOAD_BYTES {
+            return Err(format!("安装文件过大（{} 字节），超过 500 MB 上限", cl));
+        }
+    }
+
+    let total = resp.content_length().unwrap_or(0);
+    let mut downloaded: u64 = 0;
+
+    // 使用 futures-util 做流式下载
+    use futures_util::StreamExt;
+
+    let stream = resp.bytes_stream();
+    let mut file = tokio::fs::File::create(&dest_path)
+        .await
+        .map_err(|e| format!("创建临时文件失败: {e}"))?;
+
+    // 推送进度更新
+    fn emit_progress(
+        app: &tauri::AppHandle,
+        downloaded: u64,
+        total: u64,
+        status: &str,
+        error: Option<String>,
+    ) {
+        let percent = if total > 0 {
+            ((downloaded as f64 / total as f64) * 100.0) as u8
+        } else {
+            0
+        };
+        let _ = app.emit(
+            "update://progress",
+            DownloadProgress {
+                downloaded,
+                total,
+                percent,
+                status: status.to_string(),
+                error,
+            },
+        );
+    }
+
+    tokio::pin!(stream);
+    while let Some(chunk) = stream.next().await {
+        let data = chunk.map_err(|e| format!("下载数据流错误: {e}"))?;
+        downloaded += data.len() as u64;
+        // 流式下载期间也检查文件大小上限（无 Content-Length 时尤其重要）
+        if downloaded > MAX_DOWNLOAD_BYTES {
+            return Err("下载文件超过 500 MB 上限，已中止".into());
+        }
+        use tokio::io::AsyncWriteExt;
+        file.write_all(&data)
+            .await
+            .map_err(|e| format!("写入文件失败: {e}"))?;
+        emit_progress(&app, downloaded, total, "downloading", None);
+    }
+
+    // 下载完成
+    emit_progress(&app, downloaded, total, "done", None);
+
+    // 通知前端下载完成并携带本地文件路径（由前端控制何时打开安装程序）
+    let dest_str = dest_path.to_string_lossy().to_string();
+
+    // 保存安装文件路径供 open_installer 使用
+    // 中毒时取内部值（Mutex 只存 Option<String>，无复杂不变式）
+    let state = app.state::<DownloadedInstallerPath>();
+    let mut guard = match state.0.lock() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    guard.replace(dest_str.clone());
+
+    let _ = app.emit(
+        "update://complete",
+        serde_json::json!({ "path": dest_str }),
+    );
+
+    Ok(())
+}
+
+/// 打开已下载好的安装文件（由用户在界面点击「安装更新」时调用）。
+/// 会先校验文件是否存在，若不存在则返回错误信息。
+#[tauri::command]
+fn open_installer(app: tauri::AppHandle) -> Result<(), String> {
+    let path = {
+        let state = app.state::<DownloadedInstallerPath>();
+        let guard = match state.0.lock() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
+        guard.clone()
+    }
+    .ok_or_else(|| "尚未下载安装文件".to_string())?;
+
+    if !std::path::Path::new(&path).exists() {
+        return Err("安装文件已丢失，请重新下载".to_string());
+    }
+
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_path(path, None::<&str>)
+        .map_err(|e| format!("打开安装文件失败: {e}"))?;
+
+    Ok(())
 }
 
 /// 获取默认订阅（内置官方订阅原文本，与油猴版一致）
@@ -689,7 +995,13 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
             }
             "config" => {
                 force_cursor_visible();
-                open_config_window(app.clone());
+                // 托盘菜单事件在事件循环（主线程）上派发：这里**不能**同步创建
+                // 配置窗口（Windows 上会死锁，见 open_config_window 文档），
+                // 必须把窗口创建任务丢到异步运行时线程上执行。
+                let handle = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    open_config_window(handle).await;
+                });
             }
             "clear-cache" => {
                 force_cursor_visible();
@@ -724,25 +1036,31 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .manage(BlurHideState::default())
         .manage(ActiveShortcutState(Mutex::new(None)))
+        .manage(DownloadedInstallerPath(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             http_get,
             http_request,
             set_window_height,
-            set_hide_on_blur,
             open_url,
             quit_app,
             open_config_window,
             get_default_subscribe_text,
             get_toggle_shortcut,
             set_toggle_shortcut,
+            check_update,
+            start_update_download,
+            open_installer,
         ])
         .setup(|app| {
             // 主窗口使用固定 WebView 数据目录（localStorage 持久化）
             if let Some(main) = app.get_webview_window("main") {
-                // 初始定位（尚未显示，位置会在呼出时再次更新）
-                position_window_top_center(&main);
+                // 初始定宽与定位（尚未显示，真正呼出时会按当时所在屏幕再算一次）
+                if let Some(monitor) = target_monitor(&main) {
+                    let width = target_window_width(&monitor);
+                    let _ = main.set_size(tauri::LogicalSize::new(width, COLLAPSED_WINDOW_HEIGHT));
+                    position_window_top_center(&main, &monitor, width);
+                }
             }
             // 读取自定义快捷键（无自定义则用默认值），注册
             let shortcut = read_toggle_shortcut(app.handle());
@@ -753,23 +1071,20 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // 主窗口失焦时是否自动隐藏由前端决定（失焦事件在 Rust 侧才会收到）——
-            // 「等待搜索」与「结果列表展示中」（含无结果提示）会隐藏，
-            // 查看简述内容 / 附加内容 / 脚本应用等详情视图不会隐藏，
-            // 窗口需要用户自己按 Esc 或全局快捷键（默认 Ctrl+Alt+S，可自定义）收起。
+            // 主窗口一旦失去焦点就无条件隐藏（用户规则）：
+            // 不看当前在干什么——正在查看简述内容 / 附加内容 / 脚本应用、搜索进行中
+            // 都先隐藏；之后再用全局快捷键（默认 Ctrl+Alt+S，可自定义）或托盘唤出，
+            // 前端会按隐藏前的视图状态把内容「原样还原」回来（见 App.vue 的
+            // resumeDetailViewIfAny），所以正在看的东西不会丢。
             if window.label() != "main" {
                 return;
             }
             let tauri::WindowEvent::Focused(false) = event else {
                 return;
             };
-            let app = window.app_handle();
-            if !app.state::<BlurHideState>().0.load(Ordering::Relaxed) {
-                return;
-            }
             // 隐藏时把窗口收回到搜索框高度，
             // 这样下次呼出不会残留上一次搜索时的高窗口（下方空一大块）
-            if let Some(main) = app.get_webview_window("main") {
+            if let Some(main) = window.app_handle().get_webview_window("main") {
                 collapse_main_window(&main);
             }
             let _ = window.hide();
@@ -800,6 +1115,25 @@ mod tests {
     #[test]
     fn default_toggle_shortcut_is_valid() {
         assert!(Shortcut::try_from(super::DEFAULT_TOGGLE_SHORTCUT).is_ok());
+    }
+
+    #[test]
+    fn box_width_ratio_follows_original_media_queries() {
+        // 还原油猴版 @media 分档：>1400 → 52%，>1200 → 60%，>800 → 70%，否则 80%
+        use super::box_width_ratio;
+        assert_eq!(box_width_ratio(2560.0), 0.52);
+        assert_eq!(box_width_ratio(1920.0), 0.52);
+        // 1400 落在下界（原脚本 min-width:1400.1 不命中）→ 60%
+        assert_eq!(box_width_ratio(1400.0), 0.60);
+        // 1400.1 命中 min-width:1400.1 → 52%
+        assert_eq!(box_width_ratio(1400.1), 0.52);
+        assert_eq!(box_width_ratio(1300.0), 0.60);
+        // 1200 命中 max-width:1200 → 70%
+        assert_eq!(box_width_ratio(1200.0), 0.70);
+        assert_eq!(box_width_ratio(1000.0), 0.70);
+        // 800 命中 max-width:800 → 80%
+        assert_eq!(box_width_ratio(800.0), 0.80);
+        assert_eq!(box_width_ratio(640.0), 0.80);
     }
 
     fn jsdelivr(url: &str) -> Option<String> {

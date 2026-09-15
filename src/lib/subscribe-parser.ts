@@ -9,23 +9,37 @@
  * 4. default-tag 处理、转义/恢复
  */
 
-import { parseTag, parseTags, captureRegEx } from "./tags.js";
+import { parseTag, parseTags, captureRegEx } from "./tags.ts";
+import type { SearchItem, SubscribeItem } from "../types/index.ts";
 
 export { parseTag, parseTags };
+
+/** 单标签解析结果（<tis::URL ... />） */
+export interface DesignatedSingTag {
+  tabName: string;
+  tabValue: string;
+  [attribute: string]: string;
+}
+
+/** 双标签解析结果 */
+export interface DoubleTagEntry {
+  attrValue: string;
+  tabValue: string;
+}
 
 // ========== tis 单标签解析 ==========
 /**
  * 解析文本中所有指定名称的单标签（还原 PageTextHandleChains.parseAllDesignatedSingTags）
  * 例：<tis::https://xxx/index.ms title="xx" />
- * @param {string} pageText
- * @param {string} parseTabName
- * @returns {Array<{tabName, tabValue, ...attributes}>}
  */
-export function parseAllDesignatedSingTags(pageText, parseTabName) {
+export function parseAllDesignatedSingTags(
+  pageText: string,
+  parseTabName: string
+): DesignatedSingTag[] {
   const regex = /<(\w+)::([\S]+)(.*?)\/>/g;
   const attributesRegex = /([\w-]+)="(.*?)"/g;
-  const result = [];
-  let matches;
+  const result: DesignatedSingTag[] = [];
+  let matches: RegExpExecArray | null;
 
   while ((matches = regex.exec(pageText)) !== null) {
     const tabName = matches[1];
@@ -33,8 +47,8 @@ export function parseAllDesignatedSingTags(pageText, parseTabName) {
     const attributesString = matches[3];
     if (tabName !== parseTabName) continue;
 
-    const attributes = {};
-    let attrMatch;
+    const attributes: Record<string, string> = {};
+    let attrMatch: RegExpExecArray | null;
     attributesRegex.lastIndex = 0;
     while ((attrMatch = attributesRegex.exec(attributesString)) !== null) {
       attributes[attrMatch[1]] = attrMatch[2];
@@ -48,15 +62,14 @@ export function parseAllDesignatedSingTags(pageText, parseTabName) {
 /**
  * 解析双标签，取指定属性（还原 parseDoubleTab）
  * 例：<fetchFun name="mLineFetchFun">function(text){...}</fetchFun>
- * @returns {Array<{attrValue, tabValue}>}
  */
-export function parseDoubleTab(pageText, tabName, attrName) {
+export function parseDoubleTab(pageText: string, tabName: string, attrName: string): DoubleTagEntry[] {
   const regex = new RegExp(
     `<\\s*${tabName}[^<>]*\\s*${attrName}="([^<>]*)"\\s*>([\\s\\S]*?)<\\/\\s*${tabName}\\s*>`,
     "gm"
   );
-  let m;
-  const arr = [];
+  let m: RegExpExecArray | null;
+  const arr: DoubleTagEntry[] = [];
   while ((m = regex.exec(pageText)) !== null) {
     if (m.index === regex.lastIndex) regex.lastIndex++;
     arr.push({ attrValue: m[1], tabValue: m[2] });
@@ -66,10 +79,8 @@ export function parseDoubleTab(pageText, tabName, attrName) {
 
 /**
  * 从订阅标签文本中提取所有 tis 订阅链接（还原 parseTis）
- * @param {string} bodyText
- * @returns {string[]}
  */
-export function parseTis(bodyText) {
+export function parseTis(bodyText: string | null | undefined): string[] {
   const regex = /(<\s*tis::http[^<>]+\/\s*>)/gm;
   const raw = captureRegEx(regex, String(bodyText ?? ""));
   if (raw == null) return [];
@@ -79,15 +90,13 @@ export function parseTis(bodyText) {
 /**
  * 将旧版结构化订阅数组迁移为 tis 原文
  * 旧版存储：`[{url, title, describe, fetchFun, defaultTag}, ...]`
- * @param {Array} items
- * @returns {string}
  */
-export function subscribeItemsToText(items) {
+export function subscribeItemsToText(items: SubscribeItem[] | null | undefined): string {
   if (!Array.isArray(items)) return "";
   return items
     .filter((it) => it && it.url)
     .map((it) => {
-      const attrs = [];
+      const attrs: string[] = [];
       if (it.title) attrs.push(`title="${it.title}"`);
       if (it.describe) attrs.push(`describe="${it.describe}"`);
       if (it.fetchFun) attrs.push(`fetchFun="${it.fetchFun}"`);
@@ -99,9 +108,8 @@ export function subscribeItemsToText(items) {
 
 /**
  * 将 tis 元信息数组重新序列化为文本（还原 rebuildTags）
- * @param {Array<{tabName, tabValue, ...attr}>} tagMetaArr
  */
-export function rebuildTags(tagMetaArr = []) {
+export function rebuildTags(tagMetaArr: DesignatedSingTag[] = []): string {
   return tagMetaArr
     .map((tag) => {
       const { tabName, tabValue, ...attributes } = tag;
@@ -116,10 +124,8 @@ export function rebuildTags(tagMetaArr = []) {
 // ========== URL 工具 ==========
 /**
  * 解析相对路径（相对当前订阅文件）
- * @param {string} baseUrl
- * @param {string} relativePath
  */
-export function resolveUrl(baseUrl, relativePath) {
+export function resolveUrl(baseUrl: string, relativePath: string): string {
   try {
     return new URL(relativePath, baseUrl).href;
   } catch (e) {
@@ -128,17 +134,17 @@ export function resolveUrl(baseUrl, relativePath) {
 }
 
 // ========== 转义 / 恢复（还原 CallBeforeParse） ==========
-const ESCAPE_MAP = {
+const ESCAPE_MAP: Record<string, string> = {
   "`": "<反引号>",
   "\\": "<转义>",
   $: "<美元符>",
 };
 
 /** 解析前转义 */
-export function escapeText(text) {
+export function escapeText(text: string | null | undefined): string {
   let t = String(text ?? "");
   // 剥离 UTF-8 BOM（Windows/PowerShell 常见），避免标题行首被占据
-  if (t.charCodeAt(0) === 0xFEFF) t = t.slice(1);
+  if (t.charCodeAt(0) === 0xfeff) t = t.slice(1);
   for (const key of Object.keys(ESCAPE_MAP)) {
     t = t.split(key).join(ESCAPE_MAP[key]);
   }
@@ -146,7 +152,7 @@ export function escapeText(text) {
 }
 
 /** 解析后恢复 */
-export function recoveryText(text) {
+export function recoveryText(text: string | null | undefined): string {
   let t = String(text ?? "");
   for (const key of Object.keys(ESCAPE_MAP)) {
     t = t.split(ESCAPE_MAP[key]).join(key);
@@ -155,10 +161,10 @@ export function recoveryText(text) {
 }
 
 /** 恢复数据项中的字段（还原 contentRecovery） */
-export function contentRecovery(item) {
-  item.title = recoveryText(item.title);
-  item.desc = recoveryText(item.desc);
-  item.resource = recoveryText(item.resource);
+export function contentRecovery(item: SearchItem): void {
+  item.title = recoveryText(item.title as string);
+  item.desc = recoveryText(item.desc as string);
+  item.resource = recoveryText(item.resource as string);
   if (item.vassal != null) item.vassal = recoveryText(item.vassal);
 }
 
@@ -166,7 +172,10 @@ export function contentRecovery(item) {
  * default-tag 处理（还原 defaultTagHandle）
  * tisMetaInfo['default-tag'] = h'游戏' -> 若标题尚未含该标签，则加 [h'游戏']
  */
-export function defaultTagHandle(item, tisMetaInfo = {}) {
+export function defaultTagHandle(
+  item: SearchItem,
+  tisMetaInfo: Record<string, string | undefined> = {}
+): void {
   const defaultTag = tisMetaInfo["default-tag"];
   if (!defaultTag) return;
   const processedDefaultTag = `[${defaultTag}]`;
@@ -175,13 +184,20 @@ export function defaultTagHandle(item, tisMetaInfo = {}) {
   if (!defaultTagContent) return;
   const already = parseTag(item.title).some((meta) => meta[3] === defaultTagContent);
   if (!already) {
-    item.title = processedDefaultTag + item.title;
+    item.title = processedDefaultTag + (item.title ?? "");
   }
 }
 
 // ========== 数据项提取函数 ==========
+/** 快捷链接信息 */
+export interface LinkInfo {
+  text: string;
+  url: string;
+  title: string;
+}
+
 /** 链接提取（还原 extractLinkInfo） */
-function extractLinkInfo(str) {
+function extractLinkInfo(str: string): LinkInfo | null {
   const regex = /\[(.*?)\]\((https?:\/\/[^\s]+)\s*(?:\s+"([^"]+)?")?\s*\)/;
   const match = str.match(regex);
   if (match) {
@@ -191,14 +207,14 @@ function extractLinkInfo(str) {
 }
 
 /** 是否仅链接行（还原 isOnlyLinkLine） */
-function isOnlyLinkLine(str) {
+function isOnlyLinkLine(str: string | null | undefined): boolean {
   return !String(str ?? "")
     .split("\n")
     .some((line) => line.trim() !== "" && !line.trim().startsWith("> "));
 }
 
 /** 是否空白（还原 isBlank） */
-function isBlank(str) {
+function isBlank(str: string | null | undefined): boolean {
   const trimmedStr = String(str ?? "").replace(/\s+/g, "").replace(/[\n\r]+/g, "");
   return trimmedStr === "";
 }
@@ -238,38 +254,34 @@ const VASSAL_SEPARATOR_REGEX = /^[ \t]{0,3}-{3,}[ \t\r]*\n?$/;
  *
  * 注意：分隔线在原文里既用于「简述内容 / 附加内容」分界，也用于脚本应用的
  * `view:js` 等分段（`-- view:js --` 等），因此判定必须精确，否则脚本项会被截断。
- *
- * @param {string} pageText
- * @returns {Array} 数据项数组
  */
-export function mLineFetchFun(pageText) {
+export function mLineFetchFun(pageText: string | null | undefined): SearchItem[] {
   const type = "sketch"; // url / sketch
   const lines = String(pageText ?? "").split("\n");
-  const search_data_lines = [];
-  let current_build_search_item = {};
+  const search_data_lines: SearchItem[] = [];
+  let current_build_search_item: SearchItem = {};
   let appendTarget = "resource";
   let current_build_search_item_resource = "";
   let current_build_search_item_vassal = "";
-let current_build_search_item_links = [];
+  let current_build_search_item_links: LinkInfo[] = [];
   let point = 0;
   let inCode = false;
   const default_desc = "--无描述--";
 
-  function getTitleLineData(titleLine) {
+  function getTitleLineData(titleLine: string): { title: string; desc: string } | null {
     const regex = /^#\s*([^（(]+)(?:[（(](.*)[）)])?\s*$/;
     const matchData = regex.exec(titleLine);
     if (!matchData) return null;
     return {
       title: matchData[1],
-      desc:
-        matchData[2] == null || matchData[2] === "" ? default_desc : matchData[2],
+      desc: matchData[2] == null || matchData[2] === "" ? default_desc : matchData[2],
     };
   }
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
 
-// 围栏代码块切换：当行以 ``` 开头时切换 inCode 状态
+    // 围栏代码块切换：当行以 ``` 开头时切换 inCode 状态
     if (/^```/.test(line.trim())) {
       inCode = !inCode;
     }
@@ -277,7 +289,7 @@ let current_build_search_item_links = [];
     // 在代码块内部不将 # 开头行解析为新的数据项标题
     if (!inCode && line.indexOf("# ") === 0) {
       point++;
-      current_build_search_item = { ...getTitleLineData(line) };
+      current_build_search_item = { ...(getTitleLineData(line) ?? {}) };
       current_build_search_item_resource = "";
       continue;
     }
@@ -333,19 +345,19 @@ let current_build_search_item_links = [];
  * sLineFetchFun - 单行内容提取函数
  * 格式：标题(描述)：资源   或   标题：资源
  */
-export function sLineFetchFun(pageText) {
+export function sLineFetchFun(pageText: string | null | undefined): SearchItem[] {
   const type = "url";
   const lines = String(pageText ?? "").split("\n");
-  const search_data_lines = [];
+  const search_data_lines: SearchItem[] = [];
 
   for (const line of lines) {
-    const search_data_line = (function (line) {
+    const search_data_line = (function (line: string): SearchItem | null {
       const baseReg = /([^:：\n(（）)]+)[(（]([^()（）]*)[)）]\s*[:：]\s*(.+)/;
       const ifNotDescMatchReg = /([^:：]+)\s*[:：]\s*(.*)/;
       let title = "";
       let desc = "";
       let resource = "";
-      let captureResult = null;
+      let captureResult: RegExpExecArray | null = null;
       if (!/[()（）]/.test(line)) {
         captureResult = ifNotDescMatchReg.exec(line);
         if (captureResult == null) return null;
@@ -369,13 +381,18 @@ export function sLineFetchFun(pageText) {
   return search_data_lines;
 }
 
+/** 数据源配置（还原 getConfigFromDataSource） */
+export interface DataSourceConfig {
+  fetchFuns: Array<{ name: string; fetchFun: string }>;
+  tis: DesignatedSingTag[];
+}
+
 /**
  * 解析数据源配置（还原 getConfigFromDataSource）
  * - fetchFuns: 自定义提取函数
  * - tis: 子订阅引用
- * @param {string} pageText
  */
-export function getConfigFromDataSource(pageText) {
+export function getConfigFromDataSource(pageText: string | null | undefined): DataSourceConfig {
   const text = String(pageText ?? "");
   const fetchFunTabDatas = parseDoubleTab(text, "fetchFun", "name");
   const fetchFuns = fetchFunTabDatas.map((d) => ({
@@ -395,15 +412,14 @@ export function getConfigFromDataSource(pageText) {
  *   function(obj){...}
  *   -- view:html --
  *   <div>...</div>
- * @returns {Object<string,string>|null}
  */
-export function scriptTextParser(text) {
+export function scriptTextParser(text: string | null | undefined): Record<string, string> | null {
   if (text == null) return null;
   const scriptLines = String(text).split("\n");
   if (scriptLines.length === 0) return null;
-  const result = {};
-  let key = null;
-  let value = null;
+  const result: Record<string, string> = {};
+  let key: string | null = null;
+  let value: string | null = null;
   for (let i = 0; i < scriptLines.length; i++) {
     const line = scriptLines[i];
     const captureArr = captureRegEx(/^--\s*([^-\s]*)\s*--\s*$/gm, line);
@@ -414,7 +430,7 @@ export function scriptTextParser(text) {
       key = captureArr[0][1];
       value = "";
     } else {
-      value += "\n" + line;
+      value = (value ?? "") + "\n" + line;
     }
     if (isLastLine) {
       if (key != null) result[key] = String(value).trim();
@@ -428,9 +444,9 @@ export function scriptTextParser(text) {
  * 解析脚本项 env（还原 extractVariables）
  * "aa bb" -> { aa: "bb" }，布尔/数值自动转换
  */
-export function extractVariables(varsString) {
+export function extractVariables(varsString: string | null | undefined): Record<string, unknown> {
   const lines = String(varsString ?? "").split("\n");
-  const result = {};
+  const result: Record<string, unknown> = {};
   for (const line of lines) {
     const parts = line.trim().split(/\s+/);
     if (parts.length === 2) {
@@ -438,7 +454,7 @@ export function extractVariables(varsString) {
       const value = parts[1].trim();
       if (value === "true" || value === "false") {
         result[key] = value === "true";
-      } else if (!isNaN(value) && value !== "") {
+      } else if (!isNaN(Number(value)) && value !== "") {
         result[key] = parseFloat(value);
       } else {
         result[key] = value;
@@ -453,17 +469,18 @@ export function extractVariables(varsString) {
  * 标题中含 [脚本] / [script] 的数据项转为 type="script"，
  * 解析 resourceObj，并提取自定义 icon 与 vassal。
  */
-export function parseScriptItem(searchData) {
+export function parseScriptItem(searchData: SearchItem[]): SearchItem[] {
   for (const item of searchData) {
     if (item == null || item.title == null || item.type !== "sketch") continue;
     if (!/\[\s*(.*')?\s*(脚本|script)\s*'?\s*\]/.test(item.title)) continue;
     item.type = "script";
-    item.resourceObj = scriptTextParser(item.resource);
+    item.resourceObj = scriptTextParser(item.resource) as Record<string, string> | undefined;
     item.resource = "--脚本项resource已解析到resourceObj--";
     if (item.resourceObj && item.resourceObj.env != null) {
-      item.resourceObj.env = extractVariables(item.resourceObj.env);
-      const customIcon = item.resourceObj.env._icon;
-      if (customIcon != null) item.icon = customIcon;
+      (item.resourceObj as Record<string, unknown>).env = extractVariables(item.resourceObj.env);
+      const env = item.resourceObj.env as unknown as Record<string, unknown>;
+      const customIcon = env._icon;
+      if (customIcon != null) item.icon = String(customIcon);
       const vassal = item.resourceObj.vassal;
       if (vassal != null) item.vassal = vassal;
     }
@@ -471,14 +488,21 @@ export function parseScriptItem(searchData) {
   return searchData;
 }
 
+/** 提取函数签名（mLineFetchFun / sLineFetchFun / 自定义编译版） */
+export type FetchFun = (text: string | null | undefined) => SearchItem[];
+
+/** 自定义 fetchFun 描述 */
+export interface CustomFetchFun {
+  name: string;
+  fetchFun: string;
+}
+
 /**
  * 根据提取函数名获取实现
  * - 支持内置实现
  * - 支持订阅中自定义的 fetchFun 字符串（动态编译）
- * @param {string} name
- * @param {Array<{name, fetchFun}>} globalFetchFun
  */
-export function getFetchFunByName(name, globalFetchFun = []) {
+export function getFetchFunByName(name: string, globalFetchFun: CustomFetchFun[] = []): FetchFun {
   if (name === "mLineFetchFun") return mLineFetchFun;
   if (name === "sLineFetchFun") return sLineFetchFun;
   if (!name) return mLineFetchFun;
@@ -488,7 +512,9 @@ export function getFetchFunByName(name, globalFetchFun = []) {
   if (found) {
     try {
       // 还原：new Function('text', "return ( " + fetchFunStr + " )(`" + escape(text) + "`)")(text)
-      const fn = new Function("text", "return ( " + found.fetchFun + " )(text)");
+      const fn = new Function("text", "return ( " + found.fetchFun + " )(text)") as (
+        t: unknown
+      ) => SearchItem[];
       return (text) => fn(text);
     } catch (e) {
       console.warn("[我的搜索] 自定义提取函数编译失败:", name, e);

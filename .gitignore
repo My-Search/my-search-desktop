@@ -14,7 +14,12 @@ test/_icons/
 # 异常中断时会残留，不应提交）
 test/_chrome-profile-*/
 test/.e2e-drag-profile/
+test/.e2e-release-profile/
+test/.e2e-rclick-profile/
+test/.e2e-cold-profile/
 test/_shot-*.png
+test/_rel-shot-*.png
+test/_cold-shot*.png
 test/.cache-restart-store.json
 test/_fix-subscribes.mjs
 
@@ -27,3 +32,6 @@ test/_fix-subscribes.mjs
 .idea/
 .vscode/
 *.iml
+
+# AI 助手会话产物（计划草稿等，非项目内容）
+.zcode/

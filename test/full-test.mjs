@@ -1,12 +1,12 @@
-import { SearchEngine } from "../src/lib/search-engine.js";
-import { md2html, parseUrl, clearUrlSearchTemplate, isUrl } from "../src/lib/util.js";
+import { SearchEngine } from "../src/lib/search-engine.ts";
+import { md2html, parseUrl, clearUrlSearchTemplate, isUrl } from "../src/lib/util.ts";
 import {
   parseTag,
   clearHideTagForTitle,
   titleContentHandler,
   titleTagHandler,
-} from "../src/lib/tags.js";
-import { mLineFetchFun, escapeText, recoveryText } from "../src/lib/subscribe-parser.js";
+} from "../src/lib/tags.ts";
+import { mLineFetchFun, escapeText, recoveryText } from "../src/lib/subscribe-parser.ts";
 
 const subs = [
   {
@@ -109,12 +109,29 @@ ok(clearUrlSearchTemplate("https://a.com/[[s?q={keyword}]]") === "https://a.com/
 const p = parseUrl("https://www.example.com/path?q=1");
 ok(p.domain === "www.example.com" && p.rootUrl === "https://www.example.com", "parseUrl");
 
-// 14. md2html
+// 14. md2html（showdown，与原脚本同配置）
+// 注：showdown 会为标题生成 id 属性（如 <h1 id="">），断言用 "<h1" 前缀而非精确 "<h1>"
 const html = md2html("# 标题\n- a\n- [x](https://a.com)\n`code`\n> quote");
 ok(
-  html.includes("<h1>") && html.includes("<ul>") && html.includes("<blockquote>") && html.includes("<code>"),
+  html.includes("<h1") && html.includes("<ul>") && html.includes("<blockquote>") && html.includes("<code>"),
   "md2html"
 );
+
+// 15. raw HTML 透传（与原脚本 showdown 一致：<details>/<summary>/<br> 原样渲染）
+ok(md2html("<details>").includes("<details>"), "md2html details 开标签透传");
+ok(md2html("</details>").includes("</details>"), "md2html details 闭标签透传");
+ok(md2html("<summary>标题</summary>").includes("<summary>"), "md2html summary 透传");
+ok(md2html("a<br>b").includes("<br>"), "md2html br 透传");
+// 真实订阅里的多行 details 块（tawk 条目的「其它三方客服系统」段落）
+const detailsBlock =
+  "## 其它三方客服系统\n<details> <summary>crisp-三方客服系统</summary>\n1、注册账号：https://crisp.chat/zh/integrations/\n</details>";
+const detailsHtml = md2html(detailsBlock);
+ok(
+  detailsHtml.includes("<details>") && detailsHtml.includes("<summary>") && detailsHtml.includes("</details>"),
+  "md2html 多行 details 块收纳标签透传"
+);
+// 表格支持（原脚本开了 tables:true）
+ok(md2html("| A | B |\n| --- | --- |\n| 1 | 2 |").includes("<table>"), "md2html 表格");
 
 console.log(`\n结果: ${pass} 通过, ${fail} 失败`);
 process.exit(fail ? 1 : 0);

@@ -1,4 +1,4 @@
-import { renderTitleTags, titleContentHandler, clearHideTagForTitle } from "../src/lib/tags.js";
+import { renderTitleTags, titleContentHandler, clearHideTagForTitle } from "../src/lib/tags.ts";
 
 const cases = [
   "[精选好课] 恋上数据结构与算法",

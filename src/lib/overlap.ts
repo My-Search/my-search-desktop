@@ -4,15 +4,32 @@
  * 移植自 string-overlap-matching-degree 仓库（ES Module 化）
  */
 
+/** 排序方向 */
+export type OverlapSortOrder = "desc" | "asc";
+
+/** 重叠块表：键为「块长度」，值为该长度的所有匹配块 */
+export type OverlapBlocks = Record<string, string[]>;
+
+/** 权重表：主题 -> 分值 */
+export type TopicWeights = Record<string, number>;
+
 /**
  * 计算对象数组匹配度并排序
  */
-export function overlapMatchingDegreeForObjectArray(
+export function overlapMatchingDegreeForObjectArray<T>(
   keyword = "",
-  objArr = [],
-  fun = (obj) => [],
-  { sort = "desc", onlyHasScope = false, scopeForObjArrContainer } = {}
-) {
+  objArr: T[] = [],
+  fun: (obj: T) => TopicWeights = () => ({}),
+  {
+    sort = "desc",
+    onlyHasScope = false,
+    scopeForObjArrContainer,
+  }: {
+    sort?: OverlapSortOrder;
+    onlyHasScope?: boolean;
+    scopeForObjArrContainer?: number[];
+  } = {}
+): T[] {
   const scopeForData = objArr.map((item) => overlapMatchingDegree(keyword, fun(item), sort));
   sortAndSync(scopeForData, objArr, sort);
 
@@ -25,19 +42,28 @@ export function overlapMatchingDegreeForObjectArray(
 
 /**
  * 计算匹配度
- * @param {string} keyword
- * @param {Object|Array} topicWeighs
- * @param {string} sort
+ * @param keyword 关键词
+ * @param topicWeighs 主题权重表，或主题数组（数组时按顺序赋权）
+ * @param sort 排序方向
  */
-export function overlapMatchingDegree(keyword, topicWeighs = {}, sort = "desc") {
+export function overlapMatchingDegree(
+  keyword: string,
+  topicWeighs: TopicWeights | string[] = {},
+  sort: OverlapSortOrder = "desc"
+): number {
+  let weights: TopicWeights;
   if (Array.isArray(topicWeighs)) {
     const weightMultiplier = sort === "desc" ? 1 : -1;
-    topicWeighs = Object.fromEntries(
-      topicWeighs.reverse().map((topic, index) => [topic, (index + 1) * weightMultiplier])
+    weights = Object.fromEntries(
+      [...topicWeighs]
+        .reverse()
+        .map((topic, index) => [topic, (index + 1) * weightMultiplier] as [string, number])
     );
+  } else {
+    weights = topicWeighs;
   }
-  return Object.keys(topicWeighs).reduce((totalScore, topic) => {
-    const currentScore = topicWeighs[topic];
+  return Object.keys(weights).reduce((totalScore, topic) => {
+    const currentScore = weights[topic];
     const overlapLengthBlocksMap = findOverlapBlocks(keyword, topic);
     return (
       totalScore +
@@ -51,8 +77,8 @@ export function overlapMatchingDegree(keyword, topicWeighs = {}, sort = "desc") 
 /**
  * 查找重叠匹配块
  */
-export function findOverlapBlocks(str1 = "", str2 = "") {
-  const alignmentHub = {};
+export function findOverlapBlocks(str1 = "", str2 = ""): OverlapBlocks {
+  const alignmentHub: OverlapBlocks = {};
   const str1Len = str1.length;
   const str2Len = str2.length;
 
@@ -73,8 +99,8 @@ export function findOverlapBlocks(str1 = "", str2 = "") {
 }
 
 /** 对齐 */
-function alignment(str1 = "", str2 = "") {
-  const overlappingBlocks = {};
+function alignment(str1 = "", str2 = ""): OverlapBlocks {
+  const overlappingBlocks: OverlapBlocks = {};
   let currentBlock = "";
 
   for (let i = str1.length - 1; i >= 0; i--) {
@@ -100,10 +126,11 @@ function alignment(str1 = "", str2 = "") {
 }
 
 /** 同步排序 */
-function sortAndSync(arr1, arr2, order = "desc") {
-  const compare = order === "asc" ? (a, b) => a - b : (a, b) => b - a;
+function sortAndSync<T>(arr1: number[], arr2: T[], order: OverlapSortOrder = "desc"): void {
+  const compare =
+    order === "asc" ? (a: number, b: number) => a - b : (a: number, b: number) => b - a;
   arr1
-    .map((v, i) => [v, arr2[i]])
+    .map((v, i) => [v, arr2[i]] as [number, T])
     .sort((a, b) => compare(a[0], b[0]))
     .forEach(([v, o], i) => {
       arr1[i] = v;

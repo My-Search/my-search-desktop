@@ -3,8 +3,10 @@
  * 移植自油猴脚本"我的搜索"（v7.9.5）
  */
 
+import showdown from "showdown";
+
 /** HTML 转义 */
-export function escapeHtml(str) {
+export function escapeHtml(str: unknown): string {
   return String(str ?? "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
@@ -14,15 +16,66 @@ export function escapeHtml(str) {
 }
 
 /** 属性值转义（用于 data-* 等） */
-export function escapeAttr(str) {
+export function escapeAttr(str: unknown): string {
   return escapeHtml(str).replace(/`/g, "&#96;");
+}
+
+// ========== Markdown 渲染（对齐油猴原版 showdown@2.1.0 配置） ==========
+
+/**
+ * showdown 实例 —— 复刻油猴原版"我的搜索"v7.9.5 的配置（line 236-248）：
+ * - simpleLineBreaks: 换行 → <br>
+ * - openLinksInNewWindow: 链接 target="_blank"
+ * - literalMidWordUnderscores: 不把 mid-word 下划线当斜体
+ * - tables: 支持表格语法
+ * - simplifiedAutoLink: 裸链接自动识别
+ *
+ * 安全性：showdown 对 raw HTML 原样透传，因此输出中可能包含 <script>、on* 事件
+ * 处理器、javascript: 链接等危险内容。输出后经 sanitizeHtml 清洗再返回。
+ */
+const showdownConverter = new showdown.Converter({
+  simpleLineBreaks: true,
+  openLinksInNewWindow: true,
+  metadata: true,
+  literalMidWordUnderscores: true,
+  tables: true,
+  simplifiedAutoLink: true,
+});
+
+/** 危险 HTML 标签（连带内容一起移除） */
+const DANGEROUS_TAGS = /<(script|iframe|object|embed|frame|frameset|applet|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi;
+/** 危险协议：javascript: vbscript: data: 等（用于 href / src 属性） */
+const DANGEROUS_PROTO = /\b(href|src)\s*=\s*(['"]?)(?:javascript|vbscript|data)\s*:/gi;
+/** 事件处理器属性：onclick= onload= onerror= onmouseover= ... */
+const EVENT_HANDLER_ATTR = /\s+on\w+\s*=\s*(['"])[\s\S]*?\1/gi;
+
+/**
+ * 清洗 showdown 输出的 HTML：移除恶意的标签/属性/协议。
+ * 保留订阅源中使用的 <details> / <summary> / <br> / <div> 等安全标签。
+ * 与油猴原版的区别：油猴不额外清洗（风险一致），桌面版在无 CSP 的 WebView
+ * 中运行且可调用 Rust 命令，需额外保护。
+ */
+function sanitizeHtml(html: string): string {
+  return html
+    .replace(DANGEROUS_TAGS, "")
+    .replace(EVENT_HANDLER_ATTR, "")
+    .replace(DANGEROUS_PROTO, "$1=$2#");
+}
+
+/**
+ * Markdown → HTML（已清洗危险内容）。
+ * 输出结构与原脚本一致：标题、列表、引用、代码块、链接、粗体/斜体、行内代码、表格、raw HTML。
+ * 与 .markdown-body CSS 选择器（h1/p/ul/li/blockquote/pre/code/...）兼容。
+ */
+export function md2html(rawText: unknown): string {
+  return sanitizeHtml(showdownConverter.makeHtml(String(rawText ?? "")));
 }
 
 /** 空占位 */
 export const EMPTY_DESC = "--无描述--";
 
 /** 判断是否为 http(s) url（还原油猴版 isHttpUrl） */
-export function isHttpUrl(url = "") {
+export function isHttpUrl(url: string | null | undefined = ""): boolean {
   if (url == null || typeof url !== "string") return false;
   const s = url.trim().split("#")[0];
   // 不能存在换行符
@@ -34,7 +87,7 @@ export function isHttpUrl(url = "") {
  * 判断 resource 是否只是一个 URL（还原油猴版 isUrl）
  * 用于区分“跳转链接”与“简述文本”
  */
-export function isUrl(resource) {
+export function isUrl(resource: string | null | undefined): boolean {
   if (resource == null || typeof resource !== "string") return false;
   const s = resource.trim().split("#")[0];
   if (s.indexOf("\n") !== -1) return false;
@@ -47,7 +100,16 @@ export function isUrl(resource) {
  * 解析 URL 为 { protocol, domain, path, params, rootUrl, rawUrl }
  * 还原油猴版 parseUrl
  */
-export function parseUrl(url = "") {
+export interface ParsedUrl {
+  protocol?: string;
+  domain?: string;
+  path?: string;
+  params?: string;
+  rootUrl?: string;
+  rawUrl?: string;
+}
+
+export function parseUrl(url = ""): ParsedUrl {
   const regex = /(https?:|)\/\/([^\/]*|[^\/]*)(\/[^\s\?]*|)(\??[^\s]*|)/;
   const matches = regex.exec(url);
   if (!matches) return {};
@@ -66,7 +128,7 @@ export function parseUrl(url = "") {
 }
 
 /** 去掉可搜索 URL 模板标记 [[...]]（还原 clearUrlSearchTemplate） */
-export function clearUrlSearchTemplate(url) {
+export function clearUrlSearchTemplate(url: string | null | undefined): string {
   return String(url ?? "").replace(/\[\[[^\[\]]*\]\]/gm, "");
 }
 
@@ -76,23 +138,35 @@ export function clearUrlSearchTemplate(url) {
  * 额外提供 flush()/cancel()：回车需要在防抖未触发时立即拿到结果，
  * 与油猴版「搜索中回车忽略、搜索后回车选第一项」的行为对齐。
  */
-export function debounce(fun, wait) {
-  let timer = null;
-  let pendingArgs = null;
+export interface DebouncedFn<A extends unknown[]> {
+  (...args: A): void;
+  /** 立即执行待处理的调用（若有） */
+  flush(): void;
+  /** 丢弃待处理的调用 */
+  cancel(): void;
+  /** 是否存在待处理的调用 */
+  pending(): boolean;
+}
 
-  function debouncedFn(...args) {
+export function debounce<A extends unknown[]>(
+  fun: (...args: A) => void,
+  wait: number
+): DebouncedFn<A> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let pendingArgs: A | null = null;
+
+  const debouncedFn = function (this: unknown, ...args: A): void {
     pendingArgs = args;
     if (timer) clearTimeout(timer);
     timer = setTimeout(() => {
       timer = null;
       const a = pendingArgs;
       pendingArgs = null;
-      fun.apply(this, a);
+      if (a != null) fun.apply(this, a);
     }, wait);
-  }
+  } as DebouncedFn<A>;
 
-  /** 立即执行待处理的调用（若有） */
-  debouncedFn.flush = function () {
+  debouncedFn.flush = function (this: unknown) {
     if (timer) {
       clearTimeout(timer);
       timer = null;
@@ -121,7 +195,7 @@ export function debounce(fun, wait) {
 const STORAGE_PREFIX = "my-search-desktop:";
 
 /** 无 localStorage 环境（如 Node 测试）时的内存兜底实现 */
-const memoryStore = new Map();
+const memoryStore = new Map<string, unknown>();
 const hasLocalStorage = (() => {
   try {
     return typeof localStorage !== "undefined" && localStorage !== null;
@@ -130,11 +204,13 @@ const hasLocalStorage = (() => {
   }
 })();
 
-export function storageGet(key, defaultValue = null) {
+export function storageGet<T>(key: string, defaultValue: T): T;
+export function storageGet<T = unknown>(key: string, defaultValue?: null): T | null;
+export function storageGet<T = unknown>(key: string, defaultValue: T | null = null): T | null {
   const fullKey = STORAGE_PREFIX + key;
   try {
     if (!hasLocalStorage) {
-      return memoryStore.has(fullKey) ? memoryStore.get(fullKey) : defaultValue;
+      return memoryStore.has(fullKey) ? (memoryStore.get(fullKey) as T) : defaultValue;
     }
     const raw = localStorage.getItem(fullKey);
     if (raw == null) return defaultValue;
@@ -145,7 +221,7 @@ export function storageGet(key, defaultValue = null) {
   }
 }
 
-export function storageSet(key, value) {
+export function storageSet(key: string, value: unknown): void {
   const fullKey = STORAGE_PREFIX + key;
   try {
     if (!hasLocalStorage) {
@@ -158,7 +234,7 @@ export function storageSet(key, value) {
   }
 }
 
-export function storageRemove(key) {
+export function storageRemove(key: string): void {
   const fullKey = STORAGE_PREFIX + key;
   try {
     if (!hasLocalStorage) {
@@ -169,177 +245,6 @@ export function storageRemove(key) {
   } catch (e) {
     /* ignore */
   }
-}
-
-// ========== 简易 Markdown 渲染（替代 showdown） ==========
-function inlineMd(text) {
-  let s = text;
-  // 行内代码 `code`
-  const codes = [];
-  s = s.replace(/`([^`]+)`/g, (m, c) => {
-    codes.push(c);
-    return `\u0000${codes.length - 1}\u0000`;
-  });
-  // 图片 ![alt](url)
-  s = s.replace(
-    /!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)/g,
-    (m, alt, url) => `<img src="${url}" alt="${alt}" />`
-  );
-  // 链接 [text](url "title")
-  s = s.replace(
-    /\[([^\]]+)\]\((https?:\/\/[^\s)]+)(?:\s+"([^"]*)")?\)/g,
-    (m, t, url, title) =>
-      `<a href="${url}" target="_blank"${title ? ` title="${title}"` : ""}>${t}</a>`
-  );
-  // 其它协议链接（如 clash://）
-  s = s.replace(
-    /\[([^\]]+)\]\(([a-zA-Z][\w+.-]*:\/\/[^\s)]+)\)/g,
-    (m, t, url) => `<a href="${url}" target="_blank">${t}</a>`
-  );
-  // 裸链接
-  s = s.replace(
-    /(^|[\s(])(https?:\/\/[^\s<)]+)/g,
-    (m, pre, url) => `${pre}<a href="${url}" target="_blank">${url}</a>`
-  );
-  // 粗体 / 斜体
-  s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
-  // 恢复行内代码
-  // 注：inlineMd 仅被 md2html 内部调用，所有调用方都已提前 escapeHtml，
-  // 因此这里不再重复转义，否则会导致 &quot; → &amp;quot; 这类双重编码。
-  s = s.replace(/\u0000(\d+)\u0000/g, (m, i) => `<code>${codes[Number(i)]}</code>`);
-  return s;
-}
-
-/**
- * 极简 Markdown → HTML
- * 支持：围栏代码块、标题、引用、无序/有序列表、分割线、段落、链接、粗体/斜体、行内代码
- */
-export function md2html(rawText) {
-  const text = String(rawText ?? "").replace(/\r\n?/g, "\n");
-  const lines = text.split("\n");
-  const out = [];
-  let i = 0;
-  let inCode = false;
-  let codeLang = "";
-  let codeBuf = [];
-  let listType = null; // "ul" | "ol"
-  let paraBuf = [];
-
-  const flushPara = () => {
-    if (paraBuf.length === 0) return;
-    out.push(`<p>${inlineMd(escapeHtml(paraBuf.join(" ")))}</p>`);
-    paraBuf = [];
-  };
-  const closeList = () => {
-    if (listType) {
-      out.push(`</${listType}>`);
-      listType = null;
-    }
-  };
-
-  for (i = 0; i < lines.length; i++) {
-    const line = lines[i];
-
-    // 围栏代码块
-    const fence = line.match(/^\s*```(.*)$/);
-    if (fence) {
-      if (!inCode) {
-        flushPara();
-        closeList();
-        inCode = true;
-        codeLang = (fence[1] || "").trim();
-        codeBuf = [];
-      } else {
-        inCode = false;
-        const cls = codeLang ? ` class="language-${escapeHtml(codeLang)}"` : "";
-        out.push(`<pre><code${cls}>${escapeHtml(codeBuf.join("\n"))}</code></pre>`);
-      }
-      continue;
-    }
-    if (inCode) {
-      codeBuf.push(line);
-      continue;
-    }
-
-    const trimmed = line.trim();
-
-    if (trimmed === "") {
-      flushPara();
-      closeList();
-      continue;
-    }
-
-    // 分割线
-    if (/^-{3,}$/.test(trimmed)) {
-      flushPara();
-      closeList();
-      out.push("<hr />");
-      continue;
-    }
-
-    // 标题
-    const heading = trimmed.match(/^(#{1,6})\s+(.*)$/);
-    if (heading) {
-      flushPara();
-      closeList();
-      const level = heading[1].length;
-      out.push(`<h${level}>${inlineMd(escapeHtml(heading[2]))}</h${level}>`);
-      continue;
-    }
-
-    // 引用
-    if (/^>\s?/.test(trimmed)) {
-      flushPara();
-      closeList();
-      const quoteLines = [];
-      while (i < lines.length && /^>\s?/.test(lines[i].trim())) {
-        quoteLines.push(lines[i].trim().replace(/^>\s?/, ""));
-        i++;
-      }
-      i--;
-      out.push(`<blockquote>${md2html(quoteLines.join("\n"))}</blockquote>`);
-      continue;
-    }
-
-    // 无序列表
-    const ulMatch = trimmed.match(/^[-*+]\s+(.*)$/);
-    if (ulMatch) {
-      flushPara();
-      if (listType !== "ul") {
-        closeList();
-        out.push("<ul>");
-        listType = "ul";
-      }
-      out.push(`<li>${inlineMd(escapeHtml(ulMatch[1]))}</li>`);
-      continue;
-    }
-
-    // 有序列表
-    const olMatch = trimmed.match(/^\d+[.)]\s+(.*)$/);
-    if (olMatch) {
-      flushPara();
-      if (listType !== "ol") {
-        closeList();
-        out.push("<ol>");
-        listType = "ol";
-      }
-      out.push(`<li>${inlineMd(escapeHtml(olMatch[1]))}</li>`);
-      continue;
-    }
-
-    closeList();
-    paraBuf.push(trimmed);
-  }
-
-  flushPara();
-  closeList();
-  if (inCode) {
-    // 未闭合的代码块
-    const cls = codeLang ? ` class="language-${escapeHtml(codeLang)}"` : "";
-    out.push(`<pre><code${cls}>${escapeHtml(codeBuf.join("\n"))}</code></pre>`);
-  }
-  return out.join("\n");
 }
 
 /**
@@ -358,13 +263,13 @@ export function md2html(rawText) {
  * @param {string} css
  * @param {string} prefix 例如 "#text_show .script-view"
  */
-export function scopeCss(css, prefix) {
+export function scopeCss(css: string | null | undefined, prefix: string): string {
   const clean = String(css ?? "").replace(/\/\*[\s\S]*?\*\//g, "");
   return scopeCssBlocks(clean, prefix).join("\n");
 }
 
 /** 将选择器列表作用域化（根选择器映射为容器自身） */
-function scopeSelectorList(sel, prefix) {
+function scopeSelectorList(sel: string, prefix: string): string {
   return sel
     .split(",")
     .map((s) => s.trim())
@@ -379,7 +284,7 @@ function scopeSelectorList(sel, prefix) {
  * @param {string} prefix
  * @returns {string[]}
  */
-function scopeCssBlocks(css, prefix) {
+function scopeCssBlocks(css: string, prefix: string): string[] {
   const out = [];
   let plain = "";
   let i = 0;
@@ -417,10 +322,10 @@ function scopeCssBlocks(css, prefix) {
 }
 
 /** 从 pos 开始读取 `{...}` 之间的内容（配对花括号，忽略字符串与注释） */
-function readBlock(css, pos) {
+function readBlock(css: string, pos: number): { text: string; end: number } {
   let depth = 1;
   let i = pos;
-  let quote = null;
+  let quote: string | null = null;
   let text = "";
   for (; i < css.length; i++) {
     const ch = css[i];
@@ -454,12 +359,12 @@ function readBlock(css, pos) {
  * @param {string} text 要高亮的文本
  * @param {HTMLElement} container
  */
-export function scrollToText(text, container) {
+export function scrollToText(text: string, container: HTMLElement | null): void {
   if (!text || !container) return;
   const keyword = String(text).trim();
   if (!keyword) return;
   const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
-    acceptNode(node) {
+    acceptNode(node: Node) {
       if (!node.nodeValue || !node.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
       const tag = node.parentElement?.tagName;
       if (tag === "SCRIPT" || tag === "STYLE") return NodeFilter.FILTER_REJECT;
@@ -467,11 +372,11 @@ export function scrollToText(text, container) {
     },
   });
   let node;
-  let target = null;
-  const nodes = [];
-  while ((node = walker.nextNode())) nodes.push(node);
+  let target: HTMLElement | null = null;
+  const nodes: Text[] = [];
+  while ((node = walker.nextNode())) nodes.push(node as Text);
   for (const textNode of nodes) {
-    const idx = textNode.nodeValue.toUpperCase().indexOf(keyword.toUpperCase());
+    const idx = (textNode.nodeValue ?? "").toUpperCase().indexOf(keyword.toUpperCase());
     if (idx >= 0) {
       const range = document.createRange();
       range.setStart(textNode, idx);
@@ -492,85 +397,31 @@ export function scrollToText(text, container) {
 }
 
 /**
- * 详情视图（简述/附加内容）窗口高度换算：内容实际高度 → 窗口高度
- * 内容少时收紧到 min，内容多时展开到 max（超出部分由内部滚动承担）。
- * @param {number} contentHeight 内容区实测高度（不含搜索框）
- * @param {{boxHeight:number,min:number,max:number,slack?:number}} opts
- * @returns {number} 目标窗口高度（逻辑像素，已取整）
+ * 详情视图（简述内容 / 附加内容 / 脚本视图）窗口高度换算（纯函数，便于单测）。
+ *
+ * 入参是 **#my_search_box 的实测高度**（由 useDetailHeight.fit() 量取，已包含
+ * 2px 上下边框、44px 搜索框，以及内容超过 CSS max-height 被截断后的实际值），
+ * 这里只做区间钳制：
+ * - 内容少 → 收紧到 min（窗口不至于太小）
+ * - 内容多 → 展开到 max（超出部分由 #text_show 内部滚动）
+ * - 其余 → 原样采用实测高度
+ *
+ * 为什么必须「原样采用」：窗口高度只要比盒子实测高度大 1px，盒子下边框下方
+ * 就会露出一条白边（用户反馈的「查看附加内容时底部溢出灰框」）。旧实现按
+ * 「内容估算 + 常量搜索框高 + 2px 余量(slack)」下发，窗口恒定比盒子高 2px，
+ * 因此那条白边一直存在；改为实测后窗口与盒子严格等高，下边框贴到窗口底边。
+ *
+ * @param measuredBoxHeight 盒子实测高度（逻辑像素）
+ * @param opts.min 窗口高度下限
+ * @param opts.max 窗口高度上限
+ * @returns 目标窗口高度（逻辑像素，已取整）
  */
-export function calcDetailWindowHeight(contentHeight, { boxHeight, min, max, slack = 0 }) {
-  const content = Math.max(0, Math.ceil(Number(contentHeight) || 0));
-  const raw = content + (Number(boxHeight) || 0) + (Number(slack) || 0);
-  return Math.round(Math.max(min, Math.min(max, raw)));
-}
-
-/**
- * 「窗口失去焦点时是否可以自动隐藏」判定（纯函数，便于单测）。
- *
- * 规则（用户反馈调整后）：
- * - 等待搜索（还没搜过）→ 隐藏
- * - **结果列表展示中 → 隐藏**（点窗口外面即收起，搜索结果看完就走）
- * - 简述内容 / 附加内容 / 脚本应用等详情视图 → **不隐藏**
- *   （用户主动打开、正在阅读/使用，点到外面不应把正在看的东西丢掉）
- * - 搜索进行中、`:debug` 指令模式 → 不隐藏
- *
- * 油猴版 showView() 中 input.blur 的判定（v7.9.5）：
- * ```js
- * registry.view.element.input.blur(function() {
- *   if (isLogoButtonPressedRef.value) return;              // logo 按下中不隐藏
- *   setTimeout(function(){
- *     const isDebuging = isInstructions("debug");
- *     const isSearching = registry.searchData.searchEven.isSearching;
- *     let isWaitSearch = registry.view.seeNowMode() === registry.view.modeEnum.WAIT_SEARCH;
- *     if(isDebuging || isSearching || !isWaitSearch || isLogoButtonPressedRef.value) return;
- *     registry.view.viewVisibilityController(false);
- *   }, registry.view.delayedHideTime);
- * });
- * ```
- * 相比原版，桌面版把「结果列表展示中」也纳入隐藏：原版 `!isWaitSearch` 会让结果区
- * 在失焦时保持显示，而悬浮窗的预期是「看完就收起」；
- * 详情视图仍按原版 `SHOW_ITEM_DETAIL` 处理为不隐藏。
- *
- * 说明：原版还有 `isLogoButtonPressedRef`（按下 logo 按钮期间不隐藏），
- * 那是为了绕过「焦点在窗口内部控件间转移也会触发输入框 blur」的问题；
- * 桌面版监听的是**窗口失焦**，点窗口内部按钮不会让窗口失焦，因此无需该条件。
- *
- * @param {object} s 当前状态
- * @param {object} [s.mode] 当前视图模式（`modeEnum`）
- * @param {number} [s.modeEnum] 模式枚举 `{ WAIT_SEARCH, SHOW_RESULT, SHOW_ITEM_DETAIL }`
- * @param {boolean} [s.isSearching] 是否有搜索在途（还原 searchEven.isSearching）
- * @param {string}  [s.inputValue] 搜索框内容（用于 `:debug` 判定）
- * @returns {boolean} true=失焦自动隐藏
- */
-export function shouldHideOnBlur({ mode, modeEnum, isSearching = false, inputValue = "" } = {}) {
-  // 搜索进行中不隐藏（还原 isSearching）
-  if (isSearching) return false;
-  // `:debug` 指令模式不隐藏（还原 isInstructions("debug")）
-  if (/^\s*:debug\s*$/i.test(String(inputValue ?? ""))) return false;
-  // 详情视图（简述内容 / 附加内容 / 脚本应用）不隐藏 —— 用户正在阅读/使用
-  if (modeEnum && mode === modeEnum.SHOW_ITEM_DETAIL) return false;
-  // 其余（等待搜索、结果列表展示中）都隐藏；未传模式时取安全默认：不隐藏
-  if (modeEnum && mode === modeEnum.WAIT_SEARCH) return true;
-  return modeEnum ? mode === modeEnum.SHOW_RESULT : false;
-}
-
-/**
- * 「当前视图模式」判定（纯函数，便于单测）。
- *
- * 还原油猴版 `seeNowMode()`：以**真实 DOM 的可见性**为准，而不是可能滞后的 state，
- * 优先级同样是 详情视图 > 结果列表 > 等待搜索/隐藏。
- *
- * @param {object} s 当前 DOM 可见性
- * @param {boolean} [s.textViewVisible] 详情视图（`#text_show`）是否显示
- * @param {boolean} [s.resultVisible] 结果列表（`#matchResult`）是否显示
- * @param {number} s.modeEnum 模式枚举 `{ HIDE, WAIT_SEARCH, SHOW_RESULT, SHOW_ITEM_DETAIL }`
- * @returns {number} 当前模式
- */
-export function resolveViewMode({ textViewVisible = false, resultVisible = false, modeEnum } = {}) {
-  if (textViewVisible) return modeEnum.SHOW_ITEM_DETAIL;
-  if (resultVisible) return modeEnum.SHOW_RESULT;
-  // 视图隐藏（窗口已收起）时按「等待搜索」处理，恢复显示后仍可失焦隐藏
-  return modeEnum.WAIT_SEARCH;
+export function calcDetailWindowHeight(
+  measuredBoxHeight: number,
+  { min, max }: { min: number; max: number }
+): number {
+  const measured = Math.max(0, Math.ceil(Number(measuredBoxHeight) || 0));
+  return Math.round(Math.max(min, Math.min(max, measured)));
 }
 
 // ========== 数据缓存的「剩余有效期」文案 ==========
@@ -579,10 +430,10 @@ const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
 
 /** 两位补零 */
-const pad2 = (n) => String(n).padStart(2, "0");
+const pad2 = (n: number): string => String(n).padStart(2, "0");
 
 /** 取当天零点时间戳（按自然日比较，跨夏令时也正确） */
-const startOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+const startOfDay = (d: Date): number => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
 
 /**
  * 剩余时长文案（纯函数，便于单测）。
@@ -596,7 +447,7 @@ const startOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).g
  * @param {number} remainMs 剩余毫秒（≤0 或非法值 → 「已过期」）
  * @returns {string}
  */
-export function formatRemainDuration(remainMs) {
+export function formatRemainDuration(remainMs: number): string {
   const ms = Number(remainMs);
   if (!Number.isFinite(ms) || ms <= 0) return "已过期";
   const days = Math.floor(ms / DAY_MS);
@@ -614,7 +465,7 @@ export function formatRemainDuration(remainMs) {
  * @param {number} [now=Date.now()] 当前时间戳（便于测试）
  * @returns {string} 非法时间戳返回空串
  */
-export function formatClockTime(ts, now = Date.now()) {
+export function formatClockTime(ts: number, now: number = Date.now()): string {
   const t = Number(ts);
   if (!Number.isFinite(t) || t <= 0) return "";
   const d = new Date(t);
@@ -640,7 +491,7 @@ export function formatClockTime(ts, now = Date.now()) {
  * @param {number} [now=Date.now()] 当前时间戳（便于测试）
  * @returns {string}
  */
-export function formatCacheCountText(count, expire, now = Date.now()) {
+export function formatCacheCountText(count: number, expire: number | null | undefined, now: number = Date.now()): string {
   const n = Math.max(0, Math.floor(Number(count) || 0)).toLocaleString();
   const base = `${n} 条内容`;
   const exp = Number(expire);
@@ -666,7 +517,7 @@ export const PLACEHOLDER_RESTORE_MS = 1200;
 export const PLACEHOLDER_PREPARE_MS = 5000;
 
 /** 加载进度文案（还原原版缺省文案 `🔁 数据库更新到 N条`） */
-export function placeholderProgressText(count) {
+export function placeholderProgressText(count: number): string {
   const n = Number(count) || 0;
   return `🔁 数据库更新到 ${n}条`;
 }
@@ -695,6 +546,16 @@ export function placeholderProgressText(count) {
  * @param {number}  [s.prepareMs]   准备中提示的自动恢复时长（默认 5000，对应原版 dataInitFun）
  * @returns {{text:string, restoreMs:number}} restoreMs>0 → 计时结束后恢复默认提示
  */
+export interface PlaceholderState {
+  loading?: boolean;
+  preparing?: boolean;
+  count?: number;
+  failed?: number;
+  fromCache?: boolean;
+  restoreMs?: number;
+  prepareMs?: number;
+}
+
 export function resolvePlaceholder({
   loading,
   preparing = false,
@@ -703,7 +564,7 @@ export function resolvePlaceholder({
   fromCache = false,
   restoreMs = PLACEHOLDER_RESTORE_MS,
   prepareMs = PLACEHOLDER_PREPARE_MS,
-} = {}) {
+}: PlaceholderState = {}): { text: string; restoreMs: number } {
   if (loading) {
     // 准备阶段：原版 dataInitFun 的 "🔁 数据准备更新中..."（duration=5000）
     if (preparing) return { text: PLACEHOLDER_PREPARING_TEXT, restoreMs: prepareMs };

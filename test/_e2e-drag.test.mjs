@@ -125,8 +125,19 @@ log("config window ready:", cfg.target.url);
 // 设置窗口从 localStorage 读取订阅数据，不需要再写入
 // 但为了确保读取最新的数据，重载一次
 await cfg.send("Page.reload");
-await sleep(2500);
+await sleep(800);
 await cfg.send("Runtime.enable");
+
+// 轮询等待面板就绪（冷启动时 Vite 需按需转换大量模块，固定等待易误判）
+let paneReady = false;
+for (let i = 0; i < 40; i++) {
+  try {
+    paneReady = (await cfg.evalJs(`!!document.querySelector('.page.subscribes .sub-item')`)) === true;
+  } catch { /* 页面 reload 期间可能短暂不可用 */ }
+  if (paneReady) break;
+  await sleep(500);
+}
+log("pane ready:", paneReady);
 
 // ── 快照 ──
 const snap = JSON.parse(await cfg.evalJs(`(() => {

@@ -1,47 +1,24 @@
 /**
- * 回归测试：窗口失焦自动隐藏的判定
+ * 回归测试：失焦隐藏的「无条件」契约（用户规则）
  *
- * 用户反馈：
- *  1. 查看附加内容 / 打开脚本应用时，点了应用外面的地方（失去焦点）
- *     不应该隐藏窗口 —— 原脚本就是这样的（`SHOW_ITEM_DETAIL` 不隐藏）。
- *  2. 结果列表展示中（「呼出后搜索显示了列表，此时点窗口外」）**应该隐藏**。
+ * 用户规则：点窗口外面时，不管当前在干什么（等待搜索 / 结果列表 / 正在查看
+ * 简述内容、附加内容、脚本应用 / 搜索进行中 / `:debug`）都先隐藏；
+ * 之后再唤醒即可原样显示。
  *
- * 规则（`src/lib/util.js` 的 shouldHideOnBlur / resolveViewMode）：
- * - 等待搜索 → 隐藏
- * - 结果列表展示中 → 隐藏
- * - 详情视图（简述内容 / 附加内容 / 脚本应用）→ 不隐藏
- * - 搜索进行中、`:debug` 指令模式 → 不隐藏
+ * 实现契约（本测试以源码为断言对象，防止旧的分状态门控被重新引入）：
+ *  1. 隐藏动作在 Rust 侧 `on_window_event` 收到 `Focused(false)` 时**无条件**执行；
+ *  2. 不再存在 `BlurHideState` / `set_hide_on_blur` 这类「按状态同步是否允许隐藏」的门控；
+ *  3. 前端不再有 `syncBlurHide` / `resolveViewMode` / `shouldHideOnBlur` 分状态判定。
  *
- * 油猴版 showView() 中 input.blur 的判定（v7.9.5）：
- * ```js
- * registry.view.element.input.blur(function() {
- *   if (isLogoButtonPressedRef.value) return;
- *   setTimeout(function(){
- *     const isDebuging = isInstructions("debug");
- *     const isSearching = registry.searchData.searchEven.isSearching;
- *     let isWaitSearch = registry.view.seeNowMode() === registry.view.modeEnum.WAIT_SEARCH;
- *     if(isDebuging || isSearching || !isWaitSearch || isLogoButtonPressedRef.value) return;
- *     registry.view.viewVisibilityController(false);   // 只有这里才隐藏
- *   }, registry.view.delayedHideTime);
- * });
- * ```
- * 桌面版与原版的两点差异：
- * - 结果列表展示中：原版 `!isWaitSearch` 不隐藏，桌面版改为隐藏（本次反馈）
- * - 监听窗口失焦而非输入框 blur，所以不需要 `isLogoButtonPressedRef` 分支
+ * 真实交互（详情视图 / 脚本应用下点窗口外仍隐藏、唤醒后原样还原）由
+ * `test/blur-hide-ui.test.mjs` 与 `test/summon-keep-input.test.mjs` 在浏览器里覆盖。
  */
-import { shouldHideOnBlur, resolveViewMode } from "../src/lib/util.js";
+import { readFileSync } from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 
-/** 与 src/main.js 的 MODE 保持一致的模式枚举 */
-const MODE = {
-  WAIT_SEARCH: 0,
-  SHOW_RESULT: 1,
-  SHOW_ITEM_DETAIL: 2,
-};
-/** 主窗口里同样存在 HIDE 模式（窗口已收起），数值与原版 modeEnum.HIDE 一致 */
-const MODE_ENUM = { HIDE: -1, ...MODE };
-
-/** 按「模式」判定是否隐藏（主窗口调用 shouldHideOnBlur 的真实形态） */
-const hideOf = (mode, extra = {}) => shouldHideOnBlur({ mode, modeEnum: MODE_ENUM, ...extra });
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const read = (rel) => readFileSync(path.join(root, rel), "utf8");
 
 let pass = 0;
 let fail = 0;
@@ -52,114 +29,54 @@ const ok = (cond, name) => {
     console.log("  FAIL:", name);
   }
 };
+/** 去掉注释，避免「文档里提到旧名字」被误判为「代码里还在用」 */
+const stripComments = (src) =>
+  src
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|[^:])\/\/[^\n]*/g, "$1")
+    .replace(/^\s*\/\/!.*$/gm, "");
+/** 去掉注释与测试说明后，检查源码里是否还残留某个标识符 */
+const codeHas = (src, token) => stripComments(src).includes(token);
 
-// ---- 1. 等待搜索 → 隐藏（原有体验） ----
-ok(hideOf(MODE.WAIT_SEARCH) === true, "等待搜索：失焦隐藏");
+const rust = read("src-tauri/src/lib.rs");
+const rustCode = stripComments(rust);
+
+// ---- 1. Rust：失焦即隐藏，且没有任何「按状态豁免」的门控 ----
+ok(/WindowEvent::Focused\(false\)/.test(rustCode), "Rust 监听 WindowEvent::Focused(false)");
+ok(!codeHas(rust, "BlurHideState"), "Rust 不再有 BlurHideState 门控结构");
+ok(!codeHas(rust, "set_hide_on_blur"), "Rust 不再有 set_hide_on_blur 命令");
+ok(!codeHas(rust, "AtomicBool"), "Rust 不再用原子布尔做失焦门控");
+// on_window_event 里对 main 窗口的 Focused(false) 分支必须直接走到 hide()
 ok(
-  hideOf(MODE.WAIT_SEARCH, { isSearching: false, inputValue: "" }) === true,
-  "等待搜索（输入框空）：失焦隐藏"
+  /if\s+window\.label\(\)\s*!=\s*"main"[\s\S]{0,600}?window\.hide\(\)/.test(rustCode),
+  "Rust on_window_event：主窗口失焦分支直接 hide()（无前置状态判断）"
+);
+// 门控标志的读取（如果存在）不应出现在失焦分支里
+ok(
+  !/Focused\(false\)[\s\S]{0,600}?store\([\s\S]{0,40}?Ordering::/.test(rustCode),
+  "Rust 失焦分支内不再读写任何原子门控标志"
 );
 
-// ---- 2. ★ 结果列表展示中 → 隐藏（本次用户反馈的核心） ----
-ok(hideOf(MODE.SHOW_RESULT) === true, "结果列表展示中：失焦隐藏（本次调整）");
-ok(
-  hideOf(MODE.SHOW_RESULT, { isSearching: false, inputValue: "微信" }) === true,
-  "结果列表展示中（有关键词）：失焦隐藏"
-);
-// 无结果时不再显示任何提示（列表清空、回到等待搜索态），失焦同样隐藏
-ok(hideOf(MODE.WAIT_SEARCH, { inputValue: "不存在的关键词" }) === true, "无结果（等待搜索态）：失焦隐藏");
+// ---- 2. 前端：分状态判定与同步机制已彻底移除 ----
+const bridge = read("src/lib/tauri-bridge.ts");
+const util = read("src/lib/util.ts");
+const state = read("src/windows/search/useSearchState.ts");
+const app = read("src/windows/search/App.vue");
 
-// ---- 3. 详情视图（简述内容 / 附加内容 / 脚本应用）→ 不隐藏（原有体验保留） ----
-ok(hideOf(MODE.SHOW_ITEM_DETAIL) === false, "详情视图（简述内容 / 附加内容 / 脚本应用）：失焦不隐藏");
-ok(
-  hideOf(MODE.SHOW_ITEM_DETAIL, { isSearching: false, inputValue: "" }) === false,
-  "详情视图 + 未搜索：失焦不隐藏"
-);
+ok(!codeHas(bridge, "setHideOnBlur"), "前端 tauri-bridge 不再导出 setHideOnBlur");
+ok(!codeHas(util, "shouldHideOnBlur"), "前端 util 不再有 shouldHideOnBlur 分状态判定");
+ok(!codeHas(util, "resolveViewMode"), "前端 util 不再有 resolveViewMode 分状态判定");
+ok(!codeHas(state, "syncBlurHide"), "useSearchState 不再有 syncBlurHide 同步");
+ok(!codeHas(state, "bindVisibilityReaders"), "useSearchState 不再读取 DOM 可见性来判定隐藏");
+ok(!codeHas(app, "syncBlurHide"), "App.vue 不再调用 syncBlurHide");
+ok(!codeHas(app, "bindVisibilityReaders"), "App.vue 不再绑定可见性读取器");
 
-// ---- 4. 搜索进行中 → 不隐藏（还原 searchEven.isSearching），优先级高于模式 ----
+// ---- 3. 唤醒还原逻辑仍在（详情视图原样还原，不丢内容） ----
+ok(codeHas(app, "resumeDetailViewIfAny"), "App.vue 保留唤醒还原逻辑 resumeDetailViewIfAny");
 ok(
-  hideOf(MODE.WAIT_SEARCH, { isSearching: true }) === false,
-  "搜索进行中：即使还在等待搜索状态，也不隐藏"
+  /state\.mode\s*!==\s*MODE\.SHOW_ITEM_DETAIL[\s\S]{0,200}?detailVisible\.value/.test(stripComments(app)),
+  "唤醒还原：详情视图状态下不走复位（原样保留）"
 );
-ok(hideOf(MODE.SHOW_RESULT, { isSearching: true }) === false, "搜索进行中 + 结果展示：不隐藏");
-ok(hideOf(MODE.SHOW_ITEM_DETAIL, { isSearching: true }) === false, "搜索进行中 + 详情视图：不隐藏");
-
-// ---- 5. `:debug` 指令模式 → 不隐藏（还原 isInstructions("debug")）----
-// 原版正则 `^\s*:debug\s*$`（i 标志）：大小写不敏感、允许两端空白
-for (const v of [":debug", "  :debug  ", ":DEBUG", ":Debug", " :debug\t"]) {
-  ok(hideOf(MODE.WAIT_SEARCH, { inputValue: v }) === false, `指令模式 ${JSON.stringify(v)}：不隐藏`);
-  ok(hideOf(MODE.SHOW_RESULT, { inputValue: v }) === false, `指令模式 + 结果：${JSON.stringify(v)} 不隐藏`);
-}
-// 只有纯粹的 `:debug` 才算指令模式，其它输入不影响判定
-for (const v of [":debugx", "x:debug", "debug", "", "  "]) {
-  ok(hideOf(MODE.WAIT_SEARCH, { inputValue: v }) === true, `普通输入 ${JSON.stringify(v)}：仍会隐藏`);
-  ok(hideOf(MODE.SHOW_RESULT, { inputValue: v }) === true, `普通输入 + 结果：${JSON.stringify(v)} 仍会隐藏`);
-}
-
-// ---- 6. 异常输入不崩溃 ----
-ok(shouldHideOnBlur() === false, "无参数：不允许隐藏（安全默认）");
-ok(shouldHideOnBlur({}) === false, "空对象：不允许隐藏（安全默认）");
-ok(shouldHideOnBlur({ mode: undefined, modeEnum: MODE }) === false, "mode 未定义：不隐藏");
-ok(
-  typeof shouldHideOnBlur({ mode: MODE.SHOW_RESULT, inputValue: null }) === "boolean",
-  "inputValue 为 null 不崩溃"
-);
-ok(
-  typeof shouldHideOnBlur({ mode: MODE.SHOW_RESULT, modeEnum: undefined }) === "boolean",
-  "modeEnum 缺失不崩溃（安全默认不隐藏）"
-);
-
-// ---- 7. 真值表（模式 × 搜索中 × 输入） ----
-const cases = [
-  // [mode, isSearching, inputValue, 期望是否隐藏]
-  [MODE.WAIT_SEARCH, false, "", true], // 等待搜索 → 隐藏
-  [MODE.WAIT_SEARCH, true, "", false], // isSearching
-  [MODE.SHOW_RESULT, false, "", true], // ★ 结果展示 → 隐藏（桌面版调整）
-  [MODE.SHOW_RESULT, true, "", false], // isSearching 优先
-  [MODE.SHOW_ITEM_DETAIL, false, "", false], // 详情视图不隐藏
-  [MODE.SHOW_ITEM_DETAIL, true, "", false],
-  [MODE.WAIT_SEARCH, false, ":debug", false], // isDebuging
-  [MODE.SHOW_RESULT, false, ":debug", false],
-  [MODE.SHOW_ITEM_DETAIL, false, ":debug", false],
-];
-for (const [mode, isSearching, inputValue, expected] of cases) {
-  ok(
-    hideOf(mode, { isSearching, inputValue }) === expected,
-    `真值表 mode=${mode} searching=${isSearching} input=${JSON.stringify(inputValue)} → ${
-      expected ? "隐藏" : "不隐藏"
-    }`
-  );
-}
-
-// ---- 8. resolveViewMode：与油猴版 seeNowMode() 优先级一致（详情 > 结果 > 等待） ----
-ok(
-  resolveViewMode({ textViewVisible: true, resultVisible: true, modeEnum: MODE_ENUM }) ===
-    MODE.SHOW_ITEM_DETAIL,
-  "resolveViewMode：详情视图优先于结果列表"
-);
-ok(
-  resolveViewMode({ textViewVisible: false, resultVisible: true, modeEnum: MODE_ENUM }) ===
-    MODE.SHOW_RESULT,
-  "resolveViewMode：结果列表展示中"
-);
-ok(
-  resolveViewMode({ textViewVisible: false, resultVisible: false, modeEnum: MODE_ENUM }) ===
-    MODE.WAIT_SEARCH,
-  "resolveViewMode：都没有显示 → 等待搜索"
-);
-ok(resolveViewMode({ modeEnum: MODE_ENUM }) === MODE.WAIT_SEARCH, "resolveViewMode：无参数不崩溃");
-
-// 组合：主窗口的实际调用链（DOM 可见性 → 模式 → 是否隐藏）
-const hideFromDom = (textViewVisible, resultVisible, extra = {}) =>
-  shouldHideOnBlur({
-    mode: resolveViewMode({ textViewVisible, resultVisible, modeEnum: MODE_ENUM }),
-    modeEnum: MODE_ENUM,
-    ...extra,
-  });
-ok(hideFromDom(false, true) === true, "DOM 链路：结果列表显示中 → 隐藏");
-ok(hideFromDom(true, false) === false, "DOM 链路：详情视图显示中 → 不隐藏");
-ok(hideFromDom(false, false) === true, "DOM 链路：等待搜索 → 隐藏");
-ok(hideFromDom(true, false, { inputValue: "微信" }) === false, "DOM 链路：详情视图 + 关键词 → 不隐藏");
 
 console.log(`\n结果: ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

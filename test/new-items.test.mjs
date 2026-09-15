@@ -10,7 +10,7 @@
  * 测试用受控的本地数据源（内置 mLineFetchFun 格式）替代真实网络，数据可精确控制。
  *
  * 注意：必须先装好 localStorage 再动态 import 引擎——
- * util.js 在模块加载时判定一次 `hasLocalStorage`，静态 import 会提前求值。
+ * util.ts 在模块加载时判定一次 `hasLocalStorage`，静态 import 会提前求值。
  */
 
 const store = new Map();
@@ -21,7 +21,7 @@ globalThis.localStorage = {
   clear: () => store.clear(),
 };
 
-const { SearchEngine, SPECIAL_KEYWORD } = await import("../src/lib/search-engine.js");
+const { SearchEngine, SPECIAL_KEYWORD } = await import("../src/lib/search-engine.ts");
 
 const PREFIX = "my-search-desktop:";
 const ROOT_URL = "https://example.com/root.ms";

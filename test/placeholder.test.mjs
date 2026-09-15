@@ -21,7 +21,7 @@ import {
   PLACEHOLDER_PREPARING_TEXT,
   PLACEHOLDER_RESTORE_MS,
   PLACEHOLDER_PREPARE_MS,
-} from "../src/lib/util.js";
+} from "../src/lib/util.ts";
 
 let pass = 0;
 let fail = 0;

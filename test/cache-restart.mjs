@@ -30,7 +30,7 @@ globalThis.localStorage = {
   },
 };
 
-const { SearchEngine } = await import("../src/lib/search-engine.js");
+const { SearchEngine } = await import("../src/lib/search-engine.ts");
 
 const SUBS = [
   {

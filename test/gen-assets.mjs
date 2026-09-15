@@ -1,11 +1,11 @@
 /**
- * 从油猴脚本中提取内嵌图标资源，生成 src/lib/assets.js
+ * 从油猴脚本中提取内嵌图标资源，生成 src/lib/assets.ts
  * 用法：node test/gen-assets.mjs
  */
 import fs from "fs";
 
 const SCRIPT = "我的搜索-7.9.5.js";
-const OUT = "src/lib/assets.js";
+const OUT = "src/lib/assets.ts";
 
 const src = fs.readFileSync(SCRIPT, "utf8");
 const sketch = src.match(/"sketch":"(data:image\/png;base64,[A-Za-z0-9+/=]+)"/);
@@ -27,11 +27,22 @@ for (const [k, v] of Object.entries(a)) {
 }
 
 const q = (s) => JSON.stringify(s);
-const loadingIcon =
+
+// ICON_LOADING_PLACEHOLDER 不来自油猴脚本，是手工设计的资源（四叶风车）。
+// 它不是从原脚本提取的，所以「保留现有值」而不是每次重新生成——
+// 否则重新运行本脚本会把已调好的图标覆盖回旧版。
+const DEFAULT_LOADING_ICON =
   "data:image/svg+xml;base64," +
   Buffer.from(
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24"><rect x="1" y="1" width="22" height="22" rx="4" fill="#e8eaed"/><circle cx="12" cy="12" r="4" fill="none" stroke="#9aa0a6" stroke-width="2" stroke-dasharray="4 2"><animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="1s" repeatCount="indefinite"/></circle></svg>'
   ).toString("base64");
+
+let loadingIcon = DEFAULT_LOADING_ICON;
+if (fs.existsSync(OUT)) {
+  const prev = fs.readFileSync(OUT, "utf8");
+  const m = prev.match(/ICON_LOADING_PLACEHOLDER\s*=\s*("(?:[^"\\]|\\.)*")/);
+  if (m) loadingIcon = JSON.parse(m[1]);
+}
 
 const content = `/**
  * 静态资源（图标/SVG）- 我的搜索桌面版
@@ -54,7 +65,7 @@ export const VASSAL_SVG = ${q(a.vassalSvg)};
 /** 图标加载失败时的占位图 */
 export const LOAD_ERROR_ICON = ${q(a.loadErrorIcon)};
 
-/** 图标加载中的占位（灰色圆角方块 + 旋转圆环） */
+/** 图标加载中的占位（手工设计，重新生成本文件时保留原值） */
 export const ICON_LOADING_PLACEHOLDER = ${q(loadingIcon)};
 `;
 

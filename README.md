@@ -11,15 +11,16 @@
 
 ## ✨ 功能特性
 
-- **全局悬浮框**：按全局快捷键（默认 `Ctrl+Alt+S`，可在设置中自定义）在任意应用下呼出/隐藏搜索窗（显示在屏幕偏上的居中位置）；**点窗口外面即收起**（结果列表也收起，详情视图保留，见下方「失焦隐藏」）
+- **全局悬浮框**：按全局快捷键（默认 `Ctrl+Alt+S`，可在设置中自定义）在任意应用下呼出/隐藏搜索窗（显示在屏幕偏上的居中位置）；**点窗口外面即收起**（不管正在干什么都先隐藏，唤醒后再原样显示，见下方「失焦隐藏」）
 - **订阅式搜索**：订阅自定义内容源，脚本自动递归解析 `tis::` 子订阅
 - **三级搜索**：精确搜索（标题/描述/内容）→ 拼音搜索 → 重叠模糊匹配（AI 模糊模式）
-- **简述内容 / 附加内容 / 快捷链接**：简述类数据项可直接阅读；附加内容（vassal）与快捷链接（links）可点击（**查看期间失去焦点不会收起窗口**，见下方「失焦隐藏」）
+- **简述内容 / 附加内容 / 快捷链接**：简述类数据项可直接阅读；附加内容（vassal）与快捷链接（links）可点击（**查看期间点到窗口外面会先隐藏，再用快捷键唤醒即可回到原样**，见下方「失焦隐藏」）
 - **标签系统**：`[系统项]`、`[推荐]`… 彩色标签渲染，隐藏标签 `[h'xx']` 不显示但参与分类
 - **特殊关键词直达**：`<new>`（新数据）、`<history>`（历史记录）、`<highFrequency>`（我的 HOT）
-- **子搜索模式**：输入 `Tab` 进入（`Shift+Tab` 退出），`::` 自动转为分隔符
+- **子搜索模式**：输入 `Tab` 进入（`Shift+Tab` 退出），`::` 自动转为分隔符；呼出后直接按 `Tab`（空内容）会转发为「问AI : 」，回车即可打开「问AI」脚本应用（见下）
 - **点击加权 + 历史记录**：点击过的条目会提升排序权重
-- **脚本项**：`[脚本]` 数据项渲染其自定义视图（`view:html/css/js`）、外部打开能力（**脚本应用打开期间失去焦点不会收起窗口**）
+- **脚本项**：`[脚本]` 数据项渲染其自定义视图（`view:html/css/js`）、外部打开能力（**脚本应用点到窗口外面会先隐藏，再用快捷键唤醒即可回到原样**）
+- **脚本应用的子关键词转发**：像「问AI」这类脚本应用，进入后可在搜索框用「父关键词 : 问题」提问——**挂载完成时与每次回车**都会把分隔符后的文字推给应用的 `MS_SCRIPT_ENV.event.sendListener`，输入框保留「父关键词 : 」以便连续追问（完全还原油猴版 `tryRunTextViewHandler`）
 - **设置窗口**：左侧分类菜单 + 右侧内容的常规设置布局——**订阅管理**（订阅总览条块管理：逐条查看/添加/编辑/删除，可切换到源码视图直接编辑 `tis::` 原文）、**关注标签**（勾选过滤）、**公共仓库**（提交订阅到 TisHub、TisHub 订阅市场 搜索/安装/移除、清理 Token）、**数据缓存**（统计本地缓存占用与条数，一键清理可重建缓存）；支持保存并应用
 - **系统托盘**：左键点击呼出/隐藏搜索窗；右键菜单提供「显示/隐藏」「设置」「清理缓存」「退出」（清理缓存等价于设置窗口的「清理可重建缓存」，主窗口下次唤出时自动重新加载订阅数据）
 - **数据缓存**：加载结果带有效期（12 小时）写入本地，未过期时启动直接复用、不再联网；过期或订阅变化才重新加载
@@ -32,7 +33,7 @@
 
 ### 方式一：一键启动脚本（推荐）
 
-双击根目录下的 **`启动.bat`**（或 `start.bat`）：
+双击根目录下的 **`start.bat`**：
 
 - 自动检查 Node.js / Rust 环境
 - 首次运行自动 `npm install`
@@ -72,7 +73,7 @@ sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file \
 | `↑` / `↓` | 在结果中上下移动 |
 | `Enter` | 打开当前选中项（URL 跳转 / 查看简述内容） |
 | `Ctrl+Enter` | 查看当前项的「附加内容」并定位关键词 |
-| `Esc` | 从详情视图返回 / 隐藏窗口（详情视图展示中不会被失焦隐藏，需要用它主动收起） |
+| `Esc` | 从详情视图返回 / 隐藏窗口（**输入框失焦时同样生效**，不依赖输入框焦点） |
 | `Tab` / `Shift+Tab` | 进入 / 退出子搜索模式 |
 | 鼠标右键点击 logo | 打开设置（也可 `Ctrl+,` 或托盘菜单） |
 
@@ -84,19 +85,32 @@ sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file \
 
 ```
 my-search-desktop/
-├── 启动.bat / start.bat        # 一键启动脚本（关闭窗口即停止）
-├── src/                        # 前端（Vite + 原生 JS）
-│   ├── main.js                 # 主应用：搜索视图、交互、脚本视图运行时
-│   ├── config.js               # 独立设置窗口（左菜单：订阅管理 / 关注标签 / 公共仓库 / 数据缓存）
+├── start.bat                   # 一键启动脚本（关闭窗口即停止）
+├── index.html / config.html    # 双入口（搜索主窗 / 独立设置窗）
+├── vite.config.ts              # Vite 构建（双入口 + vue 插件 + __APP_VERSION__）
+├── tsconfig.json               # TypeScript 配置（strict）
+├── src/                        # 前端（Vue 3 + TypeScript）
+│   ├── main.ts                 # 主窗口入口 → createApp(SearchApp)
+│   ├── config.ts               # 设置窗口入口 → createApp(ConfigApp)
+│   ├── env.d.ts                # Vite / __APP_VERSION__ 类型声明
+│   ├── types/index.ts          # 共享类型（订阅/数据项/更新信息…）
 │   ├── css/style.css           # 全局样式（还原原版视觉）
-│   └── lib/
-│       ├── search-engine.js    # 搜索核心：递归订阅加载、索引、三级搜索、权重/历史/新数据
-│       ├── subscribe-parser.js # 订阅解析：tis / fetchFun 双标签 / mLine·sLineFetchFun / 脚本项解析
-│       ├── tags.js             # 标签解析与彩色渲染
-│       ├── overlap.js          # 重叠匹配度算法（移植自原版）
-│       ├── util.js             # 工具：转义、URL、Markdown、本地存储、防抖
-│       ├── assets.js           # 内嵌图标资源（由原脚本提取生成）
-│       └── tauri-bridge.js     # Tauri 桥接：HTTP 代理、窗口控制、外链打开
+│   ├── components/             # 两窗口共享组件（MessageDialog / ToastHost）
+│   ├── composables/            # 两窗口共享逻辑（useMessageDialog / useToast）
+│   ├── windows/
+│   │   ├── search/             # 搜索主窗口：App.vue + SearchBox / ResultList /
+│   │   │                       #   ResultItem / DetailView / UpdateBadge + composables
+│   │   └── config/             # 设置窗口：App.vue + panels/（订阅/标签/仓库/缓存/快捷键/关于/TisHub）
+│   └── lib/                    # 纯逻辑层（无框架依赖，可直接单测）
+│       ├── search-engine.ts    # 搜索核心：递归订阅加载、索引、三级搜索、权重/历史/新数据
+│       ├── subscribe-parser.ts # 订阅解析：tis / fetchFun 双标签 / mLine·sLineFetchFun / 脚本项解析
+│       ├── tags.ts             # 标签解析与彩色渲染
+│       ├── overlap.ts          # 重叠匹配度算法（移植自原版）
+│       ├── script-runtime.ts   # 脚本项运行时（new Function 沙箱）
+│       ├── shortcut.ts         # 快捷键录入：keydown → 组合键字符串
+│       ├── util.ts             # 工具：转义、URL、Markdown、本地存储、防抖
+│       ├── assets.ts           # 内嵌图标资源（由 test/gen-assets.mjs 生成）
+│       └── tauri-bridge.ts     # Tauri 桥接：HTTP 代理、窗口控制、外链打开
 ├── src-tauri/                  # Rust 后端（Tauri 2.0）
 │   ├── src/lib.rs              # 全局快捷键、悬浮窗定位、HTTP 代理回退、托盘、命令
 │   ├── capabilities/           # 权限配置
@@ -109,34 +123,42 @@ my-search-desktop/
 
 ## 🔧 技术说明
 
-- **全局快捷键**：`tauri-plugin-global-shortcut` 注册（默认 `Ctrl+Alt+S`，可在「设置 → 快捷键设置」自定义，持久化于应用数据目录 `settings.json`）
-- **悬浮框**：无边框（`decorations: false`）+ 置顶 + 跳过任务栏 + 失焦自动隐藏（**结果列表也会在失焦时收起**，详情视图保留，见下方「失焦隐藏」）；呼出时定位到屏幕偏上的居中位置（`y ≈ 屏幕高 22%`）
+- **全局快捷键**：`tauri-plugin-global-shortcut` 注册（默认 `Ctrl+Alt+S`，可在「设置 → 快捷键」自定义，持久化于应用数据目录 `settings.json`）
+- **悬浮框**：无边框（`decorations: false`）+ 置顶 + 跳过任务栏 + 失焦无条件自动隐藏（**点了窗口外面就收起，不管在干什么；唤醒后再原样显示**，见下方「失焦隐藏」）；呼出时定位到屏幕偏上的居中位置（`y ≈ 屏幕高 22%`）
 - **窗口高度**：前端按「最多 15 条（`showSize`）」动态计算，结果多时可滚动查看全部（上限 420px）
 - **HTTP 代理**：Rust 端 `reqwest` 提供 `http_get`，三级回退（jsDelivr CDN → 直连兜底 → GitHub API）绕开 CORS 与网络封锁
 - **拼音搜索**：`pinyin-pro`（本地化，无外部 CDN 依赖），索引一次性预热
 - **订阅协议**：兼容 `tis::` 单标签、`<fetchFun>` 自定义提取函数、`default-tag`、转义/恢复
 
-### 失焦隐藏（对齐油猴版 `showView()` 的 input.blur）
+### 失焦隐藏（用户规则：点了窗口外面就无条件先隐藏）
 
-窗口失焦（点了应用外面）时**是否自动隐藏，取决于当前状态**：
+**只要窗口失去焦点（点了应用外面），不管当前在干什么，都先隐藏**；之后再按全局快捷键（默认 `Ctrl+Alt+S`）或托盘唤出即可。唤醒后前端会按隐藏前的视图状态分两种处理：
 
-| 当前状态 | 失焦是否隐藏 | 对应原版判定 |
-|----------|--------------|--------------|
-| 等待搜索（搜索框空着 / 搜了但没有结果，没结果也没详情） | ✅ 自动隐藏 | `seeNowMode() === WAIT_SEARCH` |
-| **结果列表展示中** | ✅ 自动隐藏 | ⚠️ **桌面版调整**（原版 `!isWaitSearch` 不隐藏） |
-| 查看**简述内容** / **附加内容**（vassal） | ❌ 不隐藏 | `SHOW_ITEM_DETAIL` |
-| 打开**脚本应用**（`view:html/css/js` 脚本视图） | ❌ 不隐藏 | `SHOW_ITEM_DETAIL` |
-| 搜索进行中（防抖 + 异步检索尚未返回） | ❌ 不隐藏 | `searchEven.isSearching` |
-| 输入 `:debug` 指令模式 | ❌ 不隐藏 | `isInstructions("debug")` |
+| 隐藏前状态 | 唤醒后 |
+|------------|--------|
+| **详情视图**（简述内容 / 附加内容 / 脚本应用） | **原样还原**：正文仍在、输入框内容不动（DOM 未销毁） |
+| 其它（等待搜索 / 结果列表） | 复位到初始视图：输入框清空、窗口收回搜索框高度 |
 
-- **为什么结果列表也隐藏**：原版 `!isWaitSearch` 会让结果区在失焦时也保持显示（悬浮窗一直浮在最上面）。但桌面版悬浮窗的预期是「呼出→搜索→看完就收起」，搜完列表后点窗口外面还挂着一块列表会显得粘手，因此结果列表展示中改为**失焦即收起**。
-- **为什么详情视图不隐藏**：原脚本里 `input.blur` 只是「隐藏的一个必要条件」，展示内容时点窗口外面不应该把正在看的东西丢掉。桌面版早期是无条件 `Focused(false) → hide()`，看起来是「鼠标一点别处，正在看的附加内容/脚本应用就没了」，现已按原脚本修复并保留。
-- **怎么实现**：失焦事件在 Rust 侧（`on_window_event`）才会收到，前端无法阻止，所以状态由前端同步过去——`set_hide_on_blur(hide)` 命令 + `BlurHideState`（原子布尔），前端在视图/搜索状态变化时调用 `syncBlurHide()`（同值不重复发 IPC）。判定本身是纯函数：`resolveViewMode()` + `shouldHideOnBlur()`（`src/lib/util.js`），便于单测。
-- **状态判定以 DOM 为准**：`resolveViewMode()` 对应原版 `seeNowMode()`，按 `#text_show` / `#matchResult` 的 `display` 判当前模式（详情 > 结果 > 等待搜索），不依赖可能滞后的 `state.mode`。
-- **不隐藏时怎么收起**：按 `Esc`、全局呼出快捷键（默认 `Ctrl+Alt+S`），或托盘菜单/左键点击。（窗口是置顶的，所以详情视图会一直浮在最上面，这是预期行为。）
+| 当前状态 | 失焦是否隐藏 | 说明 |
+|----------|--------------|------|
+| 等待搜索（搜索框空着 / 搜了但没有结果） | ✅ 自动隐藏 | |
+| 结果列表展示中 | ✅ 自动隐藏 | 「呼出→搜索→看完就收起」 |
+| 查看**简述内容** / **附加内容**（vassal） | ✅ 自动隐藏 | **本次用户规则调整**：先隐藏，唤醒后原样还原，不会丢 |
+| 打开**脚本应用**（`view:html/css/js` 脚本视图） | ✅ 自动隐藏 | 同上，先隐藏 + 唤醒还原 |
+| 搜索进行中（防抖 + 异步检索尚未返回） | ✅ 自动隐藏 | 不再按「搜索中」豁免 |
+| 输入 `:debug` 指令模式 | ✅ 自动隐藏 | 不再按 `:debug` 豁免 |
+
+- **为什么统一为无条件隐藏**：悬浮窗置顶，若详情视图「点了外面也不消失」就会一直浮在最上面挡住其它应用；用户规则是「不管在干嘛都先隐藏，后面唤醒再显示就行」。而「正在看的东西」不会丢——详情视图的状态（`#text_show` 内容 + 输入框）没有被销毁，唤醒时按 `resumeDetailViewIfAny()` **原样还原**（正文还在、关键词还在）。这条还原规则对应「查看文档/附加内容/应用项时，按快捷键只单独隐藏，再显示时仍与隐藏前一致」。
+- **怎么实现**：失焦事件在 Rust 侧（`on_window_event`）才会收到，前端无法阻止；判定直接放在 Rust——收到 `Focused(false)` 就无条件 `hide()`，并顺手把窗口收回到搜索框高度（避免下次呼出残留高窗口）。前端**不再**按状态同步任何「是否允许隐藏」标志（旧的 `set_hide_on_blur` 命令 + `BlurHideState` 已移除）。
+  - 前端已彻底移除分状态判定：没有 `syncBlurHide` / `resolveViewMode` / `shouldHideOnBlur`，也不再读取 DOM 可见性来同步隐藏标志。
+  - 唤醒还原由 `App.vue` 的 `resumeDetailViewIfAny()` 完成：`state.mode === SHOW_ITEM_DETAIL && detailVisible` 时不清视图，只重贴窗口高度。
+- **与油猴版的差别**：原版 `showView()` 的 input.blur 判定里，`isDebuging` / `isSearching` / 非等待搜索状态都会 `return` 而不隐藏；桌面版浮窗按用户规则统一为「失焦即隐藏」，是对原版的明确调整。
+- **怎么主动收起**：按 `Esc`（详情视图下按一次先返回结果列表，再按一次收起窗口）、全局呼出快捷键、托盘菜单/左键点击。
+  - Esc 由页面上的**全局 keydown 监听**处理（捕获阶段），因此**不依赖输入框焦点**：点过详情正文让输入框失焦后，Esc 依然能返回。
+  - 前提是**窗口本身仍是前台窗口**。如果先点了其它应用/桌面，窗口会按上面的规则直接隐藏；要用全局快捷键重新唤出。
 - **点结果打开链接仍然会收起**：原版点击 URL 项是显式 `viewVisibilityController(false)` 后再 `window.open(url)`（简述/附加内容/脚本项在那边都是 `return`，不收起），桌面版同步移植了这个行为（`openItem()` 里先 `resetToInitialView()` + `hideWindow()` 再打开外链）。
-- **与旧行为的差别**：点 logo 右键 / 托盘打开设置时，桌面版的设置是独立窗口（主窗口置顶会盖住它），所以 `open_config_window` 会先把主窗口收起——观感与原版一致；另外 Rust 侧 `set_hide_on_blur` 初值为 `true`，前端同步之前保持旧行为（失焦即隐藏），不会出现「窗口置顶且怎么点都不消失」。
-- 相关测试：`node test/blur-hide.test.mjs`（纯函数：等待搜索 / 结果列表 → 隐藏，详情视图与搜索中 / `:debug` → 不隐藏）；`node test/blur-hide-ui.test.mjs`（真实浏览器走交互路径，验证同步给 Rust 的 `set_hide_on_blur` 取值）。
+- **与旧行为的差别**：点 logo 右键 / 托盘打开设置时，桌面版的设置是独立窗口（主窗口置顶会盖住它），所以 `open_config_window` 会先把主窗口收起——观感与原版一致。
+- 相关测试：`node test/blur-hide.test.mjs`（源码契约：Rust 失焦即隐藏、无任何门控，前端已移除分状态判定与同步机制）；`node test/blur-hide-ui.test.mjs`（真实浏览器走交互路径，验证详情视图/脚本应用下前端不再发送旧的 `set_hide_on_blur` 门控）；`node test/summon-keep-input.test.mjs`（真实浏览器验证唤醒还原：详情视图原样保留、其它状态复位）；`node test/esc-return-ui.test.mjs`（真实浏览器验证详情视图下 Esc 返回：输入框聚焦 / 失焦都生效，且只返回、不隐藏窗口）。
 
 ### 图标（分平台，各自符合本平台审美）
 
@@ -150,7 +172,7 @@ my-search-desktop/
   - macOS 用**单色模板图标**（`tray-mono.png`，纯黑 + 透明，`icon_as_template(true)`），系统按浅色/深色菜单栏自动反色
   - Windows / Linux 用彩色叶子 + **透明背景**，并按宽度顶到接近满幅（小尺寸下才不糊）
 - **平台分发**：Windows 的图标由 `src-tauri/tauri.windows.conf.json` 覆盖 `bundle.icon` 指向 `icons/windows/`（Tauri 会用 JSON Merge Patch 合并平台配置，**数组是整体替换**，所以平台文件里要写完整清单）。`tauri-build` 嵌入 exe 资源图标时会从 `bundle.icon` 里找第一个 `.ico`
-- **可复现**：`npm run icons` 从 `src/lib/assets.js` 里的原脚本叶子 SVG 重新生成两套母版，再交给 `tauri icon` 产出全套（`.icns` / `.ico` / 各尺寸 png）
+- **可复现**：`npm run icons` 从 `src/lib/assets.ts` 里的原脚本叶子 SVG 重新生成两套母版，再交给 `tauri icon` 产出全套（`.icns` / `.ico` / 各尺寸 png）
 
 ### 托盘菜单后鼠标光标消失（Windows 已修复）
 
@@ -198,7 +220,7 @@ my-search-desktop/
 
 - **离线容错**：缓存过期但重新加载全部失败（离线）时，回退到旧缓存，且加载失败不会用空数据覆盖已有缓存。
 
-相关测试：`node test/blur-hide.test.mjs`（验证失焦隐藏的判定：等待搜索、结果列表展示中隐藏；简述/附加内容/脚本应用、搜索进行中、`:debug` 模式不隐藏，含真值表与 `:debug` 边界、`resolveViewMode` 优先级、DOM 链路组合）；`node test/blur-hide-ui.test.mjs`（真实浏览器走交互路径，验证同步给 Rust 的 `set_hide_on_blur` 取值；需本机装有 Chrome / Edge，否则跳过）；`node test/cache-test.mjs`（验证「未过期复用缓存且零网络请求」「过期重新加载」「订阅变化失效」「离线回退」等）；`node test/new-items.test.mjs`（验证 `<new>` 新数据：首次加载不把全部数据当「新」、下次加载仅标记真正新增项并带 `[最新一条]`、有效期内保留不重复累积、过期记录不再展示）；`node test/raw-url.test.mjs`（验证 raw.githubusercontent URL 解析：`refs/heads` / `refs/tags` / 标准分支三种形式、根目录文件与多级路径、中文路径、缺文件名时拒绝转换；与 Rust 侧 `cargo test` 用例一一对应）；`node test/placeholder.test.mjs`（验证占位提示的文案、时长与「加载中提示会自动消失」）；`node test/progress.test.mjs`（验证进度上报、命中缓存不上报、回调异常不阻断加载）；`node test/cache-remain.test.mjs`（验证剩余时长/过期时刻文案的分档、边界与递减性质）；`node test/cache-remain-ui.test.mjs`（真实浏览器验证设置窗口「数据缓存」面板的剩余时间显示、秒级倒计时是否会走动、过期切文案与清理后不再残留；需本机装有 Chrome / Edge，否则跳过）；`node test/sub-cards-ui.test.mjs`（真实浏览器验证设置窗口「订阅管理」条块管理的默认渲染、添加/行内编辑/删除、键盘 Enter/Esc、拖拽排序、条块↔源码切换与亮暗主题截图；需本机装有 Chrome / Edge，否则跳过）；`node test/_e2e-drag.test.mjs`（真实 Tauri+WebView2 验证「订阅总览」条块拖拽排序在 Windows 原生 OLE drop handler 不拦截的情况下正确触发，需先 `npm run build && cd src-tauri && cargo build` 构建 debug exe）。Rust 侧单测：`cd src-tauri && cargo test --lib`（raw.githubusercontent URL 解析边界）。
+相关测试：`node test/blur-hide.test.mjs`（源码契约：Rust 失焦即隐藏、无任何门控，前端已移除分状态判定与同步机制）；`node test/blur-hide-ui.test.mjs`（真实浏览器走交互路径，验证详情视图/脚本应用下前端不再发送旧的 `set_hide_on_blur` 门控；需本机装有 Chrome / Edge，否则跳过）；`node test/ai-ask.test.mjs`（源码契约：「问AI」子关键词转发：挂载后自动转发、编辑子关键词不重搜、保留「父关键词 : 」）；`node test/ai-ask-ui.test.mjs`（真实浏览器端到端：空内容按 Tab → 转发「问AI : 」→ 输入「你好」→ 回车打开「问AI」应用并自动收到「你好」、会话存活可连续追问；需本机装有 Chrome / Edge，否则跳过）；`node test/cache-test.mjs`（验证「未过期复用缓存且零网络请求」「过期重新加载」「订阅变化失效」「离线回退」等）；`node test/new-items.test.mjs`（验证 `<new>` 新数据：首次加载不把全部数据当「新」、下次加载仅标记真正新增项并带 `[最新一条]`、有效期内保留不重复累积、过期记录不再展示）；`node test/raw-url.test.mjs`（验证 raw.githubusercontent URL 解析：`refs/heads` / `refs/tags` / 标准分支三种形式、根目录文件与多级路径、中文路径、缺文件名时拒绝转换；与 Rust 侧 `cargo test` 用例一一对应）；`node test/placeholder.test.mjs`（验证占位提示的文案、时长与「加载中提示会自动消失」）；`node test/progress.test.mjs`（验证进度上报、命中缓存不上报、回调异常不阻断加载）；`node test/cache-remain.test.mjs`（验证剩余时长/过期时刻文案的分档、边界与递减性质）；`node test/cache-remain-ui.test.mjs`（真实浏览器验证设置窗口「数据缓存」面板的剩余时间显示、秒级倒计时是否会走动、过期切文案与清理后不再残留；需本机装有 Chrome / Edge，否则跳过）；`node test/sub-cards-ui.test.mjs`（真实浏览器验证设置窗口「订阅管理」条块管理的默认渲染、添加/行内编辑/删除、键盘 Enter/Esc、拖拽排序、条块↔源码切换与亮暗主题截图；需本机装有 Chrome / Edge，否则跳过）；`node test/_e2e-drag.test.mjs`（真实 Tauri+WebView2 验证「订阅总览」条块拖拽排序在 Windows 原生 OLE drop handler 不拦截的情况下正确触发，需先 `npm run build && cd src-tauri && cargo build` 构建 debug exe）。Rust 侧单测：`cd src-tauri && cargo test --lib`（raw.githubusercontent URL 解析边界）。
 
 - **设置窗口的确认框（跨平台修复）**：原实现用 window.confirm / window.alert，但在 macOS 的 WKWebView 里 wry 没有实现 unJavaScriptAlertPanel / unJavaScriptConfirmPanel——confirm() 会**静默返回 false**、lert() **完全无效果**，导致「清理缓存」「删除订阅」「提交到 TisHub」点了没反应。现已改为**应用内确认/提示弹窗**（#msgOverlay，样式复用设置窗口的 dialog），三个平台表现一致，并支持 Esc=取消 / Enter=确定。
 ### 相比早期桌面版的修复
@@ -215,9 +237,12 @@ my-search-desktop/
 
 4. **脚本项**：补齐 `[脚本]` 项的解析（`resourceObj`）与受限视图运行时（`view:html/css/js`、外部打开），以及「新数据 / 历史 / HOT」快捷脚本。
 
-5. **设置不持久**：显式保证 WebView 数据目录持久且主窗口与配置窗口共享，订阅/历史/权重在重启后仍然保留。
+5. **脚本应用的子关键词转发**：早期漏掉了原版 `tryRunTextViewHandler` 的自动调用与「编辑子关键词不重搜」守卫，导致「问AI」应用在整个链路上永远收不到问题。现已完整还原三处原版行为：脚本视图挂载完成后自动转发一次子关键词、输入「父关键词 : 问题」时保住脚本会话不重搜、回车把问题推给 `sendListener` 并保留「父关键词 : 」。
+   相关测试：`node test/ai-ask.test.mjs`（源码契约）；`node test/ai-ask-ui.test.mjs`（真实浏览器端到端：空内容按 Tab → 转发「问AI : 」→ 输入「你好」→ 回车打开应用并自动收到「你好」，且会话存活可连续追问；需本机装有 Chrome / Edge，否则跳过）。
 
-6. **界面与性能**：每屏 15 条（`showSize`）、结果区最大 420px、搜索框 47px、无边框阴影、呼出定位在屏幕偏上居中；拼音索引一次性构建，避免每次按键对全部数据实时转拼音造成的卡顿。
+6. **设置不持久**：显式保证 WebView 数据目录持久且主窗口与配置窗口共享，订阅/历史/权重在重启后仍然保留。
+
+7. **界面与性能**：每屏 15 条（`showSize`）、结果区最大 420px、搜索框 47px、无边框阴影、呼出定位在屏幕偏上居中；拼音索引一次性构建，避免每次按键对全部数据实时转拼音造成的卡顿。
 
 ---
 

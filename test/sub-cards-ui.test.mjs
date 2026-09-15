@@ -129,7 +129,7 @@ const check = (name, pass, detail) => {
   console.log(`${pass ? "PASS" : "FAIL"}  ${name}${detail ? "  — " + detail : ""}`);
 };
 
-/** 预置两条订阅（storageSet 走 JSON.stringify，与 util.js 一致） */
+/** 预置两条订阅（storageSet 走 JSON.stringify，与 util.ts 一致） */
 const seedSubscribes = () =>
   evalJs(`(() => {
     localStorage.setItem('my-search-desktop:subscribes', JSON.stringify(

@@ -6,8 +6,10 @@
  * 其中 [精选好课] 是标签，[h'游戏'] 表示隐藏标签（不显示，仅用于分类/取消关注）
  */
 
+import type { TagStat } from "../types/index.ts";
+
 /** 标签颜色映射（还原 titleTagColorMatchHandler） */
-const TAG_COLORS = {
+const TAG_COLORS: Record<string, string> = {
   系统项: "background:rgb(0,210,13);",
   非最佳: "background:#fbbc05;",
   推荐: "background:#ea4335;",
@@ -21,16 +23,17 @@ const TAG_COLORS = {
   精选好课: "background:#221109;color:#fccd64 !important;",
 };
 
+/** captureRegEx 的匹配结果：[完整匹配, 组1, 组2, ...] */
+export type TagCapture = string[];
+
 /**
  * 捕获正则的所有匹配（还原 captureRegEx）：返回 [[完整匹配, 组1, 组2, ...], ...]
  */
-export function captureRegEx(regex, text) {
-  const result = [];
+export function captureRegEx(regex: RegExp, text: string | null | undefined): TagCapture[] {
+  const result: TagCapture[] = [];
   if (regex == null || text == null) return result;
-  let m;
-  const re = regex.global
-    ? regex
-    : new RegExp(regex.source, regex.flags + "g");
+  let m: RegExpExecArray | null;
+  const re = regex.global ? regex : new RegExp(regex.source, regex.flags + "g");
   re.lastIndex = 0;
   while ((m = re.exec(text)) !== null) {
     if (m.index === re.lastIndex) re.lastIndex++;
@@ -44,17 +47,20 @@ export function captureRegEx(regex, text) {
  * 返回数组，每项为 [完整, 参数, 参数?, 标签名]
  * 例："[h'游戏']标题" -> [["[h'游戏']", "h", undefined, "游戏"]]
  */
-export function parseTag(title) {
+export function parseTag(title: string | null | undefined): TagCapture[] {
   return captureRegEx(/\[\s*(([^'\]\s]*)\s*')?\s*([^'\]]*)\s*'?\s*]/gm, String(title ?? ""));
 }
 
 /**
  * 解析标签并汇总（还原 parseTags）
- * @returns {Array<{name,status,count}>}
  */
-export function parseTags(data = [], selecterFun = (item) => item, tagsMap = {}) {
+export function parseTags<T>(
+  data: T[] | T = [],
+  selecterFun: (item: T) => string = (item) => String(item),
+  tagsMap: Record<string, TagStat> = {}
+): TagStat[] {
   const isArray = Array.isArray(data);
-  const items = isArray ? data : [data];
+  const items: T[] = isArray ? (data as T[]) : [data as T];
   items.forEach(function (item) {
     const captureGroups = parseTag(selecterFun(item));
     captureGroups.forEach(function (group) {
@@ -62,7 +68,7 @@ export function parseTags(data = [], selecterFun = (item) => item, tagsMap = {})
       if (label != null && tagsMap[label] == null) {
         tagsMap[label] = { name: label, status: 1, count: 1 };
       } else if (tagsMap[label] != null) {
-        tagsMap[label].count++;
+        tagsMap[label].count = (tagsMap[label].count ?? 0) + 1;
       }
     });
   });
@@ -70,26 +76,26 @@ export function parseTags(data = [], selecterFun = (item) => item, tagsMap = {})
 }
 
 /** 获取标签颜色（还原 titleTagColorMatchHandler） */
-export function titleTagColor(tagValue) {
+export function titleTagColor(tagValue: string): string {
   return TAG_COLORS[tagValue] || "background:#5eb95e;";
 }
 
 /**
  * 将标题中的标签渲染为彩色 span（还原 titleTagHandler）
- * @param {string} titleHtml 已做 HTML 转义的标题
+ * @param titleHtml 已做 HTML 转义的标题
  */
-export function titleTagHandler(titleHtml) {
+export function titleTagHandler(titleHtml: string): string {
   const regex = /(\[[^\[\]]*\])/gm;
-  let m;
+  let m: RegExpExecArray | null;
   let resultTitle = titleHtml;
   while ((m = regex.exec(titleHtml)) !== null) {
     if (m.index === regex.lastIndex) regex.lastIndex++;
     const tag = m[0];
     if (!tag) continue;
     const tagCore = tag.substring(1, tag.length - 1);
-    resultTitle = resultTitle.split(tag).join(
-      `<span style="${titleTagColor(tagCore)}" class="flag">${tagCore}</span>`
-    );
+    resultTitle = resultTitle
+      .split(tag)
+      .join(`<span style="${titleTagColor(tagCore)}" class="flag">${tagCore}</span>`);
   }
   return resultTitle;
 }
@@ -98,9 +104,9 @@ export function titleTagHandler(titleHtml) {
  * 还原 registry.view.titleTagHandler.execute：
  * 只取标题开头的标签（最多到最后一个 `]`）并渲染为彩色 span，返回的仅是标签部分，
  * 标题正文由 titleContentHandler 另行渲染，两者拼接后即为完整标题。
- * @param {string} titleHtml 已做 HTML 转义的标题
+ * @param titleHtml 已做 HTML 转义的标题
  */
-export function renderTitleTags(titleHtml) {
+export function renderTitleTags(titleHtml: string | null | undefined): string {
   const arr = String(titleHtml ?? "").match(/\[.*\]/);
   if (!arr || !arr[0]) return "";
   return titleTagHandler(arr[0].trim());
@@ -109,16 +115,18 @@ export function renderTitleTags(titleHtml) {
 /**
  * 去掉隐藏标签，如 [h'游戏']（还原 clearHideTagForTitle）
  */
-export function clearHideTagForTitle(rawTitle) {
+export function clearHideTagForTitle(rawTitle: string | null | undefined): string {
   const regex = /\[\s*[^:\]]*h[^:\]]*\s*'\s*[^'\]]*\s*'\s*]/gm;
   return String(rawTitle ?? "").replace(regex, "");
 }
 
 /**
  * 提取所有标签并清理内容（还原 extractTagsAndCleanContent）
- * @returns {{tags: string[], cleaned: string}}
  */
-export function extractTagsAndCleanContent(inputString = "") {
+export function extractTagsAndCleanContent(inputString = ""): {
+  tags: string[];
+  cleaned: string;
+} {
   const regex = /\[.*?\]/g;
   const tags = inputString.match(regex) || [];
   const cleaned = inputString.replace(regex, "").trim();
@@ -130,8 +138,8 @@ export function extractTagsAndCleanContent(inputString = "") {
  * - 去掉所有 [xxx] 标签
  * - 以 # 开头的标题加删除线（obsolete）
  */
-export function titleContentHandler(title) {
-  const { cleaned } = extractTagsAndCleanContent(title);
+export function titleContentHandler(title: string | null | undefined): string {
+  const { cleaned } = extractTagsAndCleanContent(String(title ?? ""));
   const safe = String(cleaned ?? "");
   return `<span class="item_title ${safe.startsWith("#") ? "obsolete" : ""}">${safe.replace(/^#/, "")}</span>`;
 }

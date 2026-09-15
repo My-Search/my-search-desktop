@@ -1,9 +1,16 @@
 import { defineConfig } from "vite";
+import vue from "@vitejs/plugin-vue";
 import { fileURLToPath } from "url";
+import { readFileSync } from "fs";
+
+const pkg = JSON.parse(readFileSync("./package.json", "utf-8")) as { version: string };
 
 // https://vitejs.dev/config/
-export default defineConfig(async () => ({
-  // 生产环境构建输出到 dist
+export default defineConfig({
+  plugins: [vue()],
+  define: {
+    __APP_VERSION__: JSON.stringify(pkg.version),
+  },
   build: {
     outDir: "dist",
     rollupOptions: {
@@ -21,4 +28,4 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**"],
     },
   },
-}));
+});

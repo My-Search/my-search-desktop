@@ -1,7 +1,7 @@
 /**
- * 回归测试：快捷键录入的纯函数逻辑（src/lib/shortcut.js）
+ * 回归测试：快捷键录入的纯函数逻辑（src/lib/shortcut.ts）
  *
- * 「快捷键设置」面板把 keydown 事件转成 global-hotkey 可解析的字符串
+ * 「快捷键」面板把 keydown 事件转成 global-hotkey 可解析的字符串
  * （小写、+ 连接、修饰键在前，如 "ctrl+alt+s"），然后交给 Rust 端注册。
  * 这里覆盖：
  *  1. interpretKeydown：组合 / 纯修饰键 / Esc 取消 / Backspace 清空 / 忽略
@@ -14,7 +14,7 @@ import {
   shortcutToCaps,
   comboToString,
   isSupportedMainKey,
-} from "../src/lib/shortcut.js";
+} from "../src/lib/shortcut.ts";
 
 let failures = 0;
 
@@ -30,7 +30,7 @@ function check(name, actual, expected) {
   console.log(`✓ ${name}`);
 }
 
-/** 构造一个模拟 keydown 事件（只含 shortcut.js 用到的字段） */
+/** 构造一个模拟 keydown 事件（只含 shortcut.ts 用到的字段） */
 function ev({ code, key, ctrlKey = false, altKey = false, shiftKey = false, metaKey = false }) {
   return { code, key, ctrlKey, altKey, shiftKey, metaKey };
 }

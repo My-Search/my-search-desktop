@@ -59,9 +59,9 @@ const MONO_SIZE = 88;
 
 // ---------- 提取原始叶子 SVG ----------
 function loadLeafPaths() {
-  const assets = fs.readFileSync(path.join(ROOT, 'src', 'lib', 'assets.js'), 'utf8');
+  const assets = fs.readFileSync(path.join(ROOT, 'src', 'lib', 'assets.ts'), 'utf8');
   const m = assets.match(/LOGO_ICON\s*=\s*"data:image\/svg\+xml;base64,([A-Za-z0-9+/=]+)"/);
-  if (!m) throw new Error('未能从 src/lib/assets.js 提取 LOGO_ICON');
+  if (!m) throw new Error('未能从 src/lib/assets.ts 提取 LOGO_ICON');
   const svg = Buffer.from(m[1], 'base64').toString('utf8');
   const paths = [...svg.matchAll(/<path\b[^>]*>/g)].map((x) => {
     const d = (x[0].match(/\bd="([^"]+)"/) || [])[1];
