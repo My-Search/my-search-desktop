@@ -156,5 +156,119 @@ const catalogOf = (plugins, over = {}) => ({
   ok(MARKET_CATALOG_SCHEMA_VERSION === 1, "目录结构版本常量 = 1");
 }
 
+/* ============ 3. 目录客户端（market.ts diff / updateAvailable / 块名单） ============ */
+import {
+  applyUpdateAvailable,
+  clearUpdateAvailable,
+  diffCatalog,
+  isNewerVersion,
+  isUpdateableSource,
+  parseBlocklist,
+  updateableCount,
+} from "../src/lib/plugins/market.ts";
+
+/** 造一个安装在册的插件记录 */
+const recOf = (id, version, sourceKind) => {
+  let rec = {
+    id,
+    name: id,
+    version,
+    apiVersion: 1,
+    manifest: { id, name: id, version, apiVersion: 1, permissions: [], optionalPermissions: [] },
+    dir: "X:/plugin-data",
+    source: { kind: sourceKind },
+    installedAt: 0,
+    updatedAt: 0,
+    enabled: true,
+    autoStart: "disabled",
+    requestedAutoStart: "no",
+    closeBehavior: "stop",
+    grants: [],
+    denied: [],
+    runtime: { status: "stopped", pid: null, memoryBytes: null, startedAt: null, restarts: 0, lastError: null, keepAliveReasons: [] },
+    integrity: { sha256: null, signed: false },
+    updateAvailable: null,
+  };
+  return rec;
+};
+const regOf = (...recs) => ({ version: 1, plugins: recs });
+
+{
+  const r = regOf(recOf("com.a.demo", "1.0.0", "market"));
+  const entries = [entryOf({ id: "com.a.demo", version: "1.2.0" })];
+  const d = diffCatalog(r, entries);
+  ok(d.updates.length === 1 && d.updates[0].rec.id === "com.a.demo", "市场来源低版本 → 可更新");
+  ok(d.updates[0].entry.version === "1.2.0", "更新的目标版本正确");
+  ok(d.newOnes.length === 0, "未装清单无新增");
+}
+{
+  const r = regOf(recOf("com.a.demo", "1.0.0", "builtin"));
+  const d = diffCatalog(r, [entryOf({ id: "com.a.demo", version: "1.2.0" })]);
+  ok(d.updates.length === 1 && d.updates[0].rec.source.kind === "builtin", "内置插件可被市场接管更新");
+}
+for (const kind of ["folder", "file", "legacy"]) {
+  const r = regOf(recOf("com.a.demo", "1.0.0", kind));
+  const d = diffCatalog(r, [entryOf({ id: "com.a.demo", version: "1.2.0" })]);
+  ok(d.updates.length === 0, `本地来源 ${kind} 不参与市场更新`);
+  ok(isUpdateableSource(kind) === false, `isUpdateableSource(${kind}) = false`);
+}
+{
+  const r = regOf(recOf("com.a.demo", "2.0.0", "market"));
+  const d = diffCatalog(r, [entryOf({ id: "com.a.demo", version: "1.2.0" })]);
+  ok(d.updates.length === 0, "目录版本不高于已装 → 不报更新");
+}
+{
+  const r = regOf(); // 空注册表
+  const d = diffCatalog(r, [entryOf({ id: "com.only-new", version: "1.0.0" })]);
+  ok(d.newOnes.length === 1 && d.newOnes[0].id === "com.only-new", "未安装 → 进入 newOnes");
+}
+{
+  const r = regOf(recOf("com.b.blocked", "1.0.0", "market"));
+  const d = diffCatalog(r, [entryOf({ id: "com.b.blocked", version: "9.9.9" })], { ids: ["com.b.blocked"] });
+  ok(d.blocked.length === 1 && d.updates.length === 0, "命中块名单 → 不进 updates");
+}
+{
+  const r = regOf(recOf("com.b.blocked", "1.0.0", "market"));
+  const d = diffCatalog(r, [entryOf({ id: "com.b.blocked", version: "9.9.9" })], { ids: ["com.b.blocked"] });
+  ok(d.blocked[0].id === "com.b.blocked", "块名单条目单独列出");
+}
+{
+  // applyUpdateAvailable 幂等：先写角标，目录再变平齐 → 清回
+  const r = regOf(recOf("com.a.demo", "1.0.0", "market"));
+  applyUpdateAvailable(r, diffCatalog(r, [entryOf({ id: "com.a.demo", version: "1.2.0" })]));
+  ok(r.plugins[0].updateAvailable === "1.2.0", "市场有更高版本 → 写上角标");
+  ok(updateableCount(r) === 1, "updateableCount = 1");
+  applyUpdateAvailable(r, diffCatalog(r, [entryOf({ id: "com.a.demo", version: "1.0.0" })]));
+  ok(r.plugins[0].updateAvailable === null, "目录平齐 → 幂等清回 null");
+}
+{
+  const r = regOf(recOf("com.a.demo", "1.0.0", "folder"));
+  applyUpdateAvailable(r, diffCatalog(r, [entryOf({ id: "com.a.demo", version: "1.2.0" })]));
+  ok(r.plugins[0].updateAvailable === null, "folder 来源即便目录更高也不写角标");
+}
+{
+  const r = regOf(recOf("com.a.demo", "1.2.0", "market"));
+  applyUpdateAvailable(r, diffCatalog(r, [entryOf({ id: "com.a.demo", version: "1.2.0" })]));
+  ok(r.plugins[0].updateAvailable == null, "本地已升级到目录版本 → 无角标");
+}
+{
+  clearUpdateAvailable(regOf(recOf("com.a.demo", "1.0.0", "market")), "com.a.demo");
+  const r = regOf(recOf("com.a.demo", "1.0.0", "market"));
+  r.plugins[0].updateAvailable = "1.2.0";
+  clearUpdateAvailable(r, "com.a.demo");
+  ok(r.plugins[0].updateAvailable === null, "clearUpdateAvailable 清角标");
+}
+{
+  const b = parseBlocklist({ ids: ["com.a", "com.b", "", 42, "com.c"] });
+  ok(b.ids.join(",") === "com.a,com.b,com.c", "块名单宽容解析，只留非空字符串");
+  ok(parseBlocklist(null).ids.length === 0, "parseBlocklist(null) → 空");
+  ok(parseBlocklist("nope").ids.length === 0, "parseBlocklist(字符串) → 空");
+}
+{
+  ok(isNewerVersion(entryOf({ version: "1.2.0" }), recOf("com.x", "1.0.0", "market")), "isNewerVersion 判真");
+  ok(!isNewerVersion(entryOf({ version: "1.0.0" }), recOf("com.x", "1.0.0", "market")), "同版本非更新");
+  ok(!isNewerVersion(entryOf({ version: "0.9.0" }), recOf("com.x", "1.0.0", "market")), "更低版本非更新");
+}
+
 process.exitCode = fail > 0 ? 1 : 0;
 console.log(`\n结果: ${pass} passed, ${fail} failed`);
