@@ -68,6 +68,33 @@ async function installSingleBuiltin(id: string): Promise<boolean> {
 export function setupBuiltinAutoInstall(): () => void {
   if (!isTauri) return () => {};
 
+  /** 启动时修补已装内置插件的 optionalPermissions（旧版安装没授予它们） */
+  async function fixupBuiltinGrants() {
+    try {
+      const entries = await builtinList();
+      for (const entry of entries) {
+        if (!entry.installed || !entry.resourcePath) continue;
+        const b64 = await readLocalFileBase64(entry.resourcePath);
+        const prepared = await preparePackageFromBase64(b64);
+        const opts = prepared.manifest.optionalPermissions ?? [];
+        if (opts.length === 0) continue;
+        const registry = loadRegistry();
+        const rec = registry.plugins.find((p) => p.id === entry.id);
+        if (!rec) continue;
+        let changed = false;
+        for (const p of opts) {
+          if (!rec.grants.some((g: any) => g.permission === p)) {
+            rec.grants.push({ permission: p, at: Date.now(), source: "install" });
+            changed = true;
+          }
+        }
+        if (changed) saveRegistry(registry);
+      }
+    } catch (e) {
+      console.warn("[内置插件] 修复权限失败:", e);
+    }
+  }
+
   /** 拉取当前 bootstrap 状态并安装应装未装的插件 */
   async function pullAndInstall() {
     try {
@@ -83,6 +110,9 @@ export function setupBuiltinAutoInstall(): () => void {
       console.warn("[内置插件] 拉取安装失败:", err);
     }
   }
+
+  // 0) 修补已装内置插件缺失的 optionalPermissions
+  fixupBuiltinGrants();
 
   // 1) 主动拉取（克服 setup emit 早于前端监听导致事件丢失）
   pullAndInstall();
