@@ -1,1 +1,29 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#4F8EF7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><path d="M8 11h6"/><path d="M11 8v6"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="200" height="200">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#4F8EF7"/>
+      <stop offset="100%" stop-color="#6C5CE7"/>
+    </linearGradient>
+    <linearGradient id="bag" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FF6B6B"/>
+      <stop offset="100%" stop-color="#EE5A24"/>
+    </linearGradient>
+    <linearGradient id="strip" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#FDCB6E"/>
+      <stop offset="100%" stop-color="#F39C12"/>
+    </linearGradient>
+  </defs>
+  <!-- 圆形背景 -->
+  <circle cx="512" cy="512" r="480" fill="url(#bg)" opacity="0.12"/>
+  <!-- 购物袋主体 -->
+  <path d="M256 384h512l-42.667 426.667c-4.267 42.667-42.667 74.666-85.333 74.666H384c-42.667 0-81.067-32-85.333-74.666L256 384z" fill="url(#bag)" stroke="#D63031" stroke-width="12"/>
+  <!-- 提手 -->
+  <path d="M384 384V298.667c0-70.4 57.6-128 128-128s128 57.6 128 128V384" fill="none" stroke="#D63031" stroke-width="24" stroke-linecap="round"/>
+  <!-- 装饰条纹 -->
+  <rect x="320" y="469.333" width="384" height="21.334" rx="10" fill="url(#strip)" opacity="0.85"/>
+  <rect x="320" y="533.333" width="256" height="21.334" rx="10" fill="url(#strip)" opacity="0.85"/>
+  <rect x="320" y="597.333" width="320" height="21.334" rx="10" fill="url(#strip)" opacity="0.85"/>
+  <!-- 标签/价格牌 -->
+  <circle cx="704" cy="320" r="64" fill="#FDCB6E" stroke="#F39C12" stroke-width="6"/>
+  <text x="704" y="332" text-anchor="middle" font-size="48" font-weight="bold" fill="#E17055" font-family="Arial">$</text>
+</svg>
