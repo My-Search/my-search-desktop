@@ -21,9 +21,11 @@ import {
   type PermissionGroupBlock,
 } from "../../../lib/plugins/permissions";
 import { type AutoStartMode, type BehaviorSuggestion, type CloseBehavior, behaviorSuggestionOf } from "../../../lib/plugins/registry";
-import { readPluginBinary } from "../../../lib/plugins/ipc";
+import { readPluginBinary, readLocalFileBase64 } from "../../../lib/plugins/ipc";
 import { iconDataUrl, iconRefsOf, isInlineIconRef, primaryIconRef } from "../../../lib/plugins/icon";
 import { markPluginFrontendRestart } from "../../../lib/plugins/restart";
+import { builtinList, builtinMarkRemoved, builtinClearRemoved, builtinResourcePath } from "../../../lib/plugins/builtin";
+import { preparePackageFromBase64 } from "../../../lib/plugins/install";
 
 const props = defineProps<{
   notify: (text: string, type?: "ok" | "error") => void;
@@ -31,6 +33,57 @@ const props = defineProps<{
 }>();
 
 const rt = usePluginRuntime();
+
+// ===================== 内置插件状态 =====================
+const builtinEntries = ref<Awaited<ReturnType<typeof builtinList>>>([]);
+/** 某 id 是否为内置插件 */
+function isBuiltin(id: string): boolean {
+  return builtinEntries.value.some((e) => e.id === id);
+}
+/** 取内置插件条目（可能为空=非内置/未读取） */
+function builtinOf(id: string) {
+  return builtinEntries.value.find((e) => e.id === id);
+}
+
+/** 刷新内置插件列表 */
+async function refreshBuiltins(): Promise<void> {
+  try {
+    builtinEntries.value = await builtinList();
+  } catch (e) {
+    /* 浏览器环境静默跳过 */
+  }
+}
+
+/** 恢复一个被移除的内置插件 */
+async function restoreBuiltin(id: string): Promise<void> {
+  const entry = builtinOf(id);
+  if (!entry || !entry.available) {
+    props.notify(`内置插件 ${id} 的资源包不存在`, "error");
+    return;
+  }
+  try {
+    await builtinClearRemoved(id);
+    const path = entry.resourcePath!;
+    const b64 = await readLocalFileBase64(path);
+    const prepared = await preparePackageFromBase64(b64, {
+      hostVersion: typeof __APP_VERSION__ !== "undefined" ? __APP_VERSION__ : null,
+      checkPermissions: isKnownPermission,
+    });
+    const allPerms = [...(prepared.manifest.permissions ?? []), ...(prepared.manifest.optionalPermissions ?? [])];
+    await rt.installFromFiles({
+      manifest: prepared.manifest,
+      dir: `plugins/${prepared.manifest.id}`,
+      files: prepared.files,
+      source: { kind: "builtin" },
+      sha256: prepared.sha256,
+      grants: allPerms,
+    });
+    await refreshBuiltins();
+    props.notify(`已恢复内置插件「${prepared.manifest.name}」`, "ok");
+  } catch (e) {
+    props.notify(`恢复失败: ${String((e as Error)?.message ?? e)}`, "error");
+  }
+}
 
 // ===================== 筛选 =====================
 type FilterMode = "all" | "running" | "error";
@@ -281,6 +334,22 @@ async function toggleEnabled(rec: any): Promise<void> {
 }
 
 async function uninstallPlugin(rec: any): Promise<void> {
+  if (isBuiltin(rec.id)) {
+    if (!(await props.confirm(`「${rec.name}」是内置插件，卸载后将不再随版本升级自动安装。确定卸载？`))) return;
+    const deleteData = await props.confirm("是否同时删除插件保存的数据？");
+    try {
+      await rt.uninstall(rec.id, deleteData);
+      await builtinMarkRemoved(rec.id);
+      await refreshBuiltins();
+      for (const k of Object.keys(iconMap.value)) {
+        if (k.startsWith(`${rec.id}/`)) delete iconMap.value[k];
+      }
+      props.notify(`已卸载内置插件 ${rec.name}（升级不再自动安装）`, "ok");
+    } catch (e) {
+      props.notify(`卸载失败: ${String((e as Error)?.message ?? e)}`, "error");
+    }
+    return;
+  }
   if (!(await props.confirm(`确定卸载「${rec.name}」v${rec.version}？`))) return;
   const deleteData = await props.confirm("是否同时删除插件保存的数据？");
   try {
@@ -387,6 +456,7 @@ onMounted(() => {
   purgeLegacyRecords();
   void rt.reconcileAll();
   void preloadIcons();
+  void refreshBuiltins();
   // 目录挂载插件的热重载：面板打开期间跟随源目录变化刷新展示
   void rt.startDevWatcher();
 });
@@ -482,7 +552,7 @@ function durFrom(ts: number | null): string {
             <template v-else>🧩</template>
           </div>
           <div class="plugin-meta">
-            <div class="plugin-name">{{ record.name }}<span v-if="record.author" class="plugin-author"> · {{ record.author }}</span></div>
+            <div class="plugin-name">{{ record.name }}<span v-if="record.author" class="plugin-author"> · {{ record.author }}</span><span v-if="isBuiltin(record.id)" class="plugin-badge-builtin">内置</span></div>
             <div class="plugin-desc">{{ record.description || '' }}</div>
           </div>
           <div class="plugin-state">
@@ -584,6 +654,34 @@ function durFrom(ts: number | null): string {
       <p v-if="filterMode === 'running'">没有插件在后台运行。</p>
       <p v-else-if="filterMode === 'error'">没有异常插件。</p>
       <p v-else>暂未安装插件。</p>
+    </div>
+
+    <!-- 已卸载的内置插件（可恢复） -->
+    <div v-if="builtinEntries.filter(e => e.removed && e.available).length > 0" class="cfg-card plugins-list">
+      <div class="cfg-card-head">
+        <h4>已丢弃的内置插件</h4>
+        <span class="cfg-hint">升级不会自动恢复，可手动重新安装</span>
+      </div>
+      <div
+        v-for="entry in builtinEntries.filter(e => e.removed && e.available)"
+        :key="entry.id"
+        class="plugin-item"
+      >
+        <div class="plugin-header">
+          <div class="plugin-icon"><span>🧩</span></div>
+          <div class="plugin-meta">
+            <div class="plugin-name">{{ entry.id }}<span class="plugin-badge-builtin">内置</span></div>
+            <div class="plugin-desc">已被卸载，升级不会自动恢复</div>
+          </div>
+          <div class="plugin-state"></div>
+          <div class="plugin-arrow"></div>
+        </div>
+        <div class="plugin-detail" style="display: block;">
+          <div class="plugin-detail-actions">
+            <button class="btn-sm" @click.stop="restoreBuiltin(entry.id)">重新安装</button>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- 权限面板 -->
