@@ -1,0 +1,30 @@
+{
+  "id": "com.mysearch.market",
+  "name": "插件市场",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "minAppVersion": "7.9.16",
+  "author": "MySearch Team",
+  "description": "浏览、安装、更新与卸载插件",
+  "homepage": "https://github.com/My-Search",
+  "icon": "icon.svg",
+  "permissions": [
+    "ui.inlay",
+    "store"
+  ],
+  "optionalPermissions": [
+    "plugin.install"
+  ],
+  "contributes": {
+    "searchItem": {
+      "title": "插件市场",
+      "desc": "浏览、安装、更新与卸载插件",
+      "keyword": "插件市场"
+    },
+    "detailView": {
+      "entry": "ui/detail.html",
+      "script": "ui/index.js",
+      "closeBehavior": "exit"
+    }
+  }
+}

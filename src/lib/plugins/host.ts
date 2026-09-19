@@ -433,6 +433,9 @@ export function createHostApi(pluginId: string, ctx: PluginHostContext): Record<
         }),
     },
 
+/* ---------------- 插件市场（gate: plugin.install） ---------------- */
+    market: createMarketApi(pluginId, call),
+
     /* ---------------- 系统 ---------------- */
     system: {
       openExternal: (url: string) =>
@@ -545,9 +548,134 @@ function safeStringify(v: unknown): string {
   }
 }
 
-/* ============================================================
+/**
+ * 创建插件市场的宿主 API（`ms.market.*`，gate: plugin.install）。
+ *
+ * 与其它 API 不同：市场 API 不可能在创建时获得 `api` 引用（创建中），
+ * 因此在这里单独提取成函数，避开循环引用问题。
+ */
+function createMarketApi(pluginId: string, call: <T>(opts: {
+  api: string;
+  permission?: string;
+  detail?: string;
+  run: (record: any) => T | Promise<T>;
+}) => T | Promise<T>): Record<string, unknown> {
+  function guarded<T>(name: string, run: () => T | Promise<T>): T | Promise<T> {
+    return call({ api: `market.${name}`, permission: "plugin.install", run: () => run() });
+  }
+
+  const self: Record<string, unknown> = {};
+  type MarketResult = { ok: boolean; error?: string } | { ok: true }; 
+  type AsyncMarketFn = (...args: any[]) => Promise<any>;
+
+  async function catalogFetch() {
+    const { marketFetchRaw } = await import("./ipc.ts");
+    const { compatibleEntries, parseCatalog } = await import("./market-types.ts");
+    const { diffCatalog, applyUpdateAvailable } = await import("./market.ts");
+    const { loadRegistry } = await import("./registry.ts");
+    const reg = loadRegistry();
+    const catalogUrl = "https://github.com/My-Search/my-search-plugin-market/releases/download/catalog/catalog.json";
+    const raw = await marketFetchRaw(pluginId, catalogUrl, "");
+    const text = new TextDecoder("utf-8").decode(raw);
+    const parsed = parseCatalog(text);
+    if (!parsed.ok) return null;
+    const compat = compatibleEntries(parsed.catalog, typeof __APP_VERSION__ !== "undefined" ? __APP_VERSION__ : "");
+    const diff = diffCatalog(reg, compat);
+    applyUpdateAvailable(reg, diff);
+    return { reg, catalog: parsed.catalog, diff };
+  }
+
+  self.list = () => guarded("list", async () => {
+    const result = await catalogFetch();
+    if (!result) return { entries: [], installedMap: {}, updates: [], blocked: [], error: "解析目录失败" };
+    const installedMap: Record<string, string> = {};
+    for (const rec of result.reg.plugins) {
+      if (rec.source.kind === "builtin" || rec.source.kind === "market") {
+        installedMap[rec.id] = rec.version;
+      }
+    }
+    return {
+      entries: result.catalog.plugins,
+      installedMap,
+      updates: result.diff.updates.map((u) => ({ id: u.rec.id, currentVersion: u.rec.version, availableVersion: u.entry.version })),
+      blocked: result.diff.blocked.map((b) => b.id),
+      error: null as string | null,
+    };
+  });
+  self.install = (id: string) => guarded("install", async () => {
+    const { marketFetchRaw, installPluginPackage } = await import("./ipc.ts");
+    const { loadRegistry, saveRegistry, createPluginRecord, upsertPlugin } = await import("./registry.ts");
+    const { isKnownPermission } = await import("./permissions.ts");
+    const { parseCatalog } = await import("./market-types.ts");
+    const catalogUrl = "https://github.com/My-Search/my-search-plugin-market/releases/download/catalog/catalog.json";
+    const catalogRaw = await marketFetchRaw(pluginId, catalogUrl, "");
+    const parsed = parseCatalog(new TextDecoder("utf-8").decode(catalogRaw));
+    const entry = parsed.ok ? parsed.catalog.plugins.find((e) => e.id === id) : null;
+    if (!entry) return { ok: false, error: `市场中未找到插件: ${id}` };
+    const pkgUrl = `https://github.com/My-Search/my-search-plugin-market/releases/download/${id}/${id}.msplugin`;
+    const b64 = await marketFetchRaw(pluginId, pkgUrl, entry.sha256);
+    const { preparePackage } = await import("./install.ts");
+    const prepared = await preparePackage(b64, {
+      hostVersion: typeof __APP_VERSION__ !== "undefined" ? __APP_VERSION__ : null,
+      checkPermissions: isKnownPermission,
+    });
+    const allPerms = [...(prepared.manifest.permissions ?? []), ...(prepared.manifest.optionalPermissions ?? [])];
+    await installPluginPackage(id, prepared.files);
+    const reg = loadRegistry();
+    const record = createPluginRecord({
+      manifest: prepared.manifest,
+      dir: `plugins/${id}`,
+      source: { kind: "market" },
+      grants: allPerms,
+      integrity: { sha256: prepared.sha256, signed: false },
+    });
+    upsertPlugin(reg, record, { preserveUserChoices: false });
+    saveRegistry(reg);
+    return { ok: true };
+  });
+  self.update = (id: string) => guarded("update", async () => {
+    const result = await (self.install as any)(id);
+    return result.ok ? { ok: true as const, updatedTo: "" } : result;
+  });
+  self.uninstall = (id: string) => guarded("uninstall", async () => {
+    const { removePluginDir } = await import("./ipc.ts");
+    const { loadRegistry, saveRegistry, removePlugin } = await import("./registry.ts");
+    await removePluginDir(id);
+    const reg = loadRegistry();
+    removePlugin(reg, id);
+    saveRegistry(reg);
+    return { ok: true };
+  });
+  self.checkUpdates = () => guarded("checkUpdates", async () => {
+    const result = await catalogFetch();
+    if (!result) return 0;
+    const { updateableCount } = await import("./market.ts");
+    return updateableCount(result.reg);
+  });
+  self.refreshCatalog = () => guarded("refreshCatalog", async () => {
+    const result = await catalogFetch();
+    if (!result) return { entries: [], installedMap: {}, updates: [], blocked: [], error: null };
+    const installedMap: Record<string, string> = {};
+    for (const rec of result.reg.plugins) {
+      if (rec.source.kind === "builtin" || rec.source.kind === "market") {
+        installedMap[rec.id] = rec.version;
+      }
+    }
+    return {
+      entries: result.catalog.plugins,
+      installedMap,
+      updates: result.diff.updates.map((u) => ({ id: u.rec.id, currentVersion: u.rec.version, availableVersion: u.entry.version })),
+      blocked: result.diff.blocked.map((b) => b.id),
+      error: null as string | null,
+    };
+  });
+
+  return self;
+}
+
+/* ========================================================
  * 需要宿主注入的少量能力（避免 lib/plugins 反向依赖窗口层）
- * ============================================================ */
+ * ==================================================== */
 
 /** 宿主检索实现（由 search 窗口注入，等价 engine.search） */
 let hostSearch: (keyword: string) => SearchResult[] | Promise<SearchResult[]> = () => [];
