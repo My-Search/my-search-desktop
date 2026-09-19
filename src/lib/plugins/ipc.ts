@@ -14,6 +14,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { isTauri } from "../tauri-bridge.ts";
+import { base64ToBytes } from "./package.ts";
 
 /* ============================================================
  * 插件文件访问（相对插件目录，Rust 侧做路径穿越二次校验）
@@ -201,6 +202,34 @@ export async function readLocalFileBase64(path: string): Promise<string> {
 }
 
 /* ============================================================
+ * 插件市场：受控下载
+ * ============================================================ */
+
+/**
+ * 从市场下载一个安装包（返回原始字节）。
+ *
+ * Rust 侧 `market_fetch_raw` 做三道深防：调用者必须是已启用且授予
+ * `plugin.install` 的插件；`url` 必须落在市场 base 白名单内；下载完再验
+ * `expectedSha256`。这里把返回的 base64 解码成字节交给安装管线。
+ *
+ * 浏览器调试（无 Tauri）：从 `devMarketPackages` 取测试注入的包字节
+ * （键为下载 URL），供端到端测试喂本地目录 fixture；未注入则抛可读错误。
+ */
+export async function marketFetchRaw(
+  pluginId: string,
+  url: string,
+  expectedSha256: string
+): Promise<Uint8Array> {
+  if (isTauri) {
+    const b64 = await invoke<string>("market_fetch_raw", { pluginId, url, expectedSha256 });
+    return base64ToBytes(b64);
+  }
+  const cached = devMarketPackages.get(url);
+  if (cached == null) throw new Error(`开发环境未注入市场包 fixture: ${url}`);
+  return cached;
+}
+
+/* ============================================================
  * 后台进程控制（Rust supervisor）
  * ============================================================ */
 
@@ -293,3 +322,6 @@ export const devFileCache = new Map<string, string>();
 
 /** 无 Tauri 时的网关配置镜像（供调试面板展示） */
 export const devGateway = new Map<string, unknown>();
+
+/** 无 Tauri 时的市场包 fixture（键：下载 URL；供端到端测试注入） */
+export const devMarketPackages = new Map<string, Uint8Array>();

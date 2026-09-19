@@ -20,6 +20,7 @@ use tauri_plugin_store::StoreExt;
 
 mod backup;
 mod cloud;
+mod market;
 mod plugin_host;
 mod plugin_watch;
 
@@ -1797,6 +1798,8 @@ pub fn run() {
             plugin_host::plugin_read_dev_manifest,
             // 目录挂载插件（开发模式）的自动重载：登记/取消源目录监听
             plugin_host::plugin_watch_dir,
+            // ---------- 插件市场 ----------
+            market::market_fetch_raw,
             // ---------- 备份 / 导入 / 还原 ----------
             backup_export,
             backup_export_as,

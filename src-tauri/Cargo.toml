@@ -24,6 +24,8 @@ reqwest = { version = "0.12", features = ["json", "blocking", "rustls-tls", "str
 tokio = { version = "1", features = ["full"] }
 base64 = "0.22"
 futures-util = "0.3"
+# 市场包下载后的 sha256 校验（深度防御第二道，前端验完 Rust 再验一次）
+sha2 = "0.10"
 # 目录挂载插件（开发模式）的自动重载：监听源目录变化并广播事件
 notify = "8"
 tauri-plugin-autostart = "2"
