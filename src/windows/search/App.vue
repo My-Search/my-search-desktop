@@ -32,6 +32,7 @@ import { takePluginFrontendRestartMarks } from "../../lib/plugins/restart";
 import { bindPluginHostRuntime } from "../../lib/plugins/host";
 import { useMessageDialog } from "../../composables/useMessageDialog";
 import { useToast } from "../../composables/useToast";
+import { setupBuiltinAutoInstall } from "../../lib/plugins/install-builtin";
 import MessageDialog from "../../components/MessageDialog.vue";
 import ToastHost from "../../components/ToastHost.vue";
 import { isUrl, clearUrlSearchTemplate } from "../../lib/util";
@@ -646,6 +647,8 @@ search.bindAfterResultsRendered(() => {
 let unlistenShown: (() => void) | null = null;
 /** 「打开插件」快捷键事件监听器 */
 let unlistenPluginShortcut: (() => void) | null = null;
+/** 内置插件自动安装监听器 */
+let unlistenBuiltin: (() => void) | null = null;
 
 /** 全局 ESC：输入框无焦点时，与输入框按 ESC 行为完全等价 */
 function onGlobalEsc(e: KeyboardEvent): void {
@@ -686,6 +689,9 @@ onMounted(async () => {
   } catch (e) {
     console.warn("[我的搜索] 插件加载失败:", e);
   }
+
+  // 内置插件自动安装（幂等，已装/已卸载的自动跳过）
+  unlistenBuiltin = setupBuiltinAutoInstall();
 
   try {
     await search.loadSubscribes();
@@ -779,6 +785,7 @@ onBeforeUnmount(() => {
   document.removeEventListener("visibilitychange", onVisibilityChange);
   unlistenShown?.();
   unlistenPluginShortcut?.();
+  unlistenBuiltin?.();
   pluginViewHost.disposeAll("应用退出");
   pluginHost.stopDevWatcher();
   update.dispose();

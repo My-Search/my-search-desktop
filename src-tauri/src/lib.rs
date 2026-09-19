@@ -19,6 +19,7 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tauri_plugin_store::StoreExt;
 
 mod backup;
+mod builtin;
 mod cloud;
 mod market;
 mod plugin_host;
@@ -1800,6 +1801,11 @@ pub fn run() {
             plugin_host::plugin_watch_dir,
             // ---------- 插件市场 ----------
             market::market_fetch_raw,
+            // ---------- 内置插件 ----------
+            builtin::builtin_list,
+            builtin::builtin_mark_removed,
+            builtin::builtin_clear_removed,
+            builtin::builtin_resource_path,
             // ---------- 备份 / 导入 / 还原 ----------
             backup_export,
             backup_export_as,
@@ -1835,6 +1841,11 @@ pub fn run() {
             apply_autostart_preference(app.handle());
             // 插件后台进程：只拉起「开机自启」已开启的插件（其它按需启动）
             plugin_host::autostart_enabled_backends(app.handle());
+            // 内置插件引导（广播应装未装的插件 id，前端接收后走既有安装管线）
+            let boot = builtin::bootstrap(app.handle());
+            if !boot.installable.is_empty() || !boot.skipped_removed.is_empty() {
+                let _ = app.emit("builtin://available", &boot);
+            }
             setup_tray(app.handle())?;
             Ok(())
         })

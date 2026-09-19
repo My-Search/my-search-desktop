@@ -42,6 +42,7 @@ import { useSubscribeDraft } from "./useSubscribeDraft";
 import { useTagsChecked } from "./useTagsChecked";
 import { useInstalledList } from "./useInstalledList";
 import { createGithubApi, createTisHub } from "./useGithub";
+import { setupBuiltinAutoInstall } from "../../lib/plugins/install-builtin";
 
 /** 面板名 */
 type PaneName =
@@ -243,6 +244,8 @@ onMounted(async () => {
     tags.setSignature(tags.computeSignature());
     tags.load();
     installed.reload();
+    // 内置插件自动安装（幂等，设置窗第二次打开时同样走一遍确保齐全）
+    setupBuiltinAutoInstall();
   } catch (e) {
     console.error("[我的搜索-设置] 初始化失败:", e);
   }

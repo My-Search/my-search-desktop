@@ -44,6 +44,8 @@ const PRE_RESTORE_PREFIX: &str = "pre-restore-";
 const PLUGINS_DIR: &str = "plugins";
 /// 插件数据目录名（与 plugin_host.rs 保持一致）
 const PLUGIN_DATA_DIR: &str = "plugin-data";
+/// 内置插件状态等内部数据目录名（与 builtin.rs INTERNAL_DIR 一致）
+const INTERNAL_DIR: &str = "internal";
 
 /// 单条目上限（256MB，插件本体远小于此）
 const MAX_ENTRY_BYTES: u64 = 256 * 1024 * 1024;
@@ -232,6 +234,19 @@ fn collect_plugin_files(app: &AppHandle, out: &mut Vec<(String, PathBuf)>) -> Re
     Ok(())
 }
 
+/// 收集内部状态文件（`internal/...`，如内置插件卸载标记）
+fn collect_internal_files(app: &AppHandle, out: &mut Vec<(String, PathBuf)>) -> Result<(), String> {
+    let root = data_dir(app)?.join(INTERNAL_DIR);
+    if root.is_dir() {
+        let mut files = Vec::new();
+        collect_files(&root, "", &mut files)?;
+        for (rel, path) in files {
+            out.push((format!("{INTERNAL_DIR}/{rel}"), path));
+        }
+    }
+    Ok(())
+}
+
 /// 导出归档的字节流。
 ///
 /// `settings` 是前端从 Rust 侧「可备份的设置键」里读出来的（前端才是这些键的
@@ -244,6 +259,7 @@ pub fn build_archive(
 ) -> Result<Vec<u8>, String> {
     let mut files: Vec<(String, PathBuf)> = Vec::new();
     collect_plugin_files(app, &mut files)?;
+    collect_internal_files(app, &mut files)?;
     let owned: Vec<(String, Vec<u8>)> = files
         .into_iter()
         .map(|(rel, path)| {
@@ -430,6 +446,7 @@ pub fn inspect_archive(bytes: &[u8]) -> Result<Value, String> {
     let mut plugin_ids: Vec<String> = Vec::new();
     let mut plugin_files = 0usize;
     let mut plugin_data_files = 0usize;
+    let mut internal_files = 0usize;
     for name in entries.keys() {
         if let Some(rest) = name.strip_prefix(&format!("{PLUGINS_DIR}/")) {
             plugin_files += 1;
@@ -440,6 +457,8 @@ pub fn inspect_archive(bytes: &[u8]) -> Result<Value, String> {
             }
         } else if name.starts_with(&format!("{PLUGIN_DATA_DIR}/")) {
             plugin_data_files += 1;
+        } else if name.starts_with(&format!("{INTERNAL_DIR}/")) {
+            internal_files += 1;
         }
     }
     let mut plugin_ids_sorted = plugin_ids;
@@ -458,6 +477,8 @@ pub fn inspect_archive(bytes: &[u8]) -> Result<Value, String> {
         "hasSettings": !settings.is_null(),
         "hasPlugins": plugin_files > 0,
         "hasPluginData": plugin_data_files > 0,
+        "hasInternal": internal_files > 0,
+        "internalFiles": internal_files,
         "totalBytes": entries.values().map(|v| v.len() as u64).sum::<u64>(),
     }))
 }
@@ -476,6 +497,8 @@ pub struct RestoreReport {
     pub plugin_data: usize,
     /// 是否写回了 Rust 侧设置
     pub settings: bool,
+    /// 是否写回了内部状态
+    pub internal: bool,
 }
 
 /// 执行还原。
@@ -607,6 +630,27 @@ pub fn restore_archive(
             write_relative(&root, rest, data)?;
         }
         report.plugin_data = count.len();
+    }
+
+    report.settings = settings_written;
+
+    // 5) 内部状态（内置插件卸载标记等，增量合并——保留本机既有文件，
+    //    备份里有的覆盖，两边互补）
+    if wants("internal") {
+        let root = data_root.join(INTERNAL_DIR);
+        if !root.exists() {
+            std::fs::create_dir_all(&root).map_err(|e| err(format!("创建内部状态目录失败: {e}")))?;
+        }
+        for (name, data) in &entries {
+            let Some(rest) = name.strip_prefix(&format!("{INTERNAL_DIR}/")) else {
+                continue;
+            };
+            if rest.is_empty() {
+                continue;
+            }
+            write_relative(&root, rest, data)?;
+            report.internal = true;
+        }
     }
 
     report.settings = settings_written;
