@@ -48,7 +48,7 @@ async function installSingleBuiltin(id: string): Promise<boolean> {
       manifest: prepared.manifest,
       dir: "", // 内置插件的 dir 由 Rust 侧管理
       source: { kind: "builtin" },
-      grants: prepared.manifest.permissions ?? [],
+      grants: [...(prepared.manifest.permissions ?? []), ...(prepared.manifest.optionalPermissions ?? [])],
       integrity: { sha256: prepared.sha256, signed: false },
     });
     upsertPlugin(registry, record, { preserveUserChoices: false });
