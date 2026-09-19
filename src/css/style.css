@@ -2787,6 +2787,19 @@ html.ms-config-root {
   font-weight: 400;
 }
 
+#ms-config-view .tag-builtin {
+  display: inline-block;
+  font-size: 10px;
+  line-height: 1.4;
+  padding: 0 5px;
+  margin-left: 4px;
+  border-radius: 3px;
+  background: var(--border, #eee);
+  color: var(--muted, #999);
+  vertical-align: middle;
+  font-weight: 400;
+}
+
 #ms-config-view .plugin-desc {
   font-size: 12px;
   color: var(--muted);

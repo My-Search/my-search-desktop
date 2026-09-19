@@ -552,7 +552,7 @@ function durFrom(ts: number | null): string {
             <template v-else>🧩</template>
           </div>
           <div class="plugin-meta">
-            <div class="plugin-name">{{ record.name }}<span v-if="record.author" class="plugin-author"> · {{ record.author }}</span><span v-if="isBuiltin(record.id)" class="plugin-badge-builtin">内置</span></div>
+            <div class="plugin-name">{{ record.name }}<span v-if="record.author" class="plugin-author"> · {{ record.author }}</span><span v-if="isBuiltin(record.id)" class="tag-builtin">内置</span></div>
             <div class="plugin-desc">{{ record.description || '' }}</div>
           </div>
           <div class="plugin-state">
@@ -670,7 +670,7 @@ function durFrom(ts: number | null): string {
         <div class="plugin-header">
           <div class="plugin-icon"><span>🧩</span></div>
           <div class="plugin-meta">
-            <div class="plugin-name">{{ entry.id }}<span class="plugin-badge-builtin">内置</span></div>
+            <div class="plugin-name">{{ entry.id }}<span class="tag-builtin">内置</span></div>
             <div class="plugin-desc">已被卸载，升级不会自动恢复</div>
           </div>
           <div class="plugin-state"></div>
