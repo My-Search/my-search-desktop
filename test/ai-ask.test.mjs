@@ -83,7 +83,9 @@ ok(
   "tryRunScriptTextViewHandler：用 replace(msg,\"\") 还原原版输入框改写"
 );
 ok(
-  /const\s+pushed\s*=\s*scriptHost\.tryRunScriptTextViewHandler\s*\(inputValue\.value\)/.test(appCode),
+  /const\s+pushed\s*=\s*[\s\S]{0,240}?scriptHost\.tryRunScriptTextViewHandler\s*\(inputValue\.value\)/.test(
+    appCode
+  ),
   "App.vue 回车：调用返回 { handled, nextKeyword } 的新签名"
 );
 ok(

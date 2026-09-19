@@ -23,8 +23,6 @@ export const TISHUB_KEY = "USE_INSTALL_TISHUB_CACHE_KEY";
 export const TOKEN_KEY = "USER_GITHUB_TOKEN_CACHE_KEY";
 /** 默认不关注的标签 */
 export const DEFAULT_UNFOLLOW = ["成人内容", "Adults only"];
-/** 默认全局呼出快捷键（与 Rust 端 DEFAULT_TOGGLE_SHORTCUT 一致） */
-export const DEFAULT_TOGGLE_SHORTCUT = "ctrl+alt+s";
 
 export const TISHUB_LOGO = "https://cdn.jsdelivr.net/gh/My-Search/TisHub/favicon.ico";
 export const TISHUB_REPO = "https://github.com/My-Search/TisHub";

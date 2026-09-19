@@ -14,7 +14,7 @@ html, body {
   user-select: none;
 }
 
-#app {
+#ms-app {
   width: 100%;
   height: 100%;
 }
@@ -287,6 +287,76 @@ html, body {
   background: #fff;
 }
 
+/* 图标容器：给「插件角标」提供定位上下文。
+   外边距与 flex-shrink 从 <img> 移到这里，<img> 自身归零，
+   保证加角标前后的排版完全一致。 */
+#matchResult .item-icon {
+  position: relative;
+  display: inline-block;
+  flex-shrink: 0;
+  margin: 0 6px 0 3px;
+  /* inline-block 默认会留基线缝隙，图标区高度必须精确等于 24px */
+  line-height: 0;
+  font-size: 0;
+}
+
+#matchResult .item-icon > img {
+  margin: 0;
+}
+
+/* 插件项角标（统一固定在图标**左下角、图标内部**）。
+   所有插件贡献的条目共用这一个标记，用来区别于订阅数据项 / 旧版 [脚本] 项。
+
+   造型照抄 Windows 桌面快捷方式角标（白色圆角底板 + 蓝色箭头）。
+   参数不是拍脑袋定的，是把真实 .lnk 交给 shell 渲染后逐像素量出来的
+   （见 test/_lnk-icon.cs，SHGetFileInfo + SHGFI_LINKOVERLAY，再配合
+   test/_measure-win-overlay.mjs 读像素）：
+     · 底板 13px / 32px 图标 = 40.6%  →  24px 图标上取 10px
+     · 底板为**不透明纯白**（在深色图标上取样仍是 #ffffff、alpha=255，
+       所以不是半透明蒙版，用实色即可）
+     · 外缘一圈浅灰（顶边 #e5e9ef、底边 #c8d0de，越往下越深）≈ 1px 描边 + 微阴影
+     · 图形是蓝色，最饱和处 #0a85d9
+   因此这里用「10px 白底 + 1px 浅灰描边 + 2px 圆角 + 蓝色图形」。
+
+   位置：Windows 把底板贴在图标最边角（距边 1px/32px），但那是**方形**图标。
+   本列表的 favicon 是 #matchResult img 的 radius 30%（24px → 7.2px 圆角），
+   底板贴死在 0 会被圆角切掉一角。左下角「危险区」判定为
+   {x<7.2 且 y>16.8 且 距(7.2,16.8) > 7.2}，代入底板最外角 (d, 24-d)：
+   d=2 时距离 7.35 已出界，d=2.109 是临界值，故取 2.5px 留一点余量。
+   好消息是这个约束只跟 d 有关、与底板尺寸无关，调大小不必重算偏移。 */
+#matchResult .plugin-badge {
+  position: absolute;
+  left: 2.5px;
+  bottom: 2.5px;
+  width: 10px;
+  height: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #fff;
+  border: 1px solid #c8d0de;
+  border-radius: 2px;
+  box-sizing: border-box;
+  pointer-events: none;
+}
+
+/* 角标内的 svg（覆盖 .resultItem svg 的 16px，改为固定尺寸 = 图形实际大小）。
+   Windows 里箭头约占底板 64%（11px 底板里 7px），10px 底板对应 7px。 */
+#matchResult .plugin-badge svg {
+  display: block;
+  width: 7px;
+  height: 7px;
+}
+
+/* 图形颜色：Windows 快捷方式角标的蓝。
+   必须写在 **path** 上，不能只写在 svg 上：写在 svg 只是「继承值」，
+   而 path 自己带着 fill="#999999" 这个**表示属性**（= 该元素上的指定值），
+   指定值恒定压过继承值，于是灰的照旧渲染——实测踩过这个坑。
+   写成 `svg path { fill: ... }` 时是 CSS 规则直接命中 path，才盖得住表示属性。 */
+#matchResult .plugin-badge svg path {
+  fill: #0a85d9;
+}
+
 /* 结果项 flag 标签（还原 .flag） */
 #matchResult .flag {
   color: #fff;
@@ -546,6 +616,32 @@ html, body {
  */
 #text_show .markdown-body summary {
   cursor: pointer;
+}
+
+/* 插件视图铺满 #text_show，抵消父容器 padding（避免左右白边） */
+#text_show .plugin-view {
+  margin: -10px -16px -16px;
+}
+
+/*
+ * 插件会话载体：每个插件一份，由宿主 append/remove（.plugin-view 内部）。
+ *
+ * 它既在前台（挂在 .plugin-view 里）也会被**停靠**到隐藏的 #ms-plugin-parking
+ * 里（「关闭界面时 = 最小化」时保留会话，见 usePluginViewHost）。
+ * 这里不做任何外观设定——插件的样式全部由插件自己的 CSS 决定；
+ * 只保证容器本身不引入额外尺寸/背景，避免影响插件的布局假设。
+ */
+#text_show .plugin-view > .ms-plugin-session,
+#ms-plugin-parking > .ms-plugin-session {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+/* 停车场：停靠中的插件会话住在这里（display:none 由宿主设置，这里兜底） */
+#ms-plugin-parking {
+  display: none;
 }
 
 /* ========== 滚动条（极简风格） ========== */
@@ -1497,6 +1593,53 @@ html.ms-config-root {
   color: var(--muted);
 }
 
+/* 作用类型 / 作用对象（插件）下拉：并排一行，窄屏自动换行 */
+#ms-config-view .shortcut-selects {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 2px;
+}
+
+#ms-config-view .shortcut-select {
+  max-width: 220px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+#ms-config-view .shortcut-select:hover:not(:disabled) {
+  border-color: var(--hover-border);
+}
+
+#ms-config-view .shortcut-select:disabled {
+  color: var(--muted);
+  background: var(--field);
+  cursor: default;
+  opacity: 0.85;
+}
+
+#ms-config-view .shortcut-select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* 新增一行快捷键 */
+#ms-config-view .shortcut-add-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
 #ms-config-view .shortcut-value {
   flex-shrink: 0;
   display: flex;
@@ -1571,6 +1714,92 @@ html.ms-config-root {
   color: var(--err);
   background: transparent;
   animation: none;
+}
+
+/* ---- 常规设置 ---- */
+#ms-config-view .general-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 0;
+}
+
+#ms-config-view .general-info {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+#ms-config-view .general-label {
+  font-size: 13.5px;
+  font-weight: 500;
+}
+
+#ms-config-view .general-desc {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+/* 开关：纯 CSS 拨动开关（隐藏原生 checkbox，用 :checked 驱动滑块） */
+#ms-config-view .switch {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+#ms-config-view .switch.disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+#ms-config-view .switch input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  margin: 0;
+  pointer-events: none;
+}
+
+#ms-config-view .switch-track {
+  position: relative;
+  display: inline-block;
+  width: 40px;
+  height: 22px;
+  border-radius: 11px;
+  background: var(--seg-bg);
+  border: 1px solid var(--line);
+  transition: background 0.16s ease, border-color 0.16s ease;
+}
+
+#ms-config-view .switch-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  transition: transform 0.16s ease;
+}
+
+#ms-config-view .switch input:checked + .switch-track {
+  background: var(--brand);
+  border-color: var(--brand);
+}
+
+#ms-config-view .switch input:checked + .switch-track .switch-thumb {
+  transform: translateX(18px);
+}
+
+/* 键盘可达性：Tab 聚焦时给轨道描边 */
+#ms-config-view .switch input:focus-visible + .switch-track {
+  box-shadow: 0 0 0 3px var(--accent-soft-border);
 }
 
 /* ---- 关于软件 ---- */
@@ -2089,6 +2318,7 @@ html.ms-config-root {
 }
 
 /* ---- Token 输入弹层 ---- */
+/* 设置窗口弹层 */
 #ms-config-view .token-overlay {
   position: fixed;
   inset: 0;
@@ -2150,6 +2380,153 @@ html.ms-config-root {
   gap: 8px;
 }
 
+/* ---- 搜索窗口弹层（与设置窗口共享类名，但搜索窗口无 css 变量，需独立定义） ---- */
+
+/*
+ * 浮动提示（#cfgToast）：搜索窗口里的 toast 必须**脱离文档流**。
+ *
+ * 它原来是给设置窗口写的（`#ms-config-view .cfg-toast` 里 position:fixed），
+ * 而搜索窗口没有对应的规则 —— 于是 #cfgToast 是个普通块级 div，按内容
+ * 撑出 ~23px 高度，直接把 #my_search_box 顶高：窗口高度是按「盒子实测高度」
+ * 下发的白名单值（48/内容高度），多出来的这 23px 只能溢出窗口，
+ * 表现为**搜索框下边框消失**（用户截图确认：只有上边框与左右边框）。
+ * 任何会触发 toast 的路径（插件视图恢复提示、插件不可用提示等）都会命中。
+ * 这里按设置窗口同样的视觉语言补一份 fixed 定位，确保它永远不参与布局。
+ */
+#my_search_box > .cfg-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 12px;
+  transform: translate(-50%, 8px);
+  max-width: 82%;
+  padding: 9px 16px;
+  border-radius: 999px;
+  background: #ffffff;
+  border: 1px solid #e3e5e8;
+  box-shadow: 0 8px 24px rgba(17, 20, 26, 0.16);
+  font-size: 12.5px;
+  color: #303133;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease, transform 0.18s ease;
+  z-index: 20;
+}
+
+#my_search_box > .cfg-toast.show {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+#my_search_box > .cfg-toast.ok {
+  color: #1a7f37;
+}
+
+#my_search_box > .cfg-toast.error {
+  color: #d93025;
+}
+
+#my_search_box .token-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(17, 20, 26, 0.45);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+  backdrop-filter: blur(2px);
+}
+
+#my_search_box .token-overlay.show {
+  display: flex;
+}
+
+#my_search_box .token-dialog {
+  width: 400px;
+  max-width: 90vw;
+  background: #ffffff;
+  border-radius: 12px;
+  padding: 20px 22px;
+  box-sizing: border-box;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.25);
+}
+
+#my_search_box .token-dialog h3 {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+#my_search_box .token-dialog p {
+  font-size: 12.5px;
+  color: #666;
+  line-height: 1.6;
+  margin: 0 0 12px;
+  /* 插件确认文案可能带换行（权限说明等），保留换行并允许长词折行 */
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+#my_search_box .token-actions {
+  margin-top: 16px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* 弹窗按钮（#msgOk / #msgCancel）。
+ *
+ * 与 .cfg-toast 完全同源的坑：MessageDialog 复用了设置窗口的
+ * `.cfg-btn` / `.cfg-btn.primary` / `.cfg-btn.ghost` 类名，而那些规则
+ * 全部挂在 `#ms-config-view` 作用域下（搜索窗口没有这个容器）。
+ * 结果「插件请求」这类确认框的按钮在搜索窗口里**完全没有样式**——
+ * 渲染成浏览器默认的灰底凸起按钮，与白色圆角弹窗格格不入
+ * （对比设置窗口里同样的弹窗就很正常）。
+ *
+ * 这里按设置窗口同一套视觉语言补一份，颜色写死而不引用 --brand/--line
+ * 等变量：那些变量定义在 `html.ms-config-root` 上，搜索窗口用不到。
+ */
+#my_search_box .token-actions .cfg-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid #e3e5e8;
+  background: #ffffff;
+  border-radius: 7px;
+  font-size: 13px;
+  font-family: inherit;
+  padding: 7px 14px;
+  color: #303133;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+
+#my_search_box .token-actions .cfg-btn:hover {
+  border-color: #c9ccd4;
+  background: #f7f8fa;
+}
+
+#my_search_box .token-actions .cfg-btn.ghost {
+  color: #7a828e;
+}
+
+#my_search_box .token-actions .cfg-btn.primary {
+  background: #5b5bd6;
+  border-color: #5b5bd6;
+  color: #ffffff;
+}
+
+#my_search_box .token-actions .cfg-btn.primary:hover {
+  background: #4a4ab8;
+  border-color: #4a4ab8;
+}
+
+#my_search_box .token-actions .cfg-btn:focus-visible {
+  outline: 2px solid rgba(91, 91, 214, 0.4);
+  outline-offset: 1px;
+}
+
 /* ========== vassal 关联内容（问题⑤） ========== */
 .resultItem.vassal-item {
   color: #0088cc;
@@ -2173,4 +2550,813 @@ html.ms-config-root {
 .vassal-back:hover {
   background: #e6f0ff;
   color: #255ec8;
+}
+
+/* ========== 插件管理面板 ========== */
+/* 页面纵排，卡片自然堆叠；列表吃下剩余高度、内部滚动 */
+#ms-config-view .page.plugins {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+/* 顶部统计 + 操作按钮工具条 */
+#ms-config-view .plugins-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+#ms-config-view .plugins-stats {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+#ms-config-view .plugins-running {
+  color: var(--ok);
+  font-weight: 600;
+}
+
+#ms-config-view .plugins-idle {
+  color: var(--muted);
+}
+
+#ms-config-view .plugins-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* 筛选按钮行 */
+#ms-config-view .plugins-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 8px 16px;
+  margin-bottom: 14px;
+}
+
+#ms-config-view .btn-filter {
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 24px;
+  height: 24px;
+  padding: 0 12px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition: all 0.12s ease;
+}
+
+#ms-config-view .btn-filter:hover {
+  border-color: var(--hover-border);
+  color: var(--text);
+  background: var(--hover-bg);
+}
+
+#ms-config-view .btn-filter.on {
+  background: var(--accent-soft-bg);
+  border-color: var(--accent-soft-border);
+  color: var(--accent);
+  font-weight: 500;
+}
+
+#ms-config-view .btn-filter .badge {
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  font-size: 10px;
+  line-height: 15px;
+}
+
+/* 小按钮 / 迷你按钮 / 警示按钮 */
+#ms-config-view .btn-sm {
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 24px;
+  height: 26px;
+  padding: 0 12px;
+  border-radius: 6px;
+  font-family: inherit;
+  transition: all 0.12s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+#ms-config-view .btn-sm:hover {
+  border-color: var(--accent-soft-border);
+  background: var(--accent-soft-bg);
+  color: var(--accent);
+}
+
+#ms-config-view .btn-tiny {
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 18px;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 5px;
+  font-family: inherit;
+  transition: all 0.12s ease;
+}
+
+#ms-config-view .btn-tiny:hover {
+  border-color: var(--hover-border);
+  color: var(--text);
+}
+
+#ms-config-view .btn-tiny.on {
+  background: var(--accent-soft-bg);
+  border-color: var(--accent-soft-border);
+  color: var(--accent);
+  font-weight: 500;
+}
+
+#ms-config-view .btn-warn {
+  color: var(--err);
+}
+
+#ms-config-view .btn-warn:hover {
+  border-color: #f0b4b4;
+  background: #fdeeee;
+  color: #d24a4a;
+}
+
+@media (prefers-color-scheme: dark) {
+  #ms-config-view .btn-warn:hover {
+    border-color: #5c3a3a;
+    background: #3a2b2b;
+    color: #ff7b7b;
+  }
+}
+
+/* 插件列表 */
+#ms-config-view .plugins-list {
+  display: flex;
+  flex-direction: column;
+  padding: 6px 16px;
+}
+
+#ms-config-view .plugin-item {
+  border-bottom: 1px solid var(--divider-soft);
+}
+
+#ms-config-view .plugin-item:last-child {
+  border-bottom: none;
+}
+
+#ms-config-view .plugin-item.is-disabled {
+  opacity: 0.6;
+}
+
+/* 行首：图标 + 信息 + 状态 + 箭头 */
+#ms-config-view .plugin-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 0;
+  cursor: pointer;
+  user-select: none;
+}
+
+#ms-config-view .plugin-header:hover .plugin-name {
+  color: var(--accent);
+}
+
+/* 插件 logo（清单里的 `icon`；相对路径由面板预读成 data URL）。
+   带 logo 时收掉底色：图标自带底色（多为方形/圆形彩标），再叠一层
+   accent 底色会在边缘露出一圈色边，看起来像没对齐。 */
+#ms-config-view .plugin-icon {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  background: var(--accent-soft-bg);
+  font-size: 16px;
+  overflow: hidden;
+}
+
+#ms-config-view .plugin-icon.has-logo {
+  background: transparent;
+}
+
+#ms-config-view .plugin-icon > img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+#ms-config-view .plugin-meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+#ms-config-view .plugin-name {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color 0.12s ease;
+}
+
+#ms-config-view .plugin-author {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 400;
+}
+
+#ms-config-view .plugin-desc {
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#ms-config-view .plugin-state {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 运行状态圆点 */
+#ms-config-view .plugin-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+#ms-config-view .plugin-dot.running {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 20%, transparent);
+}
+
+#ms-config-view .plugin-dot.starting {
+  background: var(--brand);
+  animation: plugin-dot-pulse 1s ease-in-out infinite;
+}
+
+#ms-config-view .plugin-dot.crashed,
+#ms-config-view .plugin-dot.error {
+  background: var(--err);
+}
+
+@keyframes plugin-dot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+#ms-config-view .plugin-version {
+  font-size: 12px;
+  color: var(--muted);
+  font-family: Consolas, Menlo, monospace;
+}
+
+#ms-config-view .plugin-arrow {
+  flex-shrink: 0;
+  width: 16px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 10px;
+  transition: transform 0.15s ease;
+}
+
+#ms-config-view .plugin-item.is-expanded .plugin-arrow {
+  transform: rotate(0deg);
+}
+
+#ms-config-view .plugin-item.is-expanded .plugin-header {
+  border-bottom: 1px dashed var(--divider-soft);
+}
+
+/* 展开详情 */
+#ms-config-view .plugin-detail {
+  padding: 4px 0 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+#ms-config-view .plugin-info-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+#ms-config-view .plugin-info-row code {
+  background: var(--code-bg);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-family: Consolas, Menlo, monospace;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+#ms-config-view .plugin-info-row a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+#ms-config-view .plugin-info-row a:hover {
+  text-decoration: underline;
+}
+
+#ms-config-view .plugin-info-label {
+  flex-shrink: 0;
+  width: 72px;
+  color: var(--muted);
+}
+
+#ms-config-view .plugin-detail-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+/* 后台自启动 / 关闭行为的分段按钮 */
+#ms-config-view .backend-autostart {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+/* 已锁定（开机自启时「关闭界面时」不生效）：整组置灰，但仍可读 */
+#ms-config-view .backend-autostart.is-locked {
+  opacity: 0.5;
+}
+
+#ms-config-view .backend-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+#ms-config-view .backend-buttons {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+/* 「关闭界面时 / 开机自启」两行的右侧单元：控件 + 下面一行小字 */
+#ms-config-view .behavior-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* 小字行：插件建议 + 「恢复」 */
+#ms-config-view .behavior-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+#ms-config-view .plugin-suggest {
+  color: var(--muted);
+}
+
+/* 锁定原因（开机自启优先）用警示色，别让用户以为是坏了 */
+#ms-config-view .behavior-locked {
+  color: #d5a436;
+}
+
+/* 行内文字按钮（「恢复」这类轻量操作，不抢主按钮的视觉） */
+#ms-config-view .btn-link {
+  border: none;
+  background: none;
+  padding: 0;
+  font-size: 11.5px;
+  font-family: inherit;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+#ms-config-view .btn-link:hover {
+  text-decoration: underline;
+}
+
+/* 迷你按钮禁用态（置灰但不改变布局） */
+#ms-config-view .btn-tiny:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+#ms-config-view .btn-tiny:disabled:hover {
+  border-color: var(--line);
+  color: var(--muted);
+}
+
+/* 运行详情行内间距 / 错误提示 */
+#ms-config-view .mr-2 {
+  margin-right: 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+#ms-config-view .error-text {
+  color: var(--err);
+  font-size: 12px;
+}
+
+/* 权限概要 */
+#ms-config-view .no-perms {
+  color: var(--muted);
+}
+
+#ms-config-view .perm-count {
+  color: var(--accent);
+  cursor: pointer;
+  font-weight: 500;
+}
+
+#ms-config-view .perm-count:hover {
+  text-decoration: underline;
+}
+
+/* 插件列表空态 */
+#ms-config-view .plugins-empty {
+  text-align: center;
+  color: var(--muted);
+  font-size: 12.5px;
+  padding: 24px 16px;
+}
+
+/* ---- 权限面板 ---- */
+#ms-config-view .plugins-perm-panel .perm-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+#ms-config-view .plugins-perm-panel .perm-panel-header h4 {
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+#ms-config-view .plugins-perm-panel .perm-panel-body {
+  padding-top: 10px;
+}
+
+#ms-config-view .perm-summary {
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.6;
+  margin-bottom: 12px;
+}
+
+#ms-config-view .perm-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+#ms-config-view .perm-group h5 {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+
+#ms-config-view .perm-entry {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--divider-soft);
+}
+
+#ms-config-view .perm-entry:last-child {
+  border-bottom: none;
+}
+
+#ms-config-view .perm-entry-name {
+  flex-shrink: 0;
+  font-size: 12.5px;
+  font-weight: 500;
+  min-width: 90px;
+}
+
+#ms-config-view .perm-entry-desc {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+#ms-config-view .perm-entry-scope {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--code-bg);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-family: Consolas, Menlo, monospace;
+}
+
+/* ---- 日志面板 ---- */
+#ms-config-view .plugins-log-panel .log-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+#ms-config-view .plugins-log-panel .log-panel-header h4 {
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+#ms-config-view .log-content {
+  margin-top: 10px;
+  max-height: 260px;
+  overflow-y: auto;
+  background: var(--field);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-family: Consolas, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+#ms-config-view .log-content::-webkit-scrollbar {
+  width: 6px;
+}
+
+#ms-config-view .log-content::-webkit-scrollbar-thumb {
+  background-color: rgba(0, 0, 0, 0.12);
+  border-radius: 3px;
+}
+
+
+
+/* ============================================================
+ * 备份与同步面板（PanelSync.vue）
+ *
+ * 布局：Tab 栏（导入 / 导出）+ 独立 WebDAV 同步卡片。
+ * ============================================================ */
+
+/* ---- Tab 栏 ---- */
+/* 轨道底色用 --seg-bg（主题里已定义），与搜索窗口的分段控件保持一致 */
+#ms-config-view .page.sync .sync-tabs {
+  display: flex;
+  gap: 0;
+  margin-bottom: 12px;
+  background: var(--seg-bg);
+  border-radius: 10px;
+  padding: 3px;
+}
+#ms-config-view .page.sync .sync-tab {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 9px 14px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+#ms-config-view .page.sync .sync-tab:hover {
+  color: var(--text);
+}
+#ms-config-view .page.sync .sync-tab.on {
+  background: var(--card);
+  color: var(--text);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+
+/* ---- Tab 内容区 ---- */
+#ms-config-view .page.sync .sync-tab-pane {
+  margin-bottom: 12px;
+}
+#ms-config-view .page.sync .cfg-description {
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.5;
+  margin: 8px 0 12px;
+}
+#ms-config-view .page.sync .cfg-description code {
+  font-family: Consolas, Menlo, monospace;
+  font-size: 12px;
+  background: var(--field);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+
+/* ---- 导入预览卡片 ---- */
+#ms-config-view .page.sync .inspect-panel {
+  margin-top: 14px;
+  padding: 14px 16px;
+  background: var(--field);
+  border-radius: 8px;
+  border: 1px solid var(--line);
+}
+#ms-config-view .page.sync .inspect-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+#ms-config-view .page.sync .inspect-header strong {
+  font-size: 13.5px;
+}
+#ms-config-view .page.sync .inspect-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+#ms-config-view .page.sync .inspect-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 10px;
+  background: var(--field);
+  border: 1px solid var(--line);
+  font-size: 11.5px;
+  color: var(--muted);
+}
+#ms-config-view .page.sync .inspect-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ---- 同步开关行 ---- */
+#ms-config-view .page.sync .sync-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 0 10px;
+}
+#ms-config-view .page.sync .sync-toggle-meta {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+#ms-config-view .page.sync .sync-toggle-label {
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--text);
+}
+#ms-config-view .page.sync .sync-toggle-desc {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+#ms-config-view .page.sync .sync-now-btn {
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+/* ---- 行内表单（复用了 cfg-row / cfg-row-label 体系） ---- */
+#ms-config-view .page.sync .cfg-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--divider-soft);
+}
+#ms-config-view .page.sync .cfg-row:last-child {
+  border-bottom: none;
+}
+#ms-config-view .page.sync .cfg-row-label {
+  width: 80px;
+  flex-shrink: 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+#ms-config-view .page.sync .cfg-row .cfg-input,
+#ms-config-view .page.sync .cfg-row .cfg-select {
+  flex: 1;
+}
+
+/* ---- 输入框 / 下拉框（主题化） ----
+ * 不写这些规则的话 <input>/<select> 会退回浏览器原生外观：
+ * 深色模式下是系统灰底、浅色边框、方形四角，与卡片（--card）割裂，
+ * 看起来就像「没写样式」的裸控件。这里统一成与应用其它输入框
+ * （.sub-add input / .token-dialog input）一致的圆角描边风格。 */
+#ms-config-view .page.sync .cfg-input,
+#ms-config-view .page.sync .cfg-select {
+  box-sizing: border-box;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--field);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 7px 10px;
+  outline: none;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+#ms-config-view .page.sync .cfg-input::placeholder {
+  color: var(--chip-count);
+}
+#ms-config-view .page.sync .cfg-input:hover,
+#ms-config-view .page.sync .cfg-select:hover {
+  border-color: var(--hover-border);
+}
+#ms-config-view .page.sync .cfg-input:focus,
+#ms-config-view .page.sync .cfg-select:focus {
+  border-color: var(--brand);
+  background: var(--card);
+}
+/* 下拉框：去掉系统原生箭头，用背景 SVG 画一个随主题变色的三角 */
+#ms-config-view .page.sync .cfg-select {
+  -webkit-appearance: none;
+  appearance: none;
+  padding-right: 30px;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.5L6 8l3.5-3.5' fill='none' stroke='%237a828e' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+}
+@media (prefers-color-scheme: dark) {
+  #ms-config-view .page.sync .cfg-select {
+    background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.5L6 8l3.5-3.5' fill='none' stroke='%2398a0ab' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  }
+  /* 深色下 <option> 由系统绘制，显式给底色避免白底黑字 */
+  #ms-config-view .page.sync .cfg-select option {
+    background: var(--card);
+    color: var(--text);
+  }
+}
+
+/* 兜底间隔：选项很短，不需要占满整行
+   （选择器带上 .cfg-row 以压过上面的 `.cfg-row .cfg-select { flex: 1 }`） */
+#ms-config-view .page.sync .cfg-row .cfg-select-narrow {
+  flex: 0 0 auto;
+  width: 130px;
+}
+
+/* ---- 密码右侧清空按钮 ---- */
+#ms-config-view .page.sync .cfg-row-value {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ---- 操作按钮行（导出 / 导入 / 测试连接、保存） ---- */
+/* 按钮并排一行，不竖排；极窄时允许折行兜底（正常宽度下始终是一行）。 */
+#ms-config-view .page.sync .sync-actions-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0 2px;
+}
+
+/* ---- 状态色 ---- */
+#ms-config-view .page.sync .cfg-hint.ok {
+  color: var(--ok);
+}
+#ms-config-view .page.sync .cfg-hint.errorColor {
+  color: var(--err);
 }

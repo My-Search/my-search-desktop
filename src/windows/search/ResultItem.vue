@@ -10,8 +10,9 @@
 import { ref, computed, watch, onMounted } from "vue";
 import { renderTitleTags, titleContentHandler, clearHideTagForTitle } from "../../lib/tags";
 import { isUrl } from "../../lib/util";
-import { VASSAL_SVG, LOAD_ERROR_ICON } from "../../lib/assets";
+import { VASSAL_SVG, LOAD_ERROR_ICON, PLUGIN_BADGE_SVG } from "../../lib/assets";
 import { resolveFavicon, faviconsAttr } from "./favicon";
+import { pluginIdOf } from "../../lib/plugins/plugin-items";
 import type { SearchItem } from "../../types/index";
 
 const props = defineProps<{
@@ -42,6 +43,14 @@ const isSketch = computed(() => !isUrl(props.item.resource));
 const links = computed(() => props.item.links ?? []);
 const favicon = computed(() => resolveFavicon(props.refItem));
 const faviconsData = computed(() => faviconsAttr(favicon.value.favicons));
+
+/**
+ * 是否是插件贡献的条目。
+ *
+ * 插件项在结果列表里长得和订阅数据项一样（同一套渲染），因此额外在图标
+ * 左下角压一个统一的角标，让用户一眼能区分「这条来自插件」。
+ */
+const isPluginItem = computed(() => pluginIdOf(props.item) != null);
 
 // ---------- favicon 懒加载（按 faviconSources 顺序依次尝试，全部失败显示错误图标） ----------
 const imgEl = ref<HTMLImageElement | null>(null);
@@ -75,6 +84,20 @@ onMounted(loadIcon);
 // 结果项被复用时（key 相同的极端情形）重新加载图标
 watch(() => favicon.value, loadIcon, { flush: "post" });
 
+/**
+ * 图标加载失败时的兜底。
+ *
+ * 自定义图标（插件声明的 `icon`，也可能是网络地址）走的是**直出**路径，
+ * 没有多源回退。离线或图标服务不可用时，`<img>` 会显示成「碎图」——比
+ * 统一的占位图难看得多，也不利于用户判断「这是条目图标没加载，不是功能坏了」。
+ * 因此失败后退到统一的错误占位图（与懒加载链全失败时的表现一致）。
+ */
+function onIconError(e: Event): void {
+  const img = e.target as HTMLImageElement;
+  if (img.src === LOAD_ERROR_ICON) return; // 已是占位图，避免死循环
+  img.src = LOAD_ERROR_ICON;
+}
+
 function onClick(e: MouseEvent) {
   const target = e.target as HTMLElement;
   // 快捷链接：按脚本行为 → 打开目标地址（脚本是原生 <a target="_blank">）
@@ -106,14 +129,25 @@ function onClick(e: MouseEvent) {
 
 <template>
   <li class="resultItem" :class="{ active: props.active }" :data-index="props.index" @click="onClick">
-    <img
-      ref="imgEl"
-      class="searchItem"
-      :src="favicon.src"
-      :data-favicons="faviconsData"
-      draggable="false"
-      alt=""
-    />
+    <span class="item-icon" :class="{ 'is-plugin': isPluginItem }">
+      <img
+        ref="imgEl"
+        class="searchItem"
+        :src="favicon.src"
+        :data-favicons="faviconsData"
+        draggable="false"
+        alt=""
+        @error="onIconError"
+      />
+      <!-- 插件项角标：统一固定在图标左下角（图标内部），表示该条目由插件提供 -->
+      <span
+        v-if="isPluginItem"
+        class="plugin-badge"
+        title="来自插件"
+        aria-label="来自插件"
+        v-html="PLUGIN_BADGE_SVG"
+      ></span>
+    </span>
     <a
       :href="isSketch ? '' : String(props.item.resource ?? '')"
       target="_blank"

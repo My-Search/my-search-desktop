@@ -5,6 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
     <title>我的搜索 - 设置</title>
+    <!-- 显式声明图标：不声明的话浏览器会隐式请求 /favicon.ico，
+         在 Tauri 里必然 404（窗口没有地址栏，图标其实用不上，
+         但控制台会多一条误导性的 "Failed to load resource: 404"）。 -->
+    <link rel="icon" type="image/png" href="/favicon.png" />
     <script>
       // 在样式表/模块脚本加载前先按系统主题铺底，避免首帧白闪
       (function () {
@@ -16,28 +20,48 @@
           : "#f5f6f8";
 
         // ---- 兜底安全网（防御性，正常情况下不会触发） ----
-        // 若主模块脚本因异常未能挂载 Vue（#app 始终为空），8 秒后显示提示，
+        // 若主模块脚本因异常未能挂载 Vue（#app 始终为空），显示提示，
         // 并注册不依赖 Vue 的 Esc 关窗，避免「空白页且关不掉」的最坏情况。
-        var fallbackTimer = setTimeout(function () {
-          var app = document.getElementById("app");
-          if (!app || app.hasChildNodes()) return;
-          app.innerHTML =
-            '<div style="padding:24px;text-align:center;font-family:sans-serif;font-size:14px;line-height:1.6;color:#e02424">' +
-            '<p style="font-size:18px;font-weight:600;margin-bottom:8px">我的搜索 - 设置</p>' +
-            '<p>页面加载失败，请重启应用。</p>' +
-            '<p style="color:#7a828e;font-size:12px">（按 Esc 关闭窗口）</p>' +
-            "</div>";
-          document.addEventListener("keydown", function (e) {
-            if (e.key !== "Escape") return;
-            e.preventDefault();
-            e.stopPropagation();
-            try {
-              window.__TAURI_INTERNALS__.invoke("plugin:window|close", { label: "config" });
-            } catch (_) {
-              window.close();
+        //
+        // 计时器可被**续期**：慢机器 / dev 模式首次按需编译时，模块图要几秒才
+        // 加载完，固定的 8 秒会在「其实正在正常加载」时误报加载失败。
+        // 因此这里改为「连续 N 次检查都没动静才放弃」，并在页面仍在加载
+        // （document.readyState !== "complete"）时自动续期。
+        var FALLBACK_CHECKS = 6; // 6 × 3s = 18s 静默才放弃
+        var checks = 0;
+        var fallbackTimer = null;
+        function scheduleFallback() {
+          fallbackTimer = setTimeout(function () {
+            var app = document.getElementById("app");
+            // 已挂载完成 → 不再需要兜底
+            if (app && app.hasChildNodes()) return;
+            // 页面还在加载（模块脚本仍在路上）→ 续期，不误报
+            if (document.readyState !== "complete" && checks < 40) {
+              checks++;
+              scheduleFallback();
+              return;
             }
-          });
-        }, 8000);
+            // 仍为空 → 判定加载失败
+            var host = app || document.body;
+            host.innerHTML =
+              '<div style="padding:24px;text-align:center;font-family:sans-serif;font-size:14px;line-height:1.6;color:#e02424">' +
+              '<p style="font-size:18px;font-weight:600;margin-bottom:8px">我的搜索 - 设置</p>' +
+              '<p>页面加载失败，请重启应用。</p>' +
+              '<p style="color:#7a828e;font-size:12px">（按 Esc 关闭窗口）</p>' +
+              "</div>";
+            document.addEventListener("keydown", function (e) {
+              if (e.key !== "Escape") return;
+              e.preventDefault();
+              e.stopPropagation();
+              try {
+                window.__TAURI_INTERNALS__.invoke("plugin:window|close", { label: "config" });
+              } catch (_) {
+                window.close();
+              }
+            });
+          }, 3000);
+        }
+        scheduleFallback();
         // Vue 成功挂载后由 config.ts 调用，取消上面的兜底
         window.__cancelConfigFallback = function () {
           clearTimeout(fallbackTimer);

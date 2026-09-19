@@ -22,10 +22,14 @@ export default defineConfig({
   },
   clearScreen: false,
   server: {
+    host: "127.0.0.1",
     port: 1420,
     strictPort: true,
     watch: {
-      ignored: ["**/src-tauri/**"],
+      // 本仓库的 test/ 下有大量测试期浏览器 profile（GB 级、数万文件），
+      // src-tauri/target 同理。不排除会让 Vite 的文件监听把整个项目拖进
+      // 冷启动扫描，dev 模式首屏因此要几十秒（骨架屏长时间不消失）。
+      ignored: ["**/src-tauri/**", "**/test/**"],
     },
   },
 });

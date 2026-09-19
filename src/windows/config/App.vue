@@ -13,8 +13,9 @@
  *
  * 面板按需渲染（不保活）：<component :is> 切换，等价原 setPane() 的 innerHTML 替换。
  */
-import { computed, onBeforeUnmount, onMounted, ref, shallowRef } from "vue";
-import { getDefaultSubscribeText, getToggleShortcut, openExternal } from "../../lib/tauri-bridge";
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, shallowRef } from "vue";
+import { getDefaultSubscribeText, getShortcutBindings, openExternal } from "../../lib/tauri-bridge";
+import { defaultToggleBinding, type ShortcutBinding } from "../../lib/shortcut-bindings";
 import { storageGet, storageSet } from "../../lib/util";
 import { subscribeItemsToText } from "../../lib/subscribe-parser";
 import { useMessageDialog } from "../../composables/useMessageDialog";
@@ -27,16 +28,33 @@ import PanelTags from "./panels/PanelTags.vue";
 import PanelRepo from "./panels/PanelRepo.vue";
 import PanelCache from "./panels/PanelCache.vue";
 import PanelShortcut from "./panels/PanelShortcut.vue";
+import PanelGeneral from "./panels/PanelGeneral.vue";
 import PanelAbout from "./panels/PanelAbout.vue";
 import PanelTisHub from "./panels/PanelTisHub.vue";
-import { SUBSCRIBES_KEY, DEFAULT_TOGGLE_SHORTCUT } from "./configShared";
+import PanelSync from "./panels/PanelSync.vue";
+// 插件面板**延迟加载**：它依赖插件运行时（plugin/ipc/host…），静态引入会把
+// 这些模块拖进设置窗口的首屏模块图，冷启动（Vite 首次按需编译）挂载耗时
+// 从 ~1.7s 涨到 ~6.9s，逼近 config.html 里 8 秒的兜底计时器，
+// 慢机器上就会看到「页面加载失败，请重启应用」。面板本身只在用户点「插件」时才需要。
+const PanelPlugins = defineAsyncComponent(() => import("./panels/PanelPlugins.vue"));
+import { SUBSCRIBES_KEY } from "./configShared";
 import { useSubscribeDraft } from "./useSubscribeDraft";
 import { useTagsChecked } from "./useTagsChecked";
 import { useInstalledList } from "./useInstalledList";
 import { createGithubApi, createTisHub } from "./useGithub";
 
 /** 面板名 */
-type PaneName = "subscribes" | "tags" | "repo" | "cache" | "shortcut" | "about" | "tis-hub";
+type PaneName =
+  | "subscribes"
+  | "tags"
+  | "repo"
+  | "cache"
+  | "shortcut"
+  | "general"
+  | "about"
+  | "tis-hub"
+  | "plugins"
+  | "sync";
 
 /** 有内容需要保存的页面：只有这两个页面显示底栏的「保存并应用」按钮 */
 const PANES_WITH_SAVE: PaneName[] = ["subscribes", "tags"];
@@ -64,8 +82,8 @@ const tisHub = createTisHub(github);
 const pane = shallowRef<PaneName>("subscribes");
 const navPane = computed<PaneName>(() => (pane.value === "tis-hub" ? "repo" : pane.value));
 
-/** 快捷键当前生效值 */
-const toggleShortcut = ref(DEFAULT_TOGGLE_SHORTCUT);
+/** 快捷键绑定（快捷键 / 作用类型 / 作用对象；由「快捷键」面板读写） */
+const shortcutBindings = ref<ShortcutBinding[]>([defaultToggleBinding()]);
 /** 快捷键录入态（录入时 Esc 不关窗） */
 const shortcutCapturing = ref(false);
 
@@ -93,8 +111,11 @@ const PANES = {
   repo: PanelRepo,
   cache: PanelCache,
   shortcut: PanelShortcut,
+  general: PanelGeneral,
   about: PanelAbout,
   "tis-hub": PanelTisHub,
+  plugins: PanelPlugins,
+  sync: PanelSync,
 } as const;
 
 const currentComponent = computed(() => PANES[pane.value]);
@@ -213,7 +234,7 @@ onMounted(async () => {
     }
     // 快捷键当前生效值从后端读取（浏览器调试时回退默认值）
     try {
-      toggleShortcut.value = await getToggleShortcut();
+      shortcutBindings.value = await getShortcutBindings();
     } catch (e) {
       console.warn("读取快捷键设置失败:", e);
     }
@@ -249,8 +270,9 @@ const commonProps = computed(() => ({
   askToken,
   goRepo: () => switchPane("repo"),
   openTisHub: () => switchPane("tis-hub"),
-  saved: toggleShortcut.value,
-  onSaved: (v: string) => (toggleShortcut.value = v),
+  saved: shortcutBindings.value,
+  onSaved: (v: ShortcutBinding[]) => (shortcutBindings.value = v),
+  goPlugins: () => switchPane("plugins"),
   onChange: () => {
     /* 订阅文本变化：主窗口下次呼出时会检测并重载 */
   },
@@ -330,6 +352,28 @@ const commonProps = computed(() => ({
             <path d="M2 5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5zm3 2v2h2V7H5zm4 0v2h2V7H9zm4 0v2h2V7h-2zM5 11v2h8v-2H5z" />
           </svg>
           <span>快捷键</span>
+        </button>
+        <button class="nav-item" :class="{ on: navPane === 'general' }" data-pane="general" @click="switchPane('general')">
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" width="17" height="17">
+            <circle cx="10" cy="10" r="2.6" />
+            <path d="M10 2.2v2M10 15.8v2M2.2 10h2M15.8 10h2M4.5 4.5l1.4 1.4M14.1 14.1l1.4 1.4M15.5 4.5l-1.4 1.4M5.9 14.1l-1.4 1.4" />
+          </svg>
+          <span>常规</span>
+        </button>
+        <button class="nav-item" :class="{ on: navPane === 'plugins' }" data-pane="plugins" @click="switchPane('plugins')">
+          <svg viewBox="0 0 24 24" fill="currentColor" width="17" height="17">
+            <path d="M4 11a9 9 0 0 1 9 9H4v-9zm0 11h18v2H4v-2zm0-4h12v2H4v-2zm0-4h6v2H4v-2z"/>
+            <circle cx="18" cy="4.5" r="3"/>
+            <path d="M22 5.5A3.5 3.5 0 1 1 15 4a3.5 3.5 0 0 1 7 1.5z" opacity="0.3"/>
+          </svg>
+          <span>插件</span>
+        </button>
+        <button class="nav-item" :class="{ on: navPane === 'sync' }" data-pane="sync" @click="switchPane('sync')">
+          <svg viewBox="0 0 20 20" fill="currentColor" width="17" height="17">
+            <path d="M9.5 2a7.5 7.5 0 0 1 7.49 7.36A5 5 0 0 1 16.5 19H5A4 4 0 0 1 5 11a5.5 5.5 0 0 1 4.5-9zm0 1.5a4 4 0 0 0-3.95 4.6l.15.78-.72.3A3 3 0 0 0 5 17h11.5a3.5 3.5 0 0 0 .48-6.96l-.74-.12-.07-.77A6 6 0 0 0 9.5 3.5z"/>
+            <path d="M10.5 8.5V11h2a.5.5 0 0 1 0 1H10a.5.5 0 0 1-.5-.5V8.5a.5.5 0 0 1 1 0z"/>
+          </svg>
+          <span>备份与同步</span>
         </button>
         <button class="nav-item" :class="{ on: navPane === 'about' }" data-pane="about" @click="switchPane('about')">
           <svg viewBox="0 0 20 20" fill="currentColor" width="17" height="17">

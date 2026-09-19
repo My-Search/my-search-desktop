@@ -26,7 +26,8 @@ import {
   PLACEHOLDER_PREPARE_MS,
 } from "../../lib/util";
 import { setWindowHeight, getDefaultSubscribeText } from "../../lib/tauri-bridge";
-import type { SubscribeItem } from "../../types/index";
+import { pluginIdOf } from "../../lib/plugins/plugin-items";
+import type { SearchItem, SubscribeItem } from "../../types/index";
 
 /** 订阅原文存储键（与配置窗口共享） */
 export const SUBSCRIBES_STORAGE_KEY = "subscribes";
@@ -346,6 +347,8 @@ export function useSearchState() {
     }
     state.loading = false;
     engine.onProgress = null;
+    // 插件贡献的搜索项：每次数据就绪后重新合成（装/卸/禁用即时生效，且不写缓存）
+    attachPluginItems();
     state.unfollowSnapshot = currentUnfollowSnapshot();
     if (!silent) {
       // 非静默模式才更新界面占位提示
@@ -367,6 +370,58 @@ export function useSearchState() {
   }
   function currentInputValue(): string {
     return inputValueGetter?.() ?? "";
+  }
+
+  // ============== 插件搜索项 ==============
+  /** 由 App.vue 注入：合成当前启用插件贡献的搜索项 */
+  let pluginItemsProvider: (() => SearchItem[]) | null = null;
+  /** 上一次挂载的插件项「指纹」（用于判断是否真的变了） */
+  let lastPluginItemsKey = "";
+
+  /** 插件项指纹：id + 关键词 + 标题，任一变化都说明该重挂 */
+  function pluginItemsKey(items: readonly SearchItem[]): string {
+    return items.map((it) => `${pluginIdOf(it) ?? ""}\u0001${it._pluginKeyword ?? ""}\u0001${it.title ?? ""}`).join("\u0002");
+  }
+
+  /**
+   * 绑定插件搜索项来源。注入后立即挂载一次（应用启动时插件已就绪的场景），
+   * 之后每次 `loadAllData` 收尾都会重新挂载。
+   */
+  function bindPluginItems(provider: () => SearchItem[]): void {
+    pluginItemsProvider = provider;
+    engine.extraItemsProvider = provider;
+    attachPluginItems();
+  }
+
+  /**
+   * 把插件搜索项挂到当前检索库（装/卸/禁用后调用即时生效，无需重拉订阅数据）。
+   *
+   * 挂载本身是幂等的（内部先摘旧再挂新），所以每次都执行；但**触发重搜**必须克制，
+   * 否则会在两个真实的场景里造成回归：
+   *   1. **集合没变就不重搜**：本函数会在每次窗口呼出时被调用，无条件重搜等于
+   *      平白打断用户当前正在看的东西；
+   *   2. **详情视图打开时不重搜**：`doSearch` 会把 `state.mode` 设回 SHOW_RESULT，
+   *      而「隐藏前是详情视图 → 呼出原样还原」依赖 mode 仍是 SHOW_ITEM_DETAIL。
+   *      重搜会让 Esc 从「返回结果列表」变成「隐藏窗口」。
+   *      检索库已经更新，用户退出详情视图后重新搜索时自然会带上新的插件项。
+   *
+   * @returns 当前挂载的插件项条数
+   */
+  function attachPluginItems(): number {
+    if (pluginItemsProvider == null) {
+      engine.extraItemsProvider = null;
+      return 0;
+    }
+    engine.extraItemsProvider = pluginItemsProvider;
+    const nextItems = pluginItemsProvider();
+    const count = engine._attachExtraItems();
+    const nextKey = pluginItemsKey(nextItems);
+    const changed = nextKey !== lastPluginItemsKey;
+    lastPluginItemsKey = nextKey;
+    if (!changed || state.mode === MODE.SHOW_ITEM_DETAIL) return count;
+    const value = currentInputValue();
+    if (value && value.trim()) void doSearch(value);
+    return count;
   }
 
   /** 当前「不关注标签」列表快照（用于判断配置窗口中标签是否变化） */
@@ -517,6 +572,8 @@ export function useSearchState() {
     onRedirect,
     bindInputValueGetter,
     bindAfterResultsRendered,
+    bindPluginItems,
+    attachPluginItems,
     // 搜索
     doSearch,
     debouncedSearch,

@@ -24,6 +24,16 @@ import DetailView, { type DetailContent } from "./DetailView.vue";
 import { useSearchState, MODE, BOX_HEIGHT } from "./useSearchState";
 import { useUpdateChecker } from "./useUpdateChecker";
 import { useScriptHost } from "./useScriptHost";
+import { usePluginHost } from "./usePluginHost";
+import { usePluginViewHost } from "./usePluginViewHost";
+import { pluginIdOf } from "../../lib/plugins/plugin-items";
+import { decideViewReload } from "../../lib/plugins/dev-reload";
+import { takePluginFrontendRestartMarks } from "../../lib/plugins/restart";
+import { bindPluginHostRuntime } from "../../lib/plugins/host";
+import { useMessageDialog } from "../../composables/useMessageDialog";
+import { useToast } from "../../composables/useToast";
+import MessageDialog from "../../components/MessageDialog.vue";
+import ToastHost from "../../components/ToastHost.vue";
 import { isUrl, clearUrlSearchTemplate } from "../../lib/util";
 import {
   openExternal,
@@ -32,6 +42,7 @@ import {
   setWindowHeight,
   onMainWindowShown,
   onClearCache,
+  onShortcutOpenPlugin,
   onWindowFocusChanged,
   isWindowVisible,
   isTauri,
@@ -42,6 +53,10 @@ import type { SearchItem } from "../../types/index";
 const search = useSearchState();
 const update = useUpdateChecker();
 const { state, engine, placeholder, visibleResults } = search;
+
+/** 应用内提示 / 确认（替代原生 alert/confirm：macOS WKWebView 不支持） */
+const toast = useToast();
+const message = useMessageDialog();
 
 /** 详情视图内容（null = 未打开） */
 const detail = ref<DetailContent | null>(null);
@@ -73,16 +88,136 @@ const scriptHost = useScriptHost({
   },
 });
 
-// ============== 视图高度 ==============
-/** 由内容决定高度：渲染完成后实测 #my_search_box 的 offsetHeight 并下发 */
-async function syncWindowHeightToContent(): Promise<void> {
-  await nextTick();
-  const box = document.getElementById("my_search_box");
-  if (!box) {
-    void setWindowHeight(BOX_HEIGHT);
+// ============== 插件宿主 ==============
+/** 插件注册表 + 宿主 API 网关（授权弹窗 / 搜索数据 / 存储 / 网络…） */
+const pluginHost = usePluginHost({
+  getSearchData: () => engine.searchData,
+  triggerSearch: (kw) => {
+    inputValue.value = kw;
+    void search.doSearch(kw);
+  },
+  setInput: (text) => {
+    inputValue.value = text;
+  },
+  hideDetail: () => hideTextView(),
+  toast: (text, type) => toast.showToast(text, type ?? "ok"),
+  confirm: (text) => message.showMessage(text, { title: "插件请求" }),
+  getSelectedText: (hint) => scriptHost.getSelectedText(hint),
+  onItemsChanged: () => {
+    // 装/卸/禁用插件后：重新合成插件项，已有输入时立即重搜
+    search.attachPluginItems();
+  },
+  // 开发目录里的插件改了：按需重挂已打开的界面（判定在 usePluginHost 里，
+  // 用的是纯函数 decideViewReload；这里只执行 DOM 侧的动作）。
+  // 「已打开」包括**保活中的会话**——它内存里跑的是旧代码，不重挂就等于改了没反应。
+  onDevPluginReloaded: (info) => {
+    const decision = decideViewReload({
+      activePluginId: pluginViewHost.activePluginId.value,
+      pluginId: info.record.id,
+      paths: info.paths,
+      entry: info.record.manifest.contributes?.detailView?.entry,
+      script: info.record.manifest.contributes?.detailView?.script,
+      versionChanged: info.versionChanged,
+      name: info.record.name,
+      parkedPluginIds: pluginViewHost.keepAliveIds(),
+    });
+    if (!decision.remount) return;
+    void remountPluginView(info.record.id, decision.notice);
+  },
+});
+
+/**
+ * 重挂已打开的插件视图（开发热重载用）。
+ *
+ * 为什么走「合成一个数据项 → open()」而不是原地刷新：插件的入口 HTML/CSS/JS
+ * 是挂载时一次性读入并执行的（见 usePluginViewHost.mountSession），原地刷新没有
+ * 对应的接口；而 `open()` 本就是「收掉旧的 + 挂新的」，且它需要的载体数据项
+ * 由 `itemForPlugin` 现成合成（快捷键打开插件走的就是这条路）。
+ *
+ * 重挂前必须**强制卸载**旧会话：保活（最小化）的会话同理——它内存里跑的是旧代码，
+ * 而且 `decideViewRestore` 会因为入口没变而选择「恢复」，那就等于改了没反应。
+ *
+ * 重挂会丢掉插件视图内的内存态（正在输入的内容等），因此给一条提示。
+ */
+async function remountPluginView(pluginId: string, notice: string | null): Promise<void> {
+  const item = pluginHost.itemForPlugin(pluginId);
+  const wasForeground = detailVisible.value && state.mode === MODE.SHOW_ITEM_DETAIL && pluginViewHost.isActive();
+  // 无条件卸载旧会话（不按 closeBehavior：这里的旧代码必须消失）
+  pluginViewHost.release(pluginId, "开发热重载：按新文件重新挂载");
+  if (!item) return; // 插件被禁用 / 卸载：视图会在下次交互时自然收起
+  if (!wasForeground) {
+    // 保活中的后台会话：已卸载，等用户下次打开自然读到新文件（此时不必打断用户）
+    if (notice) toast.showToast(notice, "ok");
     return;
   }
-  void setWindowHeight(box.offsetHeight);
+  try {
+    await pluginViewHost.open(item);
+    // 重挂后按内容重新下发窗口高度（否则会沿用旧内容的测量结果）
+    detailRef.value?.onScriptMounted();
+    if (notice) toast.showToast(notice, "ok");
+  } catch (e) {
+    console.warn(`[插件] 开发热重载重挂视图失败（${pluginId}）:`, e);
+  }
+}
+
+/** 插件详情视图宿主（渲染 detailView.entry + 入口脚本） */
+const pluginViewHost = usePluginViewHost({
+  getRecord: (id) => pluginHost.get(id),
+  createApi: (id) => pluginHost.apiFor(id),
+  hostContext: pluginHost.hostContext(),
+  readText: (id, rel) => pluginHost.readText(id, rel),
+  matchSearch: (kw) => scriptHost.matchSearchByOverlap?.(kw) ?? Promise.resolve([]),
+  getInputValue: () => inputValue.value,
+  setInputValue: (kw) => {
+    inputValue.value = kw;
+  },
+  fitHeight: () => detailRef.value?.fitHeight(),
+  flushHeight: () => detailRef.value?.flushHeight(),
+  container: computed(() => detailRef.value?.pluginContainer ?? null),  onError: (id, msg) => console.warn(`[插件 ${id}] ${msg}`),
+  // 关闭界面时是否停后台进程由插件的 closeBehavior 决定（判定在 usePluginViewHost.clear）
+  stopBackend: (id) => pluginHost.stopBackend(id),
+});
+
+// 宿主检索 / 加权实现注入（插件 ms.search.query / ms.search.score 用）
+bindPluginHostRuntime({
+  search: (kw) => engine.search(kw),
+  score: (item) => scoreSelect(item),
+});
+
+// ============== 视图高度 ==============
+/**
+ * 由内容决定高度：渲染完成后实测 #my_search_box 的 offsetHeight 并下发。
+ *
+ * 为什么只量 #searchBox / #matchResult / #text_show 三个视图子节点、而不是
+ * 直接读盒子的 offsetHeight：盒子里还住着**弹层节点**（toast、确认弹窗）。
+ * 它们本该是 fixed/absolute 的（不参与布局），但只要有一条样式漏了（历史上
+ * 真的漏过一次：搜索窗的 #cfgToast 没有 fixed 规则），它们就会被当成普通块
+ * 撑高盒子——而下发的高度是白名单值（48 / 内容高度），多出来的部分只会溢出
+ * 窗口，表现为**搜索框下边框消失**。按视图子节点求和可以让这层错误无法生效。
+ */
+const VIEW_PART_IDS = ["searchBox", "matchResult", "text_show"] as const;
+
+function measuredBoxHeight(): number {
+  const box = document.getElementById("my_search_box");
+  if (!box) return BOX_HEIGHT;
+  let sum = 0;
+  for (const id of VIEW_PART_IDS) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    // display:none 的节点 offsetHeight 为 0，天然不参与
+    sum += el.offsetHeight;
+  }
+  // 上下各 2px 灰边框（盒子是 border-box，视图子节点只覆盖内容区）
+  const borders = box.offsetHeight - (box.clientHeight || box.offsetHeight);
+  const total = sum > 0 ? sum + Math.max(0, borders) : box.offsetHeight;
+  // 与 #my_search_box 的实测高度取小者：求和路径只用于「兜住异常撑高」，
+  // 正常情况下两者一致（相等时取实测值，保持既有像素级行为不变）。
+  return Math.min(total, box.offsetHeight);
+}
+
+async function syncWindowHeightToContent(): Promise<void> {
+  await nextTick();
+  void setWindowHeight(measuredBoxHeight());
 }
 
 /** 收起窗口到搜索框高度 */
@@ -91,9 +226,12 @@ function collapseToBoxHeight(): void {
 }
 
 // ============== 视图切换 ==============
-/** 结束脚本视图会话 + 关闭详情视图 */
+/** 结束脚本 / 插件视图会话 + 关闭详情视图 */
 function hideTextView(): void {
   scriptHost.clearScriptSession();
+  // 插件视图：按插件设置「最小化」（停靠保活）或「退出」（卸载），
+  // 由视图宿主内部判定；这里只负责收掉详情视图本身。
+  pluginViewHost.clear();
   detailVisible.value = false;
   state.mode = state.results.length > 0 ? MODE.SHOW_RESULT : MODE.WAIT_SEARCH;
   void nextTick(() => {
@@ -108,6 +246,7 @@ function hideTextView(): void {
 /** 显示文本详情（简述内容 / 附加内容） */
 function showTextView(title: string, desc: string, body: string): void {
   scriptHost.clearScriptSession();
+  pluginViewHost.clear();
   detail.value = { kind: "text", title, desc, body };
   detailVisible.value = true;
   state.mode = MODE.SHOW_ITEM_DETAIL;
@@ -135,6 +274,7 @@ function resetToInitialView(): void {
   state.mode = MODE.WAIT_SEARCH;
   search.debouncedSearch.cancel();
   scriptHost.clearScriptSession();
+  pluginViewHost.clear();
   // 复位时不要无条件刷回默认提示：若订阅数据仍在加载中，
   // 必须继续显示「正在加载订阅数据...」，否则会表现为静默加载。
   search.restoreLoadingPlaceholderIfNeeded();
@@ -159,7 +299,6 @@ function resumeDetailViewIfAny(): boolean {
   });
   return true;
 }
-
 // ============== 打开数据项 ==============
 /** 将展示项解析回规范化数据项（临时克隆项如 <new> 也能定位到原数据） */
 function resolveItem(item: SearchItem | null | undefined): SearchItem | null {
@@ -215,6 +354,11 @@ function openItem(rawItem: SearchItem | null | undefined): void {
   scoreSelect(item);
   historySelect(item);
 
+  // 插件贡献的项：走插件视图（与老脚本项分流；老路径一字不动）
+  if (pluginIdOf(item) != null) {
+    void openPluginView(item);
+    return;
+  }
   // 脚本项（包含快捷搜索脚本）
   if (item.type === "script") {
     handleScriptItem(item);
@@ -243,6 +387,55 @@ function openVassal(rawItem: SearchItem | null | undefined): void {
   scoreSelect(item);
   historySelect(item);
   showTextView(item.title ?? "", "主项的相关/附加内容", item.vassal);
+}
+
+// ============== 插件视图 ==============
+/**
+ * 打开插件视图。
+ *
+ * 与脚本视图的分流点：插件项自带 `_pluginId`，渲染容器是 `.plugin-view`
+ * （脚本项是 `.script-view`），两者互斥——先关掉脚本会话再挂插件视图。
+ */
+async function openPluginView(item: SearchItem): Promise<void> {
+  scriptHost.clearScriptSession();
+  detail.value = { kind: "plugin", title: item.title ?? "", desc: "插件项", body: "", item };
+  detailVisible.value = true;
+  state.mode = MODE.SHOW_ITEM_DETAIL;
+  // 等容器渲染出来（.plugin-view 由 DetailView 的 v-else-if 分支产出）
+  await nextTick();
+  const result = await pluginViewHost.open(item);
+  if (!result.ok) {
+    toast.showToast(result.error ?? "插件视图打开失败", "error");
+    return;
+  }
+  detailRef.value?.onScriptMounted();
+}
+
+/**
+ * 全局快捷键触发的「打开插件」（快捷键作用于 open-plugin 时由 Rust 端广播事件）。
+ *
+ * 与点结果项打开插件的差别只有一步：快捷键没有「被点击的数据项」，
+ * 因此由插件宿主合成一个载体项（该插件的第一个搜索项 / 最小占位项），
+ * 其余路径完全一致（关脚本会话 → 挂插件视图 → 高度自适应）。
+ */
+async function openPluginByShortcut(pluginId: string): Promise<void> {
+  // 插件可能刚在设置窗口里被装/卸/启停：先对一次注册表指纹，避免用到旧记录
+  await pluginHost.reload();
+  const record = pluginHost.get(pluginId);
+  if (!record) {
+    toast.showToast(`插件不存在（可能已卸载）：${pluginId}`, "error");
+    return;
+  }
+  if (!record.enabled) {
+    toast.showToast(`插件「${record.name}」已禁用，请先在设置 → 插件中启用`, "error");
+    return;
+  }
+  const item = pluginHost.itemForPlugin(pluginId);
+  if (!item) {
+    toast.showToast(`插件「${record.name}」不可用`, "error");
+    return;
+  }
+  await openPluginView(item);
 }
 
 /** 脚本项处理（还原 showView 分支） */
@@ -293,6 +486,36 @@ function runScriptItem(item: SearchItem): void {
   });
 }
 
+/**
+ * 对齐注册表变化后的插件会话（呼出 / 获得焦点 / 页面可见性变化时调用）。
+ *
+ * 设置窗口是**另一个 WebView**，用户可以在那里禁用/卸载插件；搜索窗只能
+ * 在这些时间点发现。被禁用/卸载的插件不该还能被恢复出来，因此：
+ *   1. 清掉失效的保活会话（`reapSessions`）；
+ *   2. 若被清掉的恰好是**前台的**那个插件，详情视图会剩下一个空容器——
+ *      把它一并收掉，回到结果列表/等待搜索，而不是给用户看一片空白。
+ */
+function syncPluginSessions(): void {
+  const before = pluginViewHost.sessionCount();
+  const activeBefore = pluginViewHost.activePluginId.value;
+  pluginViewHost.reapSessions();
+  // 设置里点了「重启」的插件：释放其（保活中的）前端会话，下次打开 = 全新挂载。
+  // 后端已在设置窗口重启过，这里只丢前端会话、不联动停后端。
+  for (const pluginId of takePluginFrontendRestartMarks()) {
+    pluginViewHost.release(pluginId, "设置中重启了插件：前端会话已释放（下次打开重新挂载）", { stopBackend: false });
+  }
+  const reapedForeground = !!activeBefore && pluginViewHost.sessionCount() < before && !pluginViewHost.hasSession(activeBefore);
+  if (reapedForeground && detailVisible.value && detail.value?.kind === "plugin") {
+    detailVisible.value = false;
+    detail.value = null;
+    state.mode = state.results.length > 0 ? MODE.SHOW_RESULT : MODE.WAIT_SEARCH;
+    void nextTick(() => {
+      if (state.results.length > 0) void syncWindowHeightToContent();
+      else collapseToBoxHeight();
+    });
+  }
+}
+
 // ============== 键盘交互 ==============
 function onInput(v: string): void {
   if (state.mode === MODE.SHOW_ITEM_DETAIL) {
@@ -318,9 +541,11 @@ function onKeydown(e: KeyboardEvent): void {
     search.moveActive(-1);
   } else if (e.key === "Enter") {
     e.preventDefault();
-    // 脚本视图展示中：回车 = 把子搜索关键词推送给脚本应用
+    // 视图展示中：回车 = 把子搜索关键词推送给脚本应用 / 插件
     // （还原 registry.script.tryRunTextViewHandler；推成功就不执行结果项点击）
-    const pushed = scriptHost.tryRunScriptTextViewHandler(inputValue.value);
+    const pushed = pluginViewHost.isActive()
+      ? pluginViewHost.tryRunTextViewHandler(inputValue.value)
+      : scriptHost.tryRunScriptTextViewHandler(inputValue.value);
     if (pushed.handled) {
       // 清掉子搜索部分，只留「父关键词 : 」（原版 input.val(rawKeyword.replace(msg,""))）
       inputValue.value = pushed.nextKeyword;
@@ -419,6 +644,8 @@ search.bindAfterResultsRendered(() => {
 
 // ============== 生命周期 ==============
 let unlistenShown: (() => void) | null = null;
+/** 「打开插件」快捷键事件监听器 */
+let unlistenPluginShortcut: (() => void) | null = null;
 
 /** 全局 ESC：输入框无焦点时，与输入框按 ESC 行为完全等价 */
 function onGlobalEsc(e: KeyboardEvent): void {
@@ -444,6 +671,22 @@ onMounted(async () => {
   // 全局 ESC：详情视图 / 结果列表显示时，输入框无焦点也与输入框 ESC 行为一致
   document.addEventListener("keydown", onGlobalEsc, true);
 
+  // ── 关键：以下数据加载不阻塞首帧渲染 ──
+  // Vue mount() 已完成，骨架屏已移除，搜索框已可交互。
+  // 把网络/文件 IO 放到 nextTick 之后，让 WebView 先完成首帧合成，
+  // 避免冷启动首次呼出时因数据加载阻塞而显示空白窗口。
+  await nextTick();
+
+  // 插件注册表必须在「数据加载」之前就绪：插件项在 loadAllData 收尾时会挂进检索库
+  try {
+    await pluginHost.reload(true);
+    search.bindPluginItems(() => pluginHost.pluginItems());
+    // 目录挂载插件的热重载：监听 Rust 侧广播的源目录变化（幂等，可安全重复调用）
+    await pluginHost.startDevWatcher();
+  } catch (e) {
+    console.warn("[我的搜索] 插件加载失败:", e);
+  }
+
   try {
     await search.loadSubscribes();
     await search.loadAllData();
@@ -455,6 +698,15 @@ onMounted(async () => {
   // 呼出（Rust 端显示窗口）按隐藏前的视图状态分两种（用户规则）：
   // 1. 详情视图展示中隐藏 → 原样还原；2. 其它状态 → 复位到初始视图
   unlistenShown = await onMainWindowShown(() => {
+    // 插件可能在设置窗口里被装/卸/启停：呼出时对一次注册表指纹，变了才重载。
+    // 重载后顺手清掉「注册表里已经不该存在」的保活会话（禁用/卸载的插件不该
+    // 还能被恢复出来）——设置窗口与搜索窗是两个 WebView，只能在这一刻对齐。
+    void pluginHost
+      .reload()
+      .then(() => {
+        syncPluginSessions();
+        search.attachPluginItems();
+      });
     if (!resumeDetailViewIfAny()) {
       resetToInitialView();
     }
@@ -466,6 +718,12 @@ onMounted(async () => {
   // 托盘菜单「清理缓存」
   await onClearCache(() => {
     search.clearRebuildableCache();
+  });
+
+  // 全局快捷键「打开插件」（设置 → 快捷键里作用的插件键按下时 Rust 端广播）：
+  // 无论窗口此前是隐藏还是显示，Rust 已保证窗口可见并聚焦，这里直接开插件视图。
+  unlistenPluginShortcut = await onShortcutOpenPlugin((pluginId) => {
+    void openPluginByShortcut(pluginId);
   });
 
   // 窗口再次获得焦点 / 页面可见性变化时，检测订阅 / 标签 / 缓存是否变化
@@ -493,11 +751,25 @@ function onGlobalKeydown(e: KeyboardEvent): void {
 
 function onWindowFocus(): void {
   search.reloadIfSubscribesChanged(false);
+  // 焦点回到搜索窗口时，插件注册表可能已在设置窗口里被改动
+  // （被禁用/卸载的插件：把它的保活会话一并清掉）
+  void pluginHost
+    .reload()
+    .then(() => {
+      syncPluginSessions();
+      search.attachPluginItems();
+    });
   searchBoxRef.value?.focus();
 }
 
 function onVisibilityChange(): void {
   search.reloadIfSubscribesChanged(false);
+  void pluginHost
+    .reload()
+    .then(() => {
+      syncPluginSessions();
+      search.attachPluginItems();
+    });
 }
 
 onBeforeUnmount(() => {
@@ -506,6 +778,9 @@ onBeforeUnmount(() => {
   window.removeEventListener("focus", onWindowFocus);
   document.removeEventListener("visibilitychange", onVisibilityChange);
   unlistenShown?.();
+  unlistenPluginShortcut?.();
+  pluginViewHost.disposeAll("应用退出");
+  pluginHost.stopDevWatcher();
   update.dispose();
 });
 
@@ -555,5 +830,7 @@ defineExpose({ inputValue });
         :keyword="state.rawKeyword"
       />
     </div>
+    <ToastHost :state="toast.state" />
+    <MessageDialog :state="message.state" @ok="message.handleOk" @cancel="message.handleCancel" />
   </div>
 </template>

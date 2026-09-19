@@ -15,7 +15,7 @@ import type { SearchItem } from "../../types/index";
 
 /** 详情视图内容：文本型（brief/vassal）或脚本型 */
 export interface DetailContent {
-  kind: "text" | "script";
+  kind: "text" | "script" | "plugin";
   title: string;
   /** desc 作为正文左侧标签文案 */
   desc: string;
@@ -37,8 +37,10 @@ const detailHeight = useDetailHeight();
 
 const textView = ref<HTMLElement | null>(null);
 const scriptHost = ref<HTMLElement | null>(null);
+const pluginHost = ref<HTMLElement | null>(null);
 
 const isScript = computed(() => props.content?.kind === "script");
+const isPlugin = computed(() => props.content?.kind === "plugin");
 
 /** 文本型内容的 HTML（标题行 + markdown 正文） */
 const bodyHtml = computed(() => {
@@ -148,13 +150,15 @@ defineExpose({
       onScriptMounted();
     }
   },
-  /** 脚本视图挂载完成回调 */
+  /** 脚本视图挂载完成回调（插件视图也走它：两者都是「外部 DOM + 高度自适应」） */
   onScriptMounted,
   fitHeight: detailHeight.fit,
   flushHeight: detailHeight.flush,
   resetHeightCache: detailHeight.resetCache,
   /** #text_show 元素（脚本样式需挂在它下面，与原版 cssFillPrefix 一致） */
   owner: textView,
+  /** 插件视图容器（usePluginViewHost 的注入点） */
+  pluginContainer: pluginHost,
 });
 
 onBeforeUnmount(() => {
@@ -171,6 +175,14 @@ onBeforeUnmount(() => {
   >
     <!-- 脚本视图容器：内容由 useScriptHost 注入（view:html / view:css / view:js） -->
     <div v-if="isScript" ref="scriptHost" class="script-view"></div>
+    <!--
+      插件视图容器：内容由 usePluginViewHost 注入（detailView.entry + 入口脚本）。
+      注意 v-else 带来的**结构性约束**：本节点会被 Vue 按内容类型增删，因此插件
+      会话的 DOM **不放在这里**——真正的会话载体由宿主创建，并挂进/摘出本节点
+      （见 usePluginViewHost 的 attachToView / parkSession）。这样插件视图在
+      「关闭 → 最小化」时整棵树原样停靠，恢复时再挂回来，DOM 与脚本状态全程不重建。
+    -->
+    <div v-else-if="isPlugin" ref="pluginHost" class="plugin-view"></div>
     <!-- 简述内容 / 附加内容：Vue 托管 v-html（禁止手工覆盖，避免破坏 vdom） -->
     <div v-else v-html="bodyHtml"></div>
   </div>

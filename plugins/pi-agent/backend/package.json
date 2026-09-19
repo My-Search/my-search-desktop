@@ -1,0 +1,7 @@
+{
+  "name": "pi-agent-backend",
+  "version": "2.0.0",
+  "type": "module",
+  "private": true,
+  "description": "Pi Agent 插件后端：复用本机已安装的 pi（不在此处安装依赖）"
+}

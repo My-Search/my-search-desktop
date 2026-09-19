@@ -11,22 +11,50 @@
 //! - WebView 数据目录固定化：保证 localStorage（订阅/历史/权重）持久化
 //! - 订阅/配置存储（JSON 文件，基于 tauri-plugin-store）
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use tauri::{Emitter, Manager};
+use tauri_plugin_autostart::{AutoLaunchManager, ManagerExt as AutostartManagerExt};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tauri_plugin_store::StoreExt;
+
+mod backup;
+mod cloud;
+mod plugin_host;
+mod plugin_watch;
 
 /// 存储已下载的安装文件路径，供 open_installer 使用
 struct DownloadedInstallerPath(Mutex<Option<String>>);
 
 /// 全局快捷键组合：呼出/隐藏主窗口的**默认值**（用户可在「设置 → 快捷键设置」自定义，
-/// 自定义值持久化在 settings.json，见 get_toggle_shortcut / set_toggle_shortcut）
+/// 自定义值持久化在 settings.json，见 get_shortcut_bindings / set_shortcut_bindings）
 const DEFAULT_TOGGLE_SHORTCUT: &str = "ctrl+alt+s";
 
 /// 设置存储文件（tauri-plugin-store，位于应用数据目录）
 const SETTINGS_STORE_FILE: &str = "settings.json";
-/// 设置存储里「呼出/隐藏快捷键」的键名
+/// 设置存储里「呼出/隐藏快捷键」的键名（**旧版单键格式**，仅用于迁移读取）
 const SETTINGS_KEY_TOGGLE_SHORTCUT: &str = "toggle_shortcut";
+
+/// 设置存储里「快捷键绑定列表」的键名（新版：每条 = 快捷键 + 作用类型 + 作用对象）
+const SETTINGS_KEY_SHORTCUT_BINDINGS: &str = "shortcut_bindings";
+
+/// 快捷键作用类型：呼出/隐藏搜索窗（默认，仅允许一条）
+const SHORTCUT_ACTION_TOGGLE_WINDOW: &str = "toggle-window";
+/// 快捷键作用类型：直接打开某个插件（作用对象 = 插件 id）
+const SHORTCUT_ACTION_OPEN_PLUGIN: &str = "open-plugin";
+
+/// 快捷键（open-plugin）触发时向主窗口广播的事件名，payload = { pluginId }
+const EVENT_SHORTCUT_OPEN_PLUGIN: &str = "my-search://shortcut-open-plugin";
+
+/// 设置存储里「开机自启动」用户偏好的键名
+const SETTINGS_KEY_AUTOSTART_ENABLED: &str = "autostart_enabled";
+/// 「开机自启动」默认值：安装后随系统登录自动启动，常驻托盘随叫随到，
+/// 用户可在「设置 → 常规设置」里关闭。
+const DEFAULT_AUTOSTART_ENABLED: bool = true;
+
+/// 本次会话是否已经应用过「开机自启动」偏好。
+/// 注册表等系统级写操作只在首次运行时做一次，之后启动不再重复写。
+static AUTOSTART_APPLIED: AtomicBool = AtomicBool::new(false);
 
 /// 主窗口每次显示时向前端广播的事件名（前端据此清理残留状态）
 const EVENT_MAIN_WINDOW_SHOWN: &str = "my-search://main-window-shown";
@@ -80,6 +108,31 @@ fn position_window_top_center(
     let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
 }
 
+/// 显示主窗口（呼出）：先选定目标屏幕（鼠标所在屏，回退窗口当前屏），
+/// 按该屏宽度比例定宽，再居中定位，最后显示并聚焦，最后广播「窗口已显示」事件。
+///
+/// 宽度与居中必须用同一块屏幕、且先定宽再定位，否则会按旧宽度居中而偏左/偏右
+/// （多显示器下更明显）。
+fn show_main_window(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    if let Some(monitor) = target_monitor(&window) {
+        let width = target_window_width(&monitor);
+        let _ = window.set_size(tauri::LogicalSize::new(width, COLLAPSED_WINDOW_HEIGHT));
+        position_window_top_center(&window, &monitor, width);
+    } else {
+        collapse_main_window(&window);
+        let _ = window.center();
+    }
+    let _ = window.show();
+    let _ = window.set_focus();
+    // 通知前端：窗口重新显示（前端据此复位残留的详情/结果视图与高度，
+    // 避免“上次搜过之后再次呼出，下面空着一大块”的问题；
+    // 输入框内容属于用户会话，前端会保留并重新触发搜索）
+    let _ = app.emit(EVENT_MAIN_WINDOW_SHOWN, ());
+}
+
 /// 悬浮窗呼出/隐藏切换
 fn toggle_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
@@ -87,30 +140,36 @@ fn toggle_window(app: &tauri::AppHandle) {
             collapse_main_window(&window);
             let _ = window.hide();
         } else {
-            // 呼出：先选定目标屏幕（鼠标所在屏，回退窗口当前屏），
-            // 按该屏宽度比例定宽，再居中定位，最后显示并聚焦。
-            // 宽度与居中必须用同一块屏幕、且先定宽再定位，
-            // 否则会按旧宽度居中而偏左/偏右（多显示器下更明显）。
-            if let Some(monitor) = target_monitor(&window) {
-                let width = target_window_width(&monitor);
-                let _ = window.set_size(tauri::LogicalSize::new(width, COLLAPSED_WINDOW_HEIGHT));
-                position_window_top_center(&window, &monitor, width);
-            } else {
-                collapse_main_window(&window);
-                let _ = window.center();
-            }
-            let _ = window.show();
-            let _ = window.set_focus();
-            // 通知前端：窗口重新显示（前端据此复位残留的详情/结果视图与高度，
-            // 避免“上次搜过之后再次呼出，下面空着一大块”的问题；
-            // 输入框内容属于用户会话，前端会保留并重新触发搜索）
-            let _ = app.emit(EVENT_MAIN_WINDOW_SHOWN, ());
+            show_main_window(app);
         }
     }
 }
 
-/// 持有当前已注册的快捷键字符串，便于切换时先 unregister。
-struct ActiveShortcutState(Mutex<Option<String>>);
+/// 「打开插件」快捷键的落地：确保主窗口可见，然后广播插件 id 由前端打开插件视图。
+///
+/// 为什么由前端开：插件视图是 WebView 里的 DOM（详情视图容器），
+/// Rust 侧只负责把窗口带到前台与投递事件；插件是否存在、是否启用、
+/// 权限是否足够这些判断都在前端注册表侧完成（Rust 不持有注册表）。
+fn open_plugin_by_shortcut(app: &tauri::AppHandle, plugin_id: &str) {
+    if plugin_id.trim().is_empty() {
+        return;
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        if !window.is_visible().unwrap_or(false) {
+            // 隐藏状态下按插件快捷键：先按呼出逻辑显示窗口（含窗口已显示事件的复位）
+            show_main_window(app);
+        } else {
+            let _ = window.set_focus();
+        }
+    }
+    let _ = app.emit(
+        EVENT_SHORTCUT_OPEN_PLUGIN,
+        serde_json::json!({ "pluginId": plugin_id }),
+    );
+}
+
+/// 持有当前已注册的全部快捷键绑定，便于重新设置时先 unregister。
+struct ActiveShortcutState(Mutex<Vec<ShortcutBinding>>);
 
 /// 获取 settings store（tauri-plugin-store），已加载则复用。
 /// 失败（文件锁 / 路径问题）时降级为禁用自定义快捷键——不会让应用启动失败。
@@ -124,16 +183,356 @@ fn settings_store(app: &tauri::AppHandle) -> Option<std::sync::Arc<tauri_plugin_
     }
 }
 
-/// 从 settings store 中读取「切换窗口快捷键」字符串，无自定义或读取失败时返回默认值
-fn read_toggle_shortcut(app: &tauri::AppHandle) -> String {
+/// 从 settings store 中读取「开机自启动」用户偏好。
+/// 返回 None 表示从未写入过（首次运行，此时按默认值处理，见 `DEFAULT_AUTOSTART_ENABLED`）。
+fn read_autostart_pref(app: &tauri::AppHandle) -> Option<bool> {
     settings_store(app)
-        .and_then(|store| {
-            store
-                .get(SETTINGS_KEY_TOGGLE_SHORTCUT)
-                .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .and_then(|store| store.get(SETTINGS_KEY_AUTOSTART_ENABLED))
+        .and_then(|v| v.as_bool())
+}
+
+/// 把「开机自启动」偏好写入 settings store（store 不可用时静默跳过：
+/// 本次已生效，只是重启后回落到默认值，与快捷键设置的降级策略一致）。
+fn write_autostart_pref(app: &tauri::AppHandle, enabled: bool) {
+    if let Some(store) = settings_store(app) {
+        store.set(
+            SETTINGS_KEY_AUTOSTART_ENABLED,
+            serde_json::Value::Bool(enabled),
+        );
+        if let Err(e) = store.save() {
+            eprintln!("保存自启动设置失败: {e}");
+        }
+    }
+}
+
+/// 取出自启动插件提供的管理器（需要 `ManagerExt` 在作用域内）。
+fn autolaunch_manager(app: &tauri::AppHandle) -> tauri::State<'_, AutoLaunchManager> {
+    AutostartManagerExt::autolaunch(app)
+}
+
+/// 注册表里「开机自启动」所在的键（Windows）
+#[cfg(windows)]
+const AUTOSTART_RUN_KEY: &str = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run";
+
+/// 从自启动项的值里解析出 exe 路径。
+///
+/// 值由 `auto-launch` 写成 `"{exe} {args...}"`（本应用无参数，故通常就是裸路径，
+/// 可能带结尾空格）。两种形态都要认：
+///   - 带引号：`"C:\Program Files\MySearch\MySearch.exe" --flag`
+///   - 不带引号：`C:\MySearch\MySearch.exe ` / `C:\MySearch\MySearch.exe --flag`
+///
+/// 解析策略：先按引号切（有引号时取引号内）；否则截到最后一个 `.exe` 为止
+/// （参数只会出现在 exe 之后，而路径里的目录名极少含 `.exe`）。
+#[cfg(any(windows, test))]
+fn parse_autostart_exe(value: &str) -> String {
+    let v = value.trim();
+    if let Some(rest) = v.strip_prefix('"') {
+        // 带引号：取到配对引号为止
+        return rest.split('"').next().unwrap_or(rest).trim().to_string();
+    }
+    // 不带引号：截到 `.exe`（大小写不敏感）
+    let lower = v.to_ascii_lowercase();
+    match lower.rfind(".exe") {
+        Some(i) => v[..i + 4].trim().to_string(),
+        None => v.to_string(),
+    }
+}
+
+/// 判断自启动项记录的路径与当前 exe 是否指向同一个文件。
+/// Windows 路径大小写不敏感，`/` 与 `\` 等价，比较前统一归一化。
+#[cfg(any(windows, test))]
+fn autostart_path_matches(registered: &str, current: &str) -> bool {
+    let norm = |s: &str| {
+        parse_autostart_exe(s)
+            .replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_ascii_lowercase()
+    };
+    !registered.trim().is_empty() && !current.trim().is_empty() && norm(registered) == norm(current)
+}
+
+/// 读出自启动项里当前记录的 exe 路径（Windows；读不到返回 None）。
+#[cfg(windows)]
+fn registered_autostart_path(app: &tauri::AppHandle) -> Option<String> {
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
+    use winreg::RegKey;
+
+    let key = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey_with_flags(AUTOSTART_RUN_KEY, KEY_READ)
+        .ok()?;
+    key.get_value::<String, _>(app.package_info().name.as_str())
+        .ok()
+}
+
+/// 自启动项路径自愈：登录时拉起的是「注册表里记的那个 exe」，而不是「正在
+/// 运行的这个 exe」。开发期先跑过 debug 版、之后再安装到别处的 release 版时，
+/// 老路径会一直留着（`is_enabled()` 只看值在不在，不看路径对不对）——表现为
+/// 「开机自启拉起来的是旧位置/开发目录的版本」，旧文件删掉后更是静默失效，
+/// 老版本还可能正是会弹控制台窗口的那种构建。这里在启动时发现不一致就把
+/// 启动项重写为当前 exe（`enable()` 即重写 Run 值）。
+///
+/// 两道闸门：
+/// - **只在正式构建里生效**（`!tauri::is_dev()`，即带 `custom-protocol` 的
+///   `tauri build` 产物）。`npm run tauri dev` / 裸 `cargo build` 绝不改注册表，
+///   否则本地调试会把「已安装版本」的启动项顶掉，登录改成拉起开发目录里的构建。
+/// - 只在 Run 值已存在（即自启动开着）时执行，不会凭空创建启动项。
+///
+/// **仅 Windows**：Linux 上 AppImage 的 `current_exe()` 返回的是挂载点内的
+/// 临时路径，而插件写入的是 `.AppImage` 文件路径，两者天然不同——照搬这套
+/// 比较会把启动项改写成一次性的挂载路径（崩溃式误伤）。macOS 的 LaunchAgent
+/// 同理不适用（.app 包路径由插件自己处理）。
+#[cfg(windows)]
+fn refresh_autostart_exe_path(app: &tauri::AppHandle) {
+    if tauri::is_dev() {
+        return;
+    }
+    let Some(registered) = registered_autostart_path(app) else {
+        return;
+    };
+    let Ok(current) = std::env::current_exe() else {
+        return;
+    };
+    let current = current.display().to_string();
+    if !autostart_path_matches(&registered, &current) {
+        if let Err(e) = autolaunch_manager(app).enable() {
+            eprintln!("更新开机自启动路径失败（不影响启动）: {e}");
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn refresh_autostart_exe_path(_app: &tauri::AppHandle) {}
+
+/// 查询系统里「开机自启动」当前是否真的生效。
+/// 直接以系统状态为准：用户在「任务管理器 → 启动」里手动禁用后，这里立刻反映真实结果。
+fn is_autostart_enabled(app: &tauri::AppHandle) -> Result<bool, String> {
+    autolaunch_manager(app)
+        .is_enabled()
+        .map_err(|e| format!("读取开机自启动状态失败: {e}"))
+}
+
+/// 写入/清除系统自启动项（Windows 上是 HKCU Run 注册表值）。
+/// 幂等：状态已经正确时不重复写系统注册表。
+fn set_autostart_enabled(app: &tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    let manager = autolaunch_manager(app);
+    if let Ok(current) = manager.is_enabled() {
+        if current == enabled {
+            return Ok(());
+        }
+    }
+    if enabled {
+        manager
+            .enable()
+            .map_err(|e| format!("开启开机自启动失败: {e}"))?;
+    } else {
+        manager
+            .disable()
+            .map_err(|e| format!("关闭开机自启动失败: {e}"))?;
+    }
+    Ok(())
+}
+
+/// 首次运行时应用「开机自启动」偏好（启动阶段调用，绝不让应用启动失败）。
+///
+/// - 首次运行（settings.json 里没有该键）：按默认值开启（`DEFAULT_AUTOSTART_ENABLED`）
+///   并把偏好落盘，此后不再重复写系统启动项。
+/// - 之后每次启动：只在系统状态与用户偏好不一致时纠正一次。
+/// - 偏好为「开启」时，额外纠正启动项里记录的 exe 路径（见
+///   `refresh_autostart_exe_path`）：换了安装位置 / 开发期的 debug 路径
+///   残留在注册表里时，登录会拉起错误的那份。
+fn apply_autostart_preference(app: &tauri::AppHandle) {
+    if AUTOSTART_APPLIED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let saved = read_autostart_pref(app);
+    let want = saved.unwrap_or(DEFAULT_AUTOSTART_ENABLED);
+    if saved.is_none() {
+        write_autostart_pref(app, want);
+    }
+    if let Err(e) = set_autostart_enabled(app, want) {
+        eprintln!("应用开机自启动设置失败（不影响启动）: {e}");
+    }
+    // 仅在「用户开着自启动」时校正路径：关着的时候不该动注册表
+    if want {
+        refresh_autostart_exe_path(app);
+    }
+}
+
+/// 设置存储里「快捷键绑定」的一条记录：**快捷键 / 作用类型 / 作用对象**。
+///
+/// 序列化形态与前端 `src/lib/shortcut-bindings.ts` 的 ShortcutBinding 一致，
+/// 落在 settings.json 的 `shortcut_bindings` 键下：
+/// ```json
+/// { "shortcut": "ctrl+alt+s", "action": "toggle-window", "target": null }
+/// { "shortcut": "ctrl+alt+1", "action": "open-plugin",   "target": "com.x.y" }
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+struct ShortcutBinding {
+    /// 组合键字符串（小写、+ 连接、修饰键在前，如 "ctrl+alt+s"）
+    shortcut: String,
+    /// 作用类型：toggle-window / open-plugin
+    action: String,
+    /// 作用对象：open-plugin 时为插件 id，toggle-window 时为 None
+    target: Option<String>,
+}
+
+impl ShortcutBinding {
+    /// 反序列化一条记录；字段缺失 / 作用类型未知时返回 None（跳过该条）。
+    fn from_value(v: &serde_json::Value) -> Option<Self> {
+        let shortcut = v.get("shortcut")?.as_str()?.trim().to_string();
+        if shortcut.is_empty() {
+            return None;
+        }
+        let action = v.get("action")?.as_str()?.trim().to_string();
+        if !is_known_shortcut_action(&action) {
+            return None;
+        }
+        let target = v
+            .get("target")
+            .and_then(|t| t.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if action == SHORTCUT_ACTION_OPEN_PLUGIN && target.is_none() {
+            // 缺少作用对象（插件 id）的绑定无法执行，直接丢弃
+            return None;
+        }
+        Some(Self {
+            shortcut,
+            action,
+            target,
         })
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_TOGGLE_SHORTCUT.to_string())
+    }
+
+    /// 序列化为 JSON（写 settings.json 用）
+    fn to_value(&self) -> serde_json::Value {
+        serde_json::json!({
+            "shortcut": self.shortcut,
+            "action": self.action,
+            "target": self.target,
+        })
+    }
+}
+
+/// 是否是已知的快捷键作用类型
+fn is_known_shortcut_action(action: &str) -> bool {
+    action == SHORTCUT_ACTION_TOGGLE_WINDOW || action == SHORTCUT_ACTION_OPEN_PLUGIN
+}
+
+/// 绑定列表长度上限（防止设置文件被写爆 / 注册过多全局热键）
+const MAX_SHORTCUT_BINDINGS: usize = 50;
+
+/// 严格解析前端提交的绑定列表：任何一条不合法都返回错误（**不静默丢条目**）。
+///
+/// 与宽容版 `parse_shortcut_bindings` 的区别：那个用于读历史文件（脏数据跳过），
+/// 这个用于写入前校验（用户当前的设置不能被悄悄改掉）。
+fn parse_shortcut_bindings_strict(value: &serde_json::Value) -> Result<Vec<ShortcutBinding>, String> {
+    let arr = value
+        .as_array()
+        .ok_or_else(|| "快捷键设置格式错误（应为数组）".to_string())?;
+    if arr.is_empty() {
+        return Err("快捷键设置不能为空（至少保留一条「呼出 / 隐藏搜索框」）".into());
+    }
+    if arr.len() > MAX_SHORTCUT_BINDINGS {
+        return Err(format!("快捷键数量不能超过 {MAX_SHORTCUT_BINDINGS} 条"));
+    }
+
+    let mut out: Vec<ShortcutBinding> = Vec::new();
+    for (i, item) in arr.iter().enumerate() {
+        let no = i + 1;
+        let binding = ShortcutBinding::from_value(item).ok_or_else(|| {
+            format!("第 {no} 条快捷键不完整（需要「快捷键 + 作用类型」，打开插件还需要选择插件）")
+        })?;
+        if out.iter().any(|b| b.shortcut == binding.shortcut) {
+            return Err(format!("快捷键「{}」重复了，请换一个", binding.shortcut));
+        }
+        if binding.action == SHORTCUT_ACTION_TOGGLE_WINDOW
+            && out.iter().any(|b| b.action == binding.action)
+        {
+            return Err("「呼出 / 隐藏搜索框」只能设置一条快捷键".into());
+        }
+        out.push(binding);
+    }
+    Ok(out)
+}
+
+/// 解析设置里存的「快捷键绑定数组」原文 → 绑定列表（未知项跳过，不报错）。
+fn parse_shortcut_bindings(value: &serde_json::Value) -> Vec<ShortcutBinding> {
+    let arr = match value.as_array() {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+    let mut out: Vec<ShortcutBinding> = Vec::new();
+    for item in arr {
+        let Some(binding) = ShortcutBinding::from_value(item) else {
+            continue;
+        };
+        // 同一个组合键只保留第一条（后面重复的丢弃，避免注册时互相顶掉）
+        if out.iter().any(|b| b.shortcut == binding.shortcut) {
+            continue;
+        }
+        // 呼出/隐藏是必需能力：只允许一条，重复的丢弃
+        if binding.action == SHORTCUT_ACTION_TOGGLE_WINDOW
+            && out
+                .iter()
+                .any(|b| b.action == SHORTCUT_ACTION_TOGGLE_WINDOW)
+        {
+            continue;
+        }
+        out.push(binding);
+    }
+    out
+}
+
+/// 读「呼出/隐藏」快捷键（从绑定列表里找；列表里没有时回落到默认值）。
+///
+/// 兼容旧版：列表键不存在时读旧的单键 `toggle_shortcut`（用户升级后不丢配置）。
+fn read_toggle_shortcut(app: &tauri::AppHandle) -> String {
+    for b in read_shortcut_bindings(app) {
+        if b.action == SHORTCUT_ACTION_TOGGLE_WINDOW {
+            return b.shortcut;
+        }
+    }
+    DEFAULT_TOGGLE_SHORTCUT.to_string()
+}
+
+/// 从 settings store 读取全部快捷键绑定。
+///
+/// 三种情况：
+///   1. 存了绑定列表 → 原样解析（列表里可以没有 toggle-window，此时呼出键回落到默认值）；
+///   2. 没存过绑定列表、但存过旧版单键 → 迁移成一条 toggle-window（只读，不写回）；
+///   3. 什么都没存（首次运行）→ 一条默认的 toggle-window。
+fn read_shortcut_bindings(app: &tauri::AppHandle) -> Vec<ShortcutBinding> {
+    let Some(store) = settings_store(app) else {
+        return vec![ShortcutBinding {
+            shortcut: DEFAULT_TOGGLE_SHORTCUT.to_string(),
+            action: SHORTCUT_ACTION_TOGGLE_WINDOW.to_string(),
+            target: None,
+        }];
+    };
+    if let Some(value) = store.get(SETTINGS_KEY_SHORTCUT_BINDINGS) {
+        return parse_shortcut_bindings(&value);
+    }
+    // 旧版单键迁移：把「呼出/隐藏」变成一条绑定
+    let legacy = store
+        .get(SETTINGS_KEY_TOGGLE_SHORTCUT)
+        .and_then(|v| v.as_str().map(|s| s.trim().to_string()))
+        .filter(|s| !s.is_empty());
+    vec![ShortcutBinding {
+        shortcut: legacy.unwrap_or_else(|| DEFAULT_TOGGLE_SHORTCUT.to_string()),
+        action: SHORTCUT_ACTION_TOGGLE_WINDOW.to_string(),
+        target: None,
+    }]
+}
+
+/// 写入绑定列表到 settings store（写失败只记日志：本次已生效，重启后回落旧值）。
+fn write_shortcut_bindings(app: &tauri::AppHandle, bindings: &[ShortcutBinding]) {
+    if let Some(store) = settings_store(app) {
+        let arr: Vec<serde_json::Value> = bindings.iter().map(|b| b.to_value()).collect();
+        store.set(SETTINGS_KEY_SHORTCUT_BINDINGS, serde_json::Value::Array(arr));
+        if let Err(e) = store.save() {
+            eprintln!("保存快捷键设置失败: {e}");
+        }
+    }
 }
 
 /// 把快捷键字符串（"ctrl+alt+s"）转为展示形式（"Ctrl+Alt+S"）。
@@ -153,77 +552,110 @@ fn shortcut_to_caps(shortcut: &str) -> String {
         .join("+")
 }
 
-/// 注册（或重新注册）呼出/隐藏快捷键。
+/// 尝试把一组绑定注册到系统（全部成功才算成功，否则回滚已注册的部分）。
 ///
-/// - 先 unregister 旧键（如果有），再注册新键。
-/// - 注册成功后更新 `ActiveShortcutState` 记录当前键值。
-/// - 新键注册失败时**回滚**：优先恢复旧键（保证「改动失败 = 一切保持原样」），
-///   旧键也恢复不了时兜底注册默认键，保证呼出功能始终可用。
-fn register_toggle_shortcut<S: AsRef<str>>(
-    app: &tauri::AppHandle,
-    shortcut_str: S,
-) -> Result<(), String> {
-    let shortcut = shortcut_str.as_ref().trim().to_string();
-    // 插件 API 只接受 &str（TryFrom<&str>），先在这里校验字符串可解析
-    if let Err(e) = tauri_plugin_global_shortcut::Shortcut::try_from(shortcut.as_str()) {
-        return Err(format!("无法识别的快捷键「{shortcut}」: {e}"));
-    }
-
+/// 每个键的 handler 按「作用类型」分发：呼出/隐藏窗口，或直接打开某个插件。
+fn register_binding_handlers(app: &tauri::AppHandle, bindings: &[ShortcutBinding]) -> Result<(), String> {
     let gs = app.global_shortcut();
+    let mut registered: Vec<ShortcutBinding> = Vec::new();
+
+    for binding in bindings {
+        let shortcut = binding.shortcut.as_str();
+        // 插件 API 只接受 &str（TryFrom<&str>），先在这里校验字符串可解析
+        if let Err(e) = tauri_plugin_global_shortcut::Shortcut::try_from(shortcut) {
+            rollback_registered(app, &registered);
+            return Err(format!("无法识别的快捷键「{shortcut}」: {e}"));
+        }
+        // 同一条快捷键重复出现（理论上调用方已去重）：跳过，避免注册冲突
+        if registered.iter().any(|b| b.shortcut == binding.shortcut) {
+            continue;
+        }
+
+        let action = binding.action.clone();
+        let target = binding.target.clone();
+        let result = gs.on_shortcut(shortcut, move |app, _s, event| {
+            if event.state() != ShortcutState::Pressed {
+                return;
+            }
+            if action == SHORTCUT_ACTION_OPEN_PLUGIN {
+                if let Some(plugin_id) = target.as_deref() {
+                    open_plugin_by_shortcut(app, plugin_id);
+                }
+            } else {
+                toggle_window(app);
+            }
+        });
+        match result {
+            Ok(()) => registered.push(binding.clone()),
+            Err(e) => {
+                rollback_registered(app, &registered);
+                return Err(format!(
+                    "快捷键「{}」注册失败（可能已被其它程序占用）: {e}",
+                    binding.shortcut
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 撤销一组已注册的快捷键（注册失败回滚用；失败只记日志，不中断后续清理）。
+fn rollback_registered(app: &tauri::AppHandle, bindings: &[ShortcutBinding]) {
+    let gs = app.global_shortcut();
+    for b in bindings {
+        if let Err(e) = gs.unregister(b.shortcut.as_str()) {
+            eprintln!("回滚快捷键「{}」失败: {e}", b.shortcut);
+        }
+    }
+}
+
+/// 注册（或重新注册）整套快捷键绑定。
+///
+/// - 先 unregister 当前已注册的全部键；
+/// - 再逐条注册新键（呼出/隐藏、打开插件……）；
+/// - 任一条注册失败时**回滚**：优先整体恢复旧绑定
+///   （保证「改动失败 = 一切保持原样」），旧绑定也恢复不了时兜底只注册默认呼出键，
+///   保证呼出功能始终可用。
+fn register_shortcut_bindings(app: &tauri::AppHandle, bindings: &[ShortcutBinding]) -> Result<(), String> {
     let state = app.state::<ActiveShortcutState>();
 
     // 先 unregister 旧键（记录下来，注册失败时用于回滚）
     let old = match state.0.lock() {
-        Ok(mut guard) => guard.take(),
-        Err(_) => None,
+        Ok(mut guard) => std::mem::take(&mut *guard),
+        Err(_) => Vec::new(),
     };
-    if let Some(old) = &old {
-        let _ = gs.unregister(old.as_str());
-    }
+    rollback_registered(app, &old);
 
-    match gs.on_shortcut(shortcut.as_str(), |app, _s, event| {
-        if event.state() == ShortcutState::Pressed {
-            toggle_window(app);
-        }
-    }) {
+    match register_binding_handlers(app, bindings) {
         Ok(()) => {
             if let Ok(mut guard) = state.0.lock() {
-                *guard = Some(shortcut);
+                *guard = bindings.to_vec();
             }
             Ok(())
         }
         Err(e) => {
-            // 回滚：优先恢复旧键；旧键恢复失败再兜底默认键
-            let restore = old.clone().unwrap_or_else(|| DEFAULT_TOGGLE_SHORTCUT.to_string());
-            let mut restored = gs
-                .on_shortcut(restore.as_str(), |app, _s, event| {
-                    if event.state() == ShortcutState::Pressed {
-                        toggle_window(app);
-                    }
-                })
-                .is_ok();
-            if !restored && restore != DEFAULT_TOGGLE_SHORTCUT {
-                // 旧键也被占用等异常情况：最后尝试默认键
-                restored = gs
-                    .on_shortcut(DEFAULT_TOGGLE_SHORTCUT, |app, _s, event| {
-                        if event.state() == ShortcutState::Pressed {
-                            toggle_window(app);
-                        }
-                    })
-                    .is_ok();
+            // 回滚：优先恢复旧绑定；旧绑定恢复不了再兜底只注册默认呼出键
+            let mut restored = register_binding_handlers(app, &old).is_ok();
+            let mut applied = old.clone();
+            if !restored {
+                let fallback = vec![ShortcutBinding {
+                    shortcut: DEFAULT_TOGGLE_SHORTCUT.to_string(),
+                    action: SHORTCUT_ACTION_TOGGLE_WINDOW.to_string(),
+                    target: None,
+                }];
+                restored = register_binding_handlers(app, &fallback).is_ok();
+                applied = if restored { fallback } else { Vec::new() };
             }
-            if restored {
-                if let Ok(mut guard) = state.0.lock() {
-                    *guard = Some(restore);
-                }
+            if let Ok(mut guard) = state.0.lock() {
+                *guard = applied;
             }
-            Err(format!("快捷键注册失败（可能已被其它程序占用）: {e}"))
+            Err(e)
         }
     }
 }
 
 // ===================== HTTP 代理（多级回退） =====================
-fn build_client(timeout_secs: u64, ua: &str) -> Result<reqwest::Client, String> {
+pub(crate) fn build_client(timeout_secs: u64, ua: &str) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .user_agent(ua)
         .timeout(std::time::Duration::from_secs(timeout_secs))
@@ -231,7 +663,42 @@ fn build_client(timeout_secs: u64, ua: &str) -> Result<reqwest::Client, String> 
         .map_err(|e| e.to_string())
 }
 
-const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36 MySearchDesktop/7.9.12";
+pub(crate) const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36 MySearchDesktop/7.9.12";
+
+/// 供插件网关复用的通用请求实现（插件已在前端与网关双重校验过目标地址）。
+/// 与 `http_request` 的差别：不默认塞 GitHub 的 Accept 头，其余行为一致。
+pub(crate) async fn http_request_for_plugin(
+    method: String,
+    url: String,
+    headers: std::collections::HashMap<String, String>,
+    body: Option<String>,
+) -> Result<String, String> {
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err("仅支持 http/https 地址".into());
+    }
+    let client = build_client(30, UA)?;
+    let parsed_method = reqwest::Method::from_bytes(method.to_uppercase().as_bytes())
+        .map_err(|e| format!("非法请求方法: {e}"))?;
+    let mut req = client.request(parsed_method, &url);
+    for (k, v) in headers {
+        req = req.header(k, v);
+    }
+    if let Some(b) = body {
+        req = req.body(b);
+    }
+    let resp = req.send().await.map_err(|e| format!("请求失败: {e}"))?;
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| format!("读取响应失败: {e}"))?;
+    if status.is_success() {
+        Ok(text)
+    } else {
+        let snippet: String = text.chars().take(400).collect();
+        Err(format!("HTTP {}: {}", status.as_u16(), snippet))
+    }
+}
 
 /// HTTP GET 代理：供前端拉取订阅内容（绕开 CORS）
 ///
@@ -855,6 +1322,20 @@ fn open_installer(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// 获取「开机自启动」当前状态（供「设置 → 常规设置」展示）
+#[tauri::command]
+fn get_autostart_enabled(app: tauri::AppHandle) -> Result<bool, String> {
+    is_autostart_enabled(&app)
+}
+
+/// 设置「开机自启动」并立即生效（Windows 上写 HKCU Run 启动项）
+#[tauri::command]
+fn set_autostart_enabled_cmd(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    set_autostart_enabled(&app, enabled)?;
+    write_autostart_pref(&app, enabled);
+    Ok(())
+}
+
 /// 获取默认订阅（内置官方订阅原文本，与油猴版一致）
 #[tauri::command]
 fn get_default_subscribe_text() -> String {
@@ -862,42 +1343,275 @@ fn get_default_subscribe_text() -> String {
         .to_string()
 }
 
-/// 获取当前「呼出/隐藏快捷键」字符串（从 settings store 读取，无自定义则返回默认值）
+/// 获取当前「呼出/隐藏快捷键」字符串（兼容旧接口；等价于绑定列表里
+/// action = toggle-window 的那条，无自定义则返回默认值）
 #[tauri::command]
 fn get_toggle_shortcut(app: tauri::AppHandle) -> String {
     read_toggle_shortcut(&app)
 }
 
-/// 设置「呼出/隐藏快捷键」并立即生效。
+/// 获取全部快捷键绑定（快捷键 / 作用类型 / 作用对象）。
 ///
-/// - 解析 `shortcut` 字符串合法性（由 global-hotkey 校验，支持的格式如 "ctrl+alt+s"）。
-/// - 解析成功 → unregister 旧键 → register 新键。
-/// - 注册成功 → 持久化到 settings store → save()。
-/// - 注册失败 → 恢复旧键（或默认键），返回错误信息。
+/// 返回形态与前端 `src/lib/shortcut-bindings.ts` 的 ShortcutBinding 对齐；
+/// 首次运行返回一条默认的「呼出/隐藏搜索框」绑定。
+#[tauri::command]
+fn get_shortcut_bindings(app: tauri::AppHandle) -> Vec<serde_json::Value> {
+    read_shortcut_bindings(&app)
+        .iter()
+        .map(|b| b.to_value())
+        .collect()
+}
+
+/// 设置「呼出/隐藏快捷键」并立即生效（兼容旧接口：只改这一条绑定，
+/// 其它绑定原样保留；前端新面板走 set_shortcut_bindings）。
 #[tauri::command]
 fn set_toggle_shortcut(app: tauri::AppHandle, shortcut: String) -> Result<(), String> {
     let trimmed = shortcut.trim().to_string();
     if trimmed.is_empty() {
         return Err("快捷键不能为空".into());
     }
-
-    // 检查是否和当前已注册的一致
-    let current = read_toggle_shortcut(&app);
-    if current == trimmed {
+    let mut bindings = read_shortcut_bindings(&app);
+    match bindings
+        .iter_mut()
+        .find(|b| b.action == SHORTCUT_ACTION_TOGGLE_WINDOW)
+    {
+        Some(slot) => slot.shortcut = trimmed,
+        None => bindings.push(ShortcutBinding {
+            shortcut: trimmed,
+            action: SHORTCUT_ACTION_TOGGLE_WINDOW.to_string(),
+            target: None,
+        }),
+    }
+    // 走同一套严格校验：新键可能与某条 open-plugin 绑定撞车（旧接口也不该破坏这条不变式）
+    let parsed = parse_shortcut_bindings_strict(&serde_json::Value::Array(
+        bindings.iter().map(|b| b.to_value()).collect(),
+    ))?;
+    if parsed == read_shortcut_bindings(&app) {
         return Ok(());
     }
+    apply_shortcut_bindings(&app, &parsed)
+}
 
-    // 校验字符串可被 global-hotkey 解析（试注册再撤销，以实际注册结果为准）
-    // 直接用 register_toggle_shortcut — 它会先 unregister 再注册新键
-    register_toggle_shortcut(&app, &trimmed)?;
-
-    // 持久化（注册成功后才写 store；store 不可用时本次生效但不记忆，重启后回默认值）
-    if let Some(store) = settings_store(&app) {
-        store.set(SETTINGS_KEY_TOGGLE_SHORTCUT, serde_json::Value::String(trimmed));
-        store.save().map_err(|e| format!("保存设置失败: {e}"))?;
+/// 设置整套快捷键绑定并立即生效（**设置 → 快捷键** 面板的主入口）。
+///
+/// 校验规则（与前端 `validateBindings` 一致，Rust 侧是最后一道闸门）：
+/// - 每条都必须能解析成组合键（"ctrl+alt+s"）；
+/// - 呼出/隐藏最多一条；
+/// - 组合键不允许重复。
+///
+/// 校验通过后整体重新注册；任一条注册失败（被其它程序占用等）会回滚到
+/// 改动前的状态且**不落盘**，并返回错误信息。
+#[tauri::command]
+fn set_shortcut_bindings(
+    app: tauri::AppHandle,
+    bindings: Vec<serde_json::Value>,
+) -> Result<(), String> {
+    let parsed = parse_shortcut_bindings_strict(&serde_json::Value::Array(bindings))?;
+    // 与当前生效值完全一致：无需重注册，直接成功（避免平白打断）
+    if parsed == read_shortcut_bindings(&app) {
+        return Ok(());
     }
+    apply_shortcut_bindings(&app, &parsed)
+}
 
+/// 注册整套绑定并持久化（注册失败时回滚且不落盘）。
+fn apply_shortcut_bindings(app: &tauri::AppHandle, bindings: &[ShortcutBinding]) -> Result<(), String> {
+    register_shortcut_bindings(app, bindings)?;
+    write_shortcut_bindings(app, bindings);
     Ok(())
+}
+
+// ===================== 备份 / 导入 / 还原 =====================
+//
+// 前端负责「把 localStorage 里的用户态收集成一个 JSON」，Rust 负责
+// 「连同插件文件一起打包成 .msbackup」「还原前留底」「把归档里的设置与插件写回」。
+// 之所以不把插件文件也丢给前端走 IPC：插件目录可能有几百 MB（含后端可执行文件），
+// 过一遍 JSON + base64 会白白撑爆内存。
+
+/// 可备份的 Rust 侧设置键（前端导出时读、导入时写）。
+///
+/// 白名单而非黑名单：settings.json 里出现新键时，「要不要跨设备同步」
+/// 应当由写这个键的人显式决定。
+const BACKUP_SETTINGS_KEYS: &[&str] = &[
+    SETTINGS_KEY_SHORTCUT_BINDINGS,
+    SETTINGS_KEY_AUTOSTART_ENABLED,
+];
+
+/// 读取可备份的设置项（返回一个 JSON 对象）
+fn read_backup_settings(app: &tauri::AppHandle) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    if let Some(store) = settings_store(app) {
+        for key in BACKUP_SETTINGS_KEYS {
+            if let Some(v) = store.get(*key) {
+                map.insert((*key).to_string(), v);
+            }
+        }
+    }
+    serde_json::Value::Object(map)
+}
+
+/// 写回可备份的设置项（**合并式**：只覆盖传入对象里出现的键）。
+///
+/// 快捷键与自启动都需要「立即生效」：写完 store 后立刻重新注册快捷键、
+/// 应用自启动偏好，否则用户会看到「设置里已经是备份里的键，但按下去没反应」。
+pub(crate) fn write_backup_settings(
+    app: &tauri::AppHandle,
+    values: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    let Some(store) = settings_store(app) else {
+        return Err("设置存储不可用，无法写回设置".into());
+    };
+    for (key, value) in values {
+        if !BACKUP_SETTINGS_KEYS.contains(&key.as_str()) {
+            continue;
+        }
+        store.set(key.to_string(), value.clone());
+    }
+    store.save().map_err(|e| format!("保存设置失败: {e}"))?;
+
+    // 快捷键：重新注册（失败不阻断——设置已落盘，重启后仍会生效）
+    if values.contains_key(SETTINGS_KEY_SHORTCUT_BINDINGS) {
+        let bindings = read_shortcut_bindings(app);
+        if let Err(e) = register_shortcut_bindings(app, &bindings) {
+            eprintln!("还原后重新注册快捷键失败（重启应用生效）: {e}");
+        }
+    }
+    // 开机自启动：把系统启动项对齐到还原后的偏好
+    if let Some(enabled) = values
+        .get(SETTINGS_KEY_AUTOSTART_ENABLED)
+        .and_then(|v| v.as_bool())
+    {
+        if let Err(e) = set_autostart_enabled(app, enabled) {
+            eprintln!("还原后应用开机自启动失败: {e}");
+        }
+    }
+    Ok(())
+}
+
+/// 停掉某个插件的后台进程（还原插件目录前释放文件占用）。
+/// 还原会整体替换 `plugins/`，运行中的插件可执行文件在 Windows 上是锁死的。
+pub(crate) fn plugin_host_stop_backend(app: &tauri::AppHandle, plugin_id: &str) {
+    let _ = plugin_host::plugin_backend_stop(app.clone(), plugin_id.to_string());
+}
+
+/// 导出备份：把「前端快照 + Rust 侧设置 + 插件文件」打成 .msbackup 写进备份目录。
+///
+/// 返回归档路径；`to_downloads` 为 true 时额外复制一份到系统「下载」目录，
+/// 方便用户直接拖走（这是「导出文件」最常见的诉求）。
+#[tauri::command]
+fn backup_export(
+    app: tauri::AppHandle,
+    local_storage: serde_json::Value,
+    to_downloads: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    let settings = read_backup_settings(&app);
+    let version = app.package_info().version.to_string();
+    let path = backup::export_to_backups(&app, local_storage, settings, &version, "my-search-")?;
+    let mut exported = path.clone();
+    if to_downloads.unwrap_or(false) {
+        if let Ok(dir) = app.path().download_dir() {
+            let name = std::path::Path::new(&path)
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "my-search.msbackup".to_string());
+            let dest = dir.join(name);
+            if std::fs::copy(&path, &dest).is_ok() {
+                exported = dest.to_string_lossy().to_string();
+            }
+        }
+    }
+    let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    Ok(serde_json::json!({ "path": path, "exported": exported, "size": bytes }))
+}
+
+/// 把当前状态打包写进备份目录（云同步上传前的「本机快照」，
+/// 也是「自动备份」的落点；与 backup_export 的差别只是名字前缀与不复制到下载目录）
+#[tauri::command]
+fn backup_snapshot(
+    app: tauri::AppHandle,
+    local_storage: serde_json::Value,
+    prefix: Option<String>,
+) -> Result<String, String> {
+    let settings = read_backup_settings(&app);
+    let version = app.package_info().version.to_string();
+    let prefix = prefix.unwrap_or_else(|| "snapshot-".to_string());
+    // 前缀来自面板固定选项，这里仍做一次白名单化，避免被拼出路径
+    let prefix: String = prefix
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    let prefix = if prefix.is_empty() {
+        "snapshot-".to_string()
+    } else {
+        prefix
+    };
+    let prefix = if prefix.ends_with('-') {
+        prefix
+    } else {
+        format!("{prefix}-")
+    };
+    backup::export_to_backups(&app, local_storage, settings, &version, &prefix)
+}
+
+/// 预览归档内容（导入前的「看清再决定」）
+#[tauri::command]
+fn backup_inspect(app: tauri::AppHandle, path: String) -> Result<serde_json::Value, String> {
+    let bytes = backup::read_backup_file(&app, &path)?;
+    backup::inspect_archive(&bytes)
+}
+
+/// 备份目录路径（面板「打开目录」）
+#[tauri::command]
+fn backup_dir(app: tauri::AppHandle) -> Result<String, String> {
+    backup::backups_dir_path(&app)
+}
+
+/// 打开备份目录（系统文件管理器）
+#[tauri::command]
+fn backup_open_dir(app: tauri::AppHandle) -> Result<(), String> {
+    let dir = backup::backups_dir_path(&app)?;
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_path(dir, None::<&str>)
+        .map_err(|e| format!("打开备份目录失败: {e}"))
+}
+
+/// 用系统对话框导出：把当前状态导出到用户选定路径（覆盖确认由系统弹窗负责）
+#[tauri::command]
+fn backup_export_as(
+    app: tauri::AppHandle,
+    local_storage: serde_json::Value,
+    path: String,
+) -> Result<serde_json::Value, String> {
+    let settings = read_backup_settings(&app);
+    let version = app.package_info().version.to_string();
+    let bytes = backup::build_archive(&app, local_storage, settings, &version)?;
+    let size = bytes.len() as u64;
+    std::fs::write(&path, &bytes).map_err(|e| format!("写入失败: {e}"))?;
+    Ok(serde_json::json!({ "path": path, "size": size }))
+}
+
+/// 还原备份。
+///
+/// `categories`：要还原的分区（localStorage / settings / plugins / pluginData），
+/// 空数组 = 全部。Rust 负责 settings 与插件部分，localStorage 交回前端写。
+/// 返回里带上「还原前留底路径」，前端据此给用户一条后悔药。
+#[tauri::command]
+fn backup_restore(
+    app: tauri::AppHandle,
+    path: String,
+    categories: Option<Vec<String>>,
+) -> Result<serde_json::Value, String> {
+    let bytes = backup::read_backup_file(&app, &path)?;
+    let version = app.package_info().version.to_string();
+    let only = categories.unwrap_or_default();
+    let (report, local_storage, manifest) = backup::restore_archive(&app, &bytes, &only, &version)?;
+    let mut value = serde_json::to_value(&report).map_err(|e| e.to_string())?;
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("localStorage".into(), local_storage);
+        obj.insert("manifest".into(), manifest);
+    }
+    Ok(value)
 }
 
 // ===================== 托盘 =====================
@@ -1036,7 +1750,12 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .manage(ActiveShortcutState(Mutex::new(None)))
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
+        .plugin(tauri_plugin_dialog::init())
+        .manage(ActiveShortcutState(Mutex::new(Vec::new())))
         .manage(DownloadedInstallerPath(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             http_get,
@@ -1048,9 +1767,52 @@ pub fn run() {
             get_default_subscribe_text,
             get_toggle_shortcut,
             set_toggle_shortcut,
+            get_shortcut_bindings,
+            set_shortcut_bindings,
+            get_autostart_enabled,
+            set_autostart_enabled_cmd,
             check_update,
             start_update_download,
             open_installer,
+            // ---------- 插件宿主 ----------
+            plugin_host::plugin_install,
+            plugin_host::plugin_remove,
+            plugin_host::plugin_purge_data,
+            plugin_host::plugin_link_dir,
+            plugin_host::plugin_read_text,
+            plugin_host::plugin_read_binary,
+            plugin_host::plugin_list_files,
+            plugin_host::plugin_read_local_base64,
+            plugin_host::plugin_open_dir,
+            plugin_host::plugin_check_path,
+            plugin_host::plugin_gateway_sync,
+            plugin_host::plugin_net_fetch,
+            plugin_host::plugin_backend_start,
+            plugin_host::plugin_backend_stop,
+            plugin_host::plugin_backend_restart,
+            plugin_host::plugin_backend_list,
+            plugin_host::plugin_backend_call,
+            plugin_host::plugin_read_log,
+            plugin_host::plugin_clear_log,
+            plugin_host::plugin_read_dev_manifest,
+            // 目录挂载插件（开发模式）的自动重载：登记/取消源目录监听
+            plugin_host::plugin_watch_dir,
+            // ---------- 备份 / 导入 / 还原 ----------
+            backup_export,
+            backup_export_as,
+            backup_snapshot,
+            backup_inspect,
+            backup_restore,
+            backup_dir,
+            backup_open_dir,
+            // ---------- 云同步（WebDAV / Google Drive / OneDrive） ----------
+            cloud::sync_get_config,
+            cloud::sync_set_config,
+            cloud::sync_test,
+            cloud::sync_remote_meta,
+            cloud::sync_upload,
+            cloud::sync_download,
+            cloud::sync_clear_credentials,
         ])
         .setup(|app| {
             // 主窗口使用固定 WebView 数据目录（localStorage 持久化）
@@ -1062,11 +1824,14 @@ pub fn run() {
                     position_window_top_center(&main, &monitor, width);
                 }
             }
-            // 读取自定义快捷键（无自定义则用默认值），注册
-            let shortcut = read_toggle_shortcut(app.handle());
-            if let Err(e) = register_toggle_shortcut(app.handle(), &shortcut) {
+            // 读取自定义快捷键绑定（无自定义则用默认呼出键），逐条注册
+            let bindings = read_shortcut_bindings(app.handle());
+            if let Err(e) = register_shortcut_bindings(app.handle(), &bindings) {
                 eprintln!("注册全局快捷键失败: {e}");
             }
+            apply_autostart_preference(app.handle());
+            // 插件后台进程：只拉起「开机自启」已开启的插件（其它按需启动）
+            plugin_host::autostart_enabled_backends(app.handle());
             setup_tray(app.handle())?;
             Ok(())
         })
@@ -1089,8 +1854,15 @@ pub fn run() {
             }
             let _ = window.hide();
         })
-        .run(tauri::generate_context!())
-        .expect("运行我的搜索桌面版失败");
+        .build(tauri::generate_context!())
+        .expect("构建我的搜索桌面版失败")
+        .run(|_app, event| {
+            // 退出前释放目录挂载插件的文件监听句柄（进程即将结束，收干净更稳妥）
+            if let tauri::RunEvent::Exit = event {
+                plugin_watch::stop_dispatch();
+                plugin_watch::unwatch_all();
+            }
+        });
 }
 
 #[cfg(test)]
@@ -1115,6 +1887,261 @@ mod tests {
     #[test]
     fn default_toggle_shortcut_is_valid() {
         assert!(Shortcut::try_from(super::DEFAULT_TOGGLE_SHORTCUT).is_ok());
+    }
+
+    #[test]
+    fn parse_bindings_round_trips() {
+        use super::{
+            parse_shortcut_bindings, parse_shortcut_bindings_strict, ShortcutBinding,
+            SHORTCUT_ACTION_OPEN_PLUGIN, SHORTCUT_ACTION_TOGGLE_WINDOW,
+        };
+        let raw = serde_json::json!([
+            { "shortcut": "ctrl+alt+s", "action": SHORTCUT_ACTION_TOGGLE_WINDOW },
+            { "shortcut": "ctrl+alt+1", "action": SHORTCUT_ACTION_OPEN_PLUGIN, "target": "com.a.b" },
+        ]);
+        let parsed = parse_shortcut_bindings(&raw);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].target, None);
+        assert_eq!(parsed[1].target.as_deref(), Some("com.a.b"));
+        // 序列化后再反序列化应完全一致（settings.json 的读写往返）
+        let values: Vec<serde_json::Value> = parsed.iter().map(|b| b.to_value()).collect();
+        assert_eq!(parse_shortcut_bindings(&serde_json::Value::Array(values)), parsed);
+        // 严格版同样接受
+        assert_eq!(parse_shortcut_bindings_strict(&raw).unwrap(), parsed);
+
+        // 宽容版：脏数据跳过而不是整体失败
+        let dirty = serde_json::json!([
+            { "shortcut": "", "action": SHORTCUT_ACTION_TOGGLE_WINDOW },
+            { "shortcut": "ctrl+alt+2", "action": "unknown-action" },
+            { "shortcut": "ctrl+alt+3", "action": SHORTCUT_ACTION_OPEN_PLUGIN },
+            { "shortcut": "ctrl+alt+4", "action": SHORTCUT_ACTION_OPEN_PLUGIN, "target": " com.x.y " },
+        ]);
+        let cleaned = parse_shortcut_bindings(&dirty);
+        assert_eq!(cleaned.len(), 1);
+        assert_eq!(cleaned[0].target.as_deref(), Some("com.x.y"));
+
+        // 宽容版对同一组合键去重、对 toggle-window 只保留第一条
+        let dup = serde_json::json!([
+            { "shortcut": "ctrl+alt+s", "action": SHORTCUT_ACTION_TOGGLE_WINDOW },
+            { "shortcut": "ctrl+alt+s", "action": SHORTCUT_ACTION_OPEN_PLUGIN, "target": "com.a.b" },
+            { "shortcut": "ctrl+alt+9", "action": SHORTCUT_ACTION_TOGGLE_WINDOW },
+        ]);
+        let deduped = parse_shortcut_bindings(&dup);
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].shortcut, "ctrl+alt+s");
+
+        // 严格版：重复组合键 / 非法 action / 空列表都报错
+        assert!(parse_shortcut_bindings_strict(&dup).is_err());
+        assert!(parse_shortcut_bindings_strict(&serde_json::json!([])).is_err());
+        assert!(parse_shortcut_bindings_strict(&serde_json::json!([{ "action": "x" }])).is_err());
+        assert!(parse_shortcut_bindings_strict(
+            &serde_json::json!([
+                { "shortcut": "ctrl+alt+s", "action": SHORTCUT_ACTION_TOGGLE_WINDOW },
+                { "shortcut": "ctrl+shift+s", "action": SHORTCUT_ACTION_TOGGLE_WINDOW },
+            ])
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn binding_serializes_with_target_field() {
+        use super::{ShortcutBinding, SHORTCUT_ACTION_OPEN_PLUGIN};
+        let b = ShortcutBinding {
+            shortcut: "ctrl+alt+1".into(),
+            action: SHORTCUT_ACTION_OPEN_PLUGIN.into(),
+            target: Some("com.zhuangjie.ai-ask".into()),
+        };
+        assert_eq!(
+            b.to_value(),
+            serde_json::json!({
+                "shortcut": "ctrl+alt+1",
+                "action": "open-plugin",
+                "target": "com.zhuangjie.ai-ask",
+            })
+        );
+    }
+
+    /// 「打开插件」绑定必须带作用对象；「呼出/隐藏」必须唯一。
+    ///
+    /// 注：注册失败时的回滚（被其它程序占用 → 恢复旧绑定）依赖真实 AppHandle 与
+    /// 桌面窗口环境，纯单测无法构造，由 test/_e2e-plugin-shortcut.mjs 在真机上覆盖
+    /// （真实热键注册 + 真实按键触发）。
+    #[test]
+    fn open_plugin_binding_requires_target() {
+        use super::{parse_shortcut_bindings_strict, SHORTCUT_ACTION_OPEN_PLUGIN, SHORTCUT_ACTION_TOGGLE_WINDOW};
+
+        // 缺作用对象 → 拒绝（否则注册出来的键不知道该打开谁）
+        assert!(parse_shortcut_bindings_strict(&serde_json::json!([
+            { "shortcut": "ctrl+alt+1", "action": SHORTCUT_ACTION_OPEN_PLUGIN }
+        ]))
+        .is_err());
+        // 只有 target 缺省、action 合法时才通过
+        assert!(parse_shortcut_bindings_strict(&serde_json::json!([
+            { "shortcut": "ctrl+alt+1", "action": SHORTCUT_ACTION_OPEN_PLUGIN, "target": "com.a.b" }
+        ]))
+        .is_ok());
+        // 呼出/隐藏必须恰好一条（注册逻辑依赖这个不变式：它给 toggle 保留 handler）
+        assert!(parse_shortcut_bindings_strict(&serde_json::json!([
+            { "shortcut": "ctrl+alt+s", "action": SHORTCUT_ACTION_TOGGLE_WINDOW },
+            { "shortcut": "ctrl+alt+9", "action": SHORTCUT_ACTION_TOGGLE_WINDOW }
+        ]))
+        .is_err());
+    }
+
+    #[test]
+    fn autostart_defaults_to_enabled() {
+        // 产品规则：默认开机自启（安装后即随系统登录启动），用户在设置里可关闭。
+        assert!(super::DEFAULT_AUTOSTART_ENABLED);
+    }
+
+    /// 备份归档：路径安全校验（zip-slip 之外，Rust 侧还要挡住绝对路径与盘符）
+    #[test]
+    fn backup_rejects_unsafe_paths() {
+        use super::backup::is_safe_relative_public;
+        for bad in ["", "../x", "a/../../b", "/etc/passwd", "C:/x", "\\\\server\\share", "a\0b"] {
+            assert!(!is_safe_relative_public(bad), "应拒绝: {bad}");
+        }
+        for good in ["a.txt", "plugins/com.a.b/plugin.json", "plugin-data/com.a.b/db.sqlite"] {
+            assert!(is_safe_relative_public(good), "应接受: {good}");
+        }
+    }
+
+    /// 归档往返：打包 → 预览 → 条目内容一致（不依赖 AppHandle 的部分）
+    #[test]
+    fn backup_archive_round_trips() {
+        use super::backup::{build_archive_from_parts, inspect_archive};
+        let local = serde_json::json!({
+            "subscribes": "<tis::https://example.com/a.ms />",
+            "ITEM_WEIGHT_CACHE_KEY": { "abc": 3 },
+        });
+        let settings = serde_json::json!({ "autostart_enabled": true });
+        let files: Vec<(String, Vec<u8>)> = vec![
+            ("plugins/com.demo/plugin.json".into(), br#"{"id":"com.demo"}"#.to_vec()),
+            ("plugin-data/com.demo/db.bin".into(), vec![1, 2, 3, 4]),
+        ];
+        let bytes = build_archive_from_parts(local.clone(), settings.clone(), files, "9.9.9").unwrap();
+        let info = inspect_archive(&bytes).unwrap();
+        assert_eq!(info["formatVersion"], 1);
+        assert_eq!(info["appVersion"], "9.9.9");
+        assert_eq!(info["localStorageKeys"], 2);
+        assert_eq!(info["pluginIds"][0], "com.demo");
+        assert_eq!(info["hasPlugins"], true);
+        assert_eq!(info["hasPluginData"], true);
+        // 同一份数据再解出来必须一模一样（还原路径读取的正是这些条目）
+        let entries = super::backup::read_archive_public(&bytes).unwrap();
+        let restored: serde_json::Value =
+            serde_json::from_slice(&entries["state/local-storage.json"]).unwrap();
+        assert_eq!(restored, local);
+        let restored_settings: serde_json::Value =
+            serde_json::from_slice(&entries["state/settings.json"]).unwrap();
+        assert_eq!(restored_settings, settings);
+        assert_eq!(entries["plugin-data/com.demo/db.bin"], vec![1u8, 2, 3, 4]);
+    }
+
+    /// 拒绝「不是备份包」的文件，避免用户选错文件时给出莫名其妙的报错
+    #[test]
+    fn backup_inspect_rejects_foreign_zip() {
+        use super::backup::inspect_archive;
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            use std::io::Write;
+            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            w.start_file("random.txt", opts).unwrap();
+            w.write_all(b"hello").unwrap();
+            w.finish().unwrap();
+        }
+        let err = inspect_archive(&buf).unwrap_err();
+        assert!(err.contains("不是「我的搜索」的备份归档"), "实际: {err}");
+    }
+
+/// HTTP 日期解析（WebDAV 的 Last-Modified）
+    #[test]
+    fn parses_remote_timestamps() {
+        use super::cloud::parse_http_date_public;
+        // RFC 1123（WebDAV 的 Last-Modified）
+        assert_eq!(parse_http_date_public("Wed, 21 Oct 2015 07:28:00 GMT"), 1445412480000);
+        // 解析不出来返回 0（上层退化成「按版本号判断」），而不是 panic
+        assert_eq!(parse_http_date_public("garbage"), 0);
+    }
+
+    /// 远端路径安全（用户可自定义远端文件名，不能让它跑到父目录）
+    #[test]
+    fn sync_rejects_unsafe_remote_paths() {
+        use super::cloud;
+        assert!(!cloud::is_safe_remote_path_public("../x.msbackup"));
+        assert!(!cloud::is_safe_remote_path_public("/abs.msbackup"));
+        assert!(!cloud::is_safe_remote_path_public("https://evil/x"));
+        assert!(cloud::is_safe_remote_path_public("my-search-backup.msbackup"));
+        assert!(cloud::is_safe_remote_path_public("folder/backup.msbackup"));
+    }
+
+    #[test]
+    fn autostart_pref_round_trips_through_json() {
+        assert_eq!(serde_json::Value::Bool(false).as_bool(), Some(false));
+        assert_eq!(serde_json::Value::Bool(true).as_bool(), Some(true));
+        // 历史文件里缺键 / 类型不符时 as_bool() 返回 None，上层回落到默认值
+        assert_eq!(serde_json::Value::String("true".into()).as_bool(), None);
+    }
+
+    #[test]
+    fn parses_registered_exe_path_from_run_value() {
+        use super::parse_autostart_exe;
+        // auto-launch 在无参数时写成裸路径（可能带结尾空格）
+        assert_eq!(
+            parse_autostart_exe(r"C:\Users\a\AppData\Local\MySearch\my-search-desktop.exe "),
+            r"C:\Users\a\AppData\Local\MySearch\my-search-desktop.exe"
+        );
+        // 带引号 + 参数
+        assert_eq!(
+            parse_autostart_exe(r#""C:\Program Files\MySearch\MySearch.exe" --from-autostart"#),
+            r"C:\Program Files\MySearch\MySearch.exe"
+        );
+        // 带引号、无参数
+        assert_eq!(
+            parse_autostart_exe(r#""D:\a b\MySearch.exe""#),
+            r"D:\a b\MySearch.exe"
+        );
+        // 不带引号 + 参数：截到 .exe 为止
+        assert_eq!(
+            parse_autostart_exe(r"D:\code\my-search-desktop\target\debug\my-search-desktop.exe --silent"),
+            r"D:\code\my-search-desktop\target\debug\my-search-desktop.exe"
+        );
+        // 大小写不敏感（.EXE）
+        assert_eq!(parse_autostart_exe(r"C:\X\App.EXE"), r"C:\X\App.EXE");
+        // 完整路径里的 .exe 不会被误当参数起点，目录名含 .exe 的极端情况按最后一个切
+        assert_eq!(
+            parse_autostart_exe(r"C:\tools\foo.exe\packed.exe --x"),
+            r"C:\tools\foo.exe\packed.exe"
+        );
+    }
+
+    #[test]
+    fn autostart_path_match_ignores_case_slash_and_args() {
+        use super::autostart_path_matches;
+        let current = r"D:\code\my-search-desktop\src-tauri\target\debug\my-search-desktop.exe";
+        // 与注册表实际写入的形态一致（含结尾空格）
+        assert!(autostart_path_matches(&format!("{current} "), current));
+        // 大小写不同视为同一文件（Windows 路径大小写不敏感）
+        assert!(autostart_path_matches(&current.to_uppercase(), current));
+        // 正反斜杠等价
+        assert!(autostart_path_matches(
+            r"D:/code/my-search-desktop/src-tauri/target/debug/my-search-desktop.exe",
+            current
+        ));
+        // 换了位置（旧 debug 路径 vs 新安装路径）必须判定为「不一致」→ 触发自愈
+        assert!(!autostart_path_matches(
+            r"C:\Program Files\MySearch\MySearch.exe",
+            current
+        ));
+        // 同目录不同文件名不算一致
+        assert!(!autostart_path_matches(
+            r"D:\code\my-search-desktop\src-tauri\target\debug\other.exe",
+            current
+        ));
+        // 空值不得误判为一致（否则自愈逻辑会跳过修复）
+        assert!(!autostart_path_matches("", current));
+        assert!(!autostart_path_matches(current, ""));
     }
 
     #[test]

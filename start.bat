@@ -46,12 +46,17 @@ if not exist "node_modules" (
     echo [1/3] Dependencies found, skipping install.
 )
 
-echo [2/3] Freeing dev port 1420 if it is occupied ...
+echo [2/3] Cleaning up leftover app instances ...
+taskkill /F /IM my-search-desktop.exe >nul 2>nul
+
+echo [3/3] Freeing dev port 1420 if it is occupied ...
 for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":1420" ^| findstr "LISTENING"') do (
     taskkill /F /PID %%a >nul 2>nul
 )
 
-echo [3/3] Starting app - first Rust build may take a few minutes, please wait ...
+echo.
+echo Starting app - first Rust build may take a few minutes, please wait ...
+echo (if the window stays blank, close this window, then run start.bat again)
 echo.
 call npm run tauri dev
 

@@ -31,6 +31,7 @@ import type { DesignatedSingTag } from "./subscribe-parser.ts";
 import { parseTags, extractTagsAndCleanContent } from "./tags.ts";
 import { overlapMatchingDegreeForObjectArray } from "./overlap.ts";
 import { storageGet, storageSet, storageRemove, isUrl } from "./util.ts";
+import { pluginIdOf, pluginKeywordOf } from "./plugins/plugin-items.ts";
 import type { SearchItem, SearchResult, SubscribeItem, TagStat } from "../types/index.ts";
 
 /** 搜索结果包装（对外导出，便于视图层引用） */
@@ -47,14 +48,20 @@ const SPACE = "<Space>";
 const SPACE_CHAR = " ";
 
 // ---------- 数据缓存（还原油猴版 registry.searchData） ----------
-/** 缓存键：加载完成的全部数据项 + 过期时间（还原 SEARCH_DATA_KEY） */
-export const SEARCH_DATA_KEY = "SEARCH_DATA_KEY";
-/** 上一次加载的数据项 id 集合（还原 OLD_SEARCH_DATA_KEY） */
-const OLD_SEARCH_DATA_KEY = "OLD_SEARCH_DATAS_KEY";
-/** 数据有效期（还原 effectiveDuration：12 小时） */
-export const EFFECTIVE_DURATION = 1000 * 60 * 60 * 12;
-/** 订阅列表指纹（用于判断订阅是否变化，变化则立即失效缓存） */
-const SUBSCRIBE_FINGERPRINT_KEY = "SUBSCRIBE_FINGERPRINT_CACHE_KEY";
+// 存储键与时长常量拆到零依赖的 search-keys.ts：设置窗口（插件面板 / 缓存面板）
+// 只需要键名，若从这里导入会把 pinyin-pro 一起拖进设置窗口（详见该文件注释）。
+export {
+  SEARCH_DATA_KEY,
+  OLD_SEARCH_DATA_KEY,
+  EFFECTIVE_DURATION,
+  SUBSCRIBE_FINGERPRINT_KEY,
+} from "./search-keys.ts";
+import {
+  SEARCH_DATA_KEY,
+  OLD_SEARCH_DATA_KEY,
+  EFFECTIVE_DURATION,
+  SUBSCRIBE_FINGERPRINT_KEY,
+} from "./search-keys.ts";
 
 /** 数据缓存包结构 */
 export interface SearchDataCache {
@@ -363,14 +370,18 @@ export class SearchEngine {
     try {
       // 剥离派生索引字段（index / _titleUpper / _titlePinyin …）：
       // 它们体积大且可由 _buildIndex 重建，不写入缓存以减小占用
-      const slim = data.map((item) => {
-        const copy: Record<string, unknown> = {};
-        for (const key of Object.keys(item)) {
-          if (key === "index" || key.startsWith("_")) continue;
-          copy[key] = item[key];
-        }
-        return copy as SearchItem;
-      });
+      const slim = data
+        // 插件贡献的项不进缓存：它们来自本地插件注册表，装/卸/禁用随时变化，
+        // 且缓存带「订阅指纹」，掺进去会让既有的失效判定失真（详见 plugin-items.ts）
+        .filter((item) => pluginIdOf(item) == null)
+        .map((item) => {
+          const copy: Record<string, unknown> = {};
+          for (const key of Object.keys(item)) {
+            if (key === "index" || key.startsWith("_")) continue;
+            copy[key] = item[key];
+          }
+          return copy as SearchItem;
+        });
       storageSet(SEARCH_DATA_KEY, {
         data: slim,
         expire: Date.now() + EFFECTIVE_DURATION,
@@ -428,6 +439,8 @@ export class SearchEngine {
       /* 脚本项解析失败不影响其它数据 */
     }
     this._buildIndex();
+    // 插件项挂在订阅数据之后（不进缓存，因此这里必须重新合成）
+    this._attachExtraItems();
     try {
       storageSet(TAGS_KEY, Object.values(this.tagsMap));
     } catch (e) {
@@ -634,8 +647,12 @@ export class SearchEngine {
           /* ignore */
         }
       }
+      // 插件贡献的搜索项：在订阅数据全部收尾之后追加（不写缓存、不参与新数据记录）
+      const pluginCount = this._attachExtraItems();
       console.log(
-        `[我的搜索] 数据加载完成: ${this.searchData.length} 条 / ${this.loadedCount} 个内容源` +
+        `[我的搜索] 数据加载完成: ${this.searchData.length} 条` +
+          (pluginCount > 0 ? `（含插件 ${pluginCount} 条）` : "") +
+          ` / ${this.loadedCount} 个内容源` +
           (this.failedUrls.length ? `，失败 ${this.failedUrls.length} 个` : "")
       );
       // 收尾强制上报最终进度（不受节流影响，保证最终条数一定刷出）
@@ -708,38 +725,91 @@ export class SearchEngine {
   _buildIndex(): void {
     const tagsMap: Record<string, TagStat> = {};
     for (let i = 0; i < this.searchData.length; i++) {
-      const item = this.searchData[i];
-      item.index = i;
-
-      // 给URL包含 [[...keyword...]] 模板的项添加 [可搜索] 标签（还原 refreshTags）
-      // 必须在 title 变量捕获前执行，否则索引字段不包含该标签
-      if (this._isSearchableItem(item) && !(item.title ?? "").includes(SEARCH_PRO_TAG)) {
-        item.title = SEARCH_PRO_TAG + (item.title ?? "");
-      }
-
-      const title = String(item.title || "");
-      const desc = String(item.desc || "");
-      const resource = String(item.resource || "");
-
-      item._titleUpper = title.toUpperCase();
-      item._descUpper = desc.toUpperCase();
-      // 简洁写法：只传标题/描述，避免把索引字段自身作为参数传入了 toPinyin
-      item._titlePinyin = this.toPinyin(title) ?? "";
-      item._descPinyin = this.toPinyin(desc) ?? "";
-
-      // 内容（links + resource + vassal）前 4096 字符
-      const content = `${linksToString(item.links)}${resource}${item.vassal || ""}`;
-      item._contentUpper = content.substring(0, 4096).toUpperCase();
-
-      // 模糊匹配用：清理标签后的标题，以及 desc+tags
-      const { tags, cleaned } = extractTagsAndCleanContent(title);
-      item._cleanedTitleUpper = cleaned.toUpperCase();
-      item._descTagsUpper = `${desc}${tags.join()}`.toUpperCase();
-
-      // 采集标签统计
-      parseTags<SearchItem>([item], (it) => String(it.title ?? ""), tagsMap);
+      this._indexItem(this.searchData[i], i, tagsMap);
     }
     this.tagsMap = tagsMap;
+  }
+
+  /** 为单条数据建立检索索引（供整体重建与「后挂插件项」共用） */
+  _indexItem(item: SearchItem, index: number, tagsMap: Record<string, TagStat>): void {
+    item.index = index;
+
+    // 给 URL 包含 [[...keyword...]] 模板的项添加 [可搜索] 标签（还原 refreshTags）
+    // 必须在 title 变量捕获前执行，否则索引字段不包含该标签
+    if (this._isSearchableItem(item) && !(item.title ?? "").includes(SEARCH_PRO_TAG)) {
+      item.title = SEARCH_PRO_TAG + (item.title ?? "");
+    }
+    // 插件贡献的「命令型」条目（声明了 keyword）同样要能被子搜索命中：
+    // PRO 模式（`父 : 子`）只检索带 [可搜索] 的项，而插件项的 resource 通常是空的
+    // （界面由插件自己渲染，不是 URL 模板），不补这个标签的话，
+    // 「按 Tab 进入子搜索 → 插件项从结果里消失」，onSubKeyword 永远收不到消息。
+    if (
+      pluginIdOf(item) != null &&
+      pluginKeywordOf(item) != null &&
+      !(item.title ?? "").includes(SEARCH_PRO_TAG)
+    ) {
+      item.title = SEARCH_PRO_TAG + (item.title ?? "");
+    }
+
+    const title = String(item.title || "");
+    const desc = String(item.desc || "");
+    const resource = String(item.resource || "");
+
+    item._titleUpper = title.toUpperCase();
+    item._descUpper = desc.toUpperCase();
+    // 简洁写法：只传标题/描述，避免把索引字段自身作为参数传入了 toPinyin
+    item._titlePinyin = this.toPinyin(title) ?? "";
+    item._descPinyin = this.toPinyin(desc) ?? "";
+
+    // 内容（links + resource + vassal）前 4096 字符
+    const content = `${linksToString(item.links)}${resource}${item.vassal || ""}`;
+    item._contentUpper = content.substring(0, 4096).toUpperCase();
+
+    // 模糊匹配用：清理标签后的标题，以及 desc+tags
+    const { tags, cleaned } = extractTagsAndCleanContent(title);
+    item._cleanedTitleUpper = cleaned.toUpperCase();
+    item._descTagsUpper = `${desc}${tags.join()}`.toUpperCase();
+
+    // 采集标签统计
+    parseTags<SearchItem>([item], (it) => String(it.title ?? ""), tagsMap);
+  }
+
+  /**
+   * 插件贡献的搜索项提供者（由搜索窗口注入）。
+   *
+   * 为什么不直接把插件项塞进 `loadAll` 的产物：插件项来自本地注册表，
+   * 与「订阅数据」的生命周期完全不同（装/卸/禁用即时生效、不写缓存、
+   * 不参与新数据标记与标签统计）。这里在订阅数据处理**全部收尾之后**
+   * 才追加，并只对追加的部分建索引。
+   */
+  extraItemsProvider: (() => SearchItem[]) | null = null;
+
+  /**
+   * 把插件贡献的搜索项挂到检索库尾部（幂等：先摘掉旧的插件项再挂新的）。
+   * @returns 实际挂上的插件项条数
+   */
+  _attachExtraItems(): number {
+    const provider = this.extraItemsProvider;
+    // 先摘除上一轮的插件项（重新合成后对象是新的，必须整体替换）
+    if (this.searchData.some((it) => pluginIdOf(it) != null)) {
+      this.searchData = this.searchData.filter((it) => pluginIdOf(it) == null);
+    }
+    if (!provider) return 0;
+    let items: SearchItem[] = [];
+    try {
+      items = provider() ?? [];
+    } catch (e) {
+      console.warn("[我的搜索] 合成插件搜索项失败:", e);
+      return 0;
+    }
+    if (items.length === 0) return 0;
+    const tagsMap: Record<string, TagStat> = {};
+    for (const item of items) {
+      // 插件项不参与「标签统计」（那是订阅数据的关注/过滤功能）
+      this._indexItem(item, this.searchData.length, tagsMap);
+      this.searchData.push(item);
+    }
+    return items.length;
   }
 
   async reload(): Promise<SearchItem[]> {

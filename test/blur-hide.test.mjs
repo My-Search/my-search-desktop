@@ -45,7 +45,13 @@ const rustCode = stripComments(rust);
 ok(/WindowEvent::Focused\(false\)/.test(rustCode), "Rust 监听 WindowEvent::Focused(false)");
 ok(!codeHas(rust, "BlurHideState"), "Rust 不再有 BlurHideState 门控结构");
 ok(!codeHas(rust, "set_hide_on_blur"), "Rust 不再有 set_hide_on_blur 命令");
-ok(!codeHas(rust, "AtomicBool"), "Rust 不再用原子布尔做失焦门控");
+// 断言的是「不再用原子布尔当**失焦门控**」这个意图，而不是「源码里不许出现 AtomicBool」：
+// AtomicBool 现在另有用途（AUTOSTART_APPLIED：本次会话是否已应用「开机自启动」偏好，
+// 见 apply_autostart_preference），与失焦隐藏无关，不该被这条契约误伤。
+ok(
+  !/AtomicBool[\s\S]{0,120}(hide|Hide)|(hide|Hide)[\s\S]{0,120}AtomicBool/.test(rustCode),
+  "Rust 不再用原子布尔做失焦门控（AtomicBool 不得服务于 hide 门控）"
+);
 // on_window_event 里对 main 窗口的 Focused(false) 分支必须直接走到 hide()
 ok(
   /if\s+window\.label\(\)\s*!=\s*"main"[\s\S]{0,600}?window\.hide\(\)/.test(rustCode),

@@ -221,6 +221,14 @@ export function storageGet<T = unknown>(key: string, defaultValue: T | null = nu
   }
 }
 
+/** 有 localStorage 写入时触发的回调（供同步引擎监听数据变更） */
+let onChangeCallback: ((key: string, value: unknown) => void) | null = null;
+
+/** 注册存储变更回调（只有同步引擎会调一次，close 时清空） */
+export function setOnStorageChange(cb: ((key: string, value: unknown) => void) | null): void {
+  onChangeCallback = cb;
+}
+
 export function storageSet(key: string, value: unknown): void {
   const fullKey = STORAGE_PREFIX + key;
   try {
@@ -231,6 +239,12 @@ export function storageSet(key: string, value: unknown): void {
     localStorage.setItem(fullKey, JSON.stringify(value));
   } catch (e) {
     console.warn("[我的搜索] 写入缓存失败:", key, e);
+  }
+  // 通知同步引擎（放在 try-catch 外面：存储已写完，回调失败不影响主流程）
+  try {
+    onChangeCallback?.(key, value);
+  } catch (e) {
+    /* 同步引擎的回调本身已保证不抛，此处只为未来防御 */
   }
 }
 

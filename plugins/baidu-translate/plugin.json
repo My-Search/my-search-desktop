@@ -1,0 +1,27 @@
+{
+  "id": "com.mysearch.baidu-translate",
+  "name": "百度翻译",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "minAppVersion": "7.9.15",
+  "author": "my-search",
+  "description": "使用百度翻译 AI 能力，支持 200+ 语言互译，输入文本即译",
+  "homepage": "https://fanyi.baidu.com",
+  "icon": "https://api.xinac.net/icon/?url=https://fanyi.baidu.com",
+  "permissions": [
+    "ui.inlay"
+  ],
+  "contributes": {
+    "searchItem": {
+      "title": "百度翻译",
+      "desc": "支持 200+ 语言互译，输入即译。由百度翻译提供",
+      "keyword": "翻译",
+      "visible": true
+    },
+    "detailView": {
+      "entry": "ui/detail.html",
+      "script": "ui/index.js",
+      "mode": "inlay"
+    }
+  }
+}

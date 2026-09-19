@@ -1,0 +1,43 @@
+{
+  "id": "com.mysearch.pi-agent",
+  "name": "Pi Agent",
+  "version": "2.1.0",
+  "apiVersion": 1,
+  "minAppVersion": "7.9.15",
+  "author": "my-search",
+  "description": "Pi 编码代理 - 支持多项目、多模型、模型配置面板、流式对话与工具调用",
+  "homepage": "https://github.com/My-Search/my-search-desktop",
+  "icon": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%233b82f6'/%3E%3Ctext x='50' y='66' font-size='48' fill='white' text-anchor='middle' font-family='Arial'%3EPI%3C/text%3E%3C/svg%3E",
+  "permissions": [
+    "ui.inlay",
+    "ui.notify",
+    "store",
+    "backend.spawn"
+  ],
+  "optionalPermissions": [],
+  "contributes": {
+    "searchItem": [
+      {
+        "title": "Pi Agent",
+        "desc": "编码代理 - 选择项目开始对话",
+        "keyword": "AI",
+        "visible": true
+      }
+    ],
+    "detailView": {
+      "entry": "ui/detail.html",
+      "script": "ui/index.js",
+      "mode": "inlay"
+    }
+  },
+  "backend": {
+    "entry": "backend/run.cmd",
+    "protocol": "jsonrpc-stdio",
+    "autostart": "on-demand",
+    "closeBehavior": "minimize",
+    "startupTimeoutMs": 60000,
+    "callTimeoutMs": 300000,
+    "idleExitSec": 0,
+    "maxRestarts": 3
+  }
+}

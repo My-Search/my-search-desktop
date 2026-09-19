@@ -442,6 +442,9 @@ export function useScriptHost(opts: ScriptHostOptions) {
     runScriptItem,
     hasScriptView,
     isSessionMounted,
+    // 供插件宿主复用：取选中文本 / 类 AI 匹配搜索（插件兼容模式下等价老脚本能力）
+    getSelectedText,
+    matchSearchByOverlap,
   };
 }
 

@@ -4,9 +4,28 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>我的搜索</title>
+    <!-- 显式声明图标，避免浏览器隐式请求 /favicon.ico 造成 404（见 config.html 同处注释） -->
+    <link rel="icon" type="image/png" href="/favicon.png" />
   </head>
   <body>
-    <div id="app"></div>
+    <!-- 骨架屏：Vue 挂载前显示，防止冷启动首次呼出白屏。
+         必须放在 #ms-app 外部（body 的直接子节点），因为 Vue mount() 会清空
+         目标容器的原有子节点；若放在内部，mount 时骨架屏即被顶替，后续
+         getElementById 永远返回 null，导致骨架屏永远无法移除。 -->
+    <div id="ms-skeleton" style="position:absolute;inset:0;z-index:9999;background:#fff;">
+      <div style="border:2px solid #cecece;box-sizing:border-box;background:#fff;width:100%;">
+        <div style="display:flex;align-items:center;height:44px;padding:0 10px;">
+          <input disabled placeholder="我的搜索" autocomplete="off" spellcheck="false" style="flex:1;height:100%;border:none;outline:none;font-size:15px;background:transparent;color:#757575;padding:0;margin:0;-webkit-app-region:no-drag;">
+          <div style="width:25px;height:25px;margin:0 4px 0 0;background:#e0e0e0;border-radius:50%;-webkit-app-region:no-drag;"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 宿主挂载点。刻意不用最通用的 id="app"：插件以 inlay 形态运行在**同一个
+         document** 里（不是 iframe / Shadow DOM），插件脚本里一个
+         `document.getElementById("app")` 就会拿到宿主根节点、覆盖整个界面。
+         用 ms- 前缀把这类撞名概率降到可以忽略。 -->
+    <div id="ms-app"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

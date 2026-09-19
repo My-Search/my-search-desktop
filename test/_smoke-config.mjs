@@ -1,6 +1,6 @@
 /**
  * 迁移后设置窗口关键交互冒烟测试（真实浏览器）：
- * 1. 六个导航项都能切换并渲染对应面板
+ * 1. 七个导航项都能切换并渲染对应面板
  * 2. 快捷键面板：录入组合键（Ctrl+Shift+F9）→ IPC set_toggle_shortcut
  * 3. 缓存面板：显示各缓存项 + 剩余有效期倒计时
  * 4. 关于面板：进入即检查更新（IPC check_update）
@@ -157,6 +157,15 @@ await S(
           return Promise.resolve('<tis::https://example.com/default.ms title="默认订阅" />');
         }
         if (cmd === 'get_toggle_shortcut') { return Promise.resolve('ctrl+alt+s'); }
+        if (cmd === 'get_shortcut_bindings') {
+          // 首次：一条默认呼出键；被设置过（__bindings 非空）后回读设置值
+          if (window.__bindings) return Promise.resolve(window.__bindings);
+          return Promise.resolve([{ shortcut: 'ctrl+alt+s', action: 'toggle-window', target: null }]);
+        }
+        if (cmd === 'set_shortcut_bindings') {
+          window.__bindings = args.bindings;
+          return Promise.resolve(null);
+        }
         return Promise.resolve(null);
       },
       transformCallback(cb) { return cb; },
@@ -182,7 +191,7 @@ await evalJs(`
 await S("Page.navigate", { url: base + "/config.html" }, sessionId);
 await sleep(1000);
 
-// 1. 各面板切换
+// 1. 各面板切换（含新增的「常规」面板）
 const paneResults = {};
 for (const [pane, expectSel] of [
   ["subscribes", ".page.subscribes"],
@@ -190,6 +199,7 @@ for (const [pane, expectSel] of [
   ["repo", ".page.repo"],
   ["cache", ".page.cache"],
   ["shortcut", ".page.shortcut"],
+  ["general", ".page.general"],
   ["about", ".page.about"],
 ]) {
   await evalJs(`document.querySelector('.cfg-nav .nav-item[data-pane="${pane}"]').click()`);
@@ -197,7 +207,7 @@ for (const [pane, expectSel] of [
   paneResults[pane] = await evalJs(`!!document.querySelector('#ms-config-view ${expectSel}')`);
 }
 check(
-  "六个导航面板均可切换渲染",
+  "七个导航面板均可切换渲染",
   Object.values(paneResults).every(Boolean),
   JSON.stringify(paneResults)
 );
@@ -211,23 +221,93 @@ await sleep(200);
 const footerCache = await evalJs(`document.querySelector('.cfg-footer').classList.contains('show')`);
 check("底栏仅在订阅管理/关注标签显示", footerSubs === true && footerCache === false, `subs=${footerSubs} cache=${footerCache}`);
 
-// 3. 快捷键录入 → set_toggle_shortcut
+// 3. 快捷键：录入组合键 → set_shortcut_bindings（快捷键 / 作用类型 / 作用对象）
 await evalJs(`document.querySelector('.cfg-nav .nav-item[data-pane="shortcut"]').click()`);
 await sleep(250);
+// 默认一条「呼出 / 隐藏搜索框」，带作用类型下拉且不可切换
+check(
+  "默认一条呼出/隐藏绑定（作用类型下拉已禁用）",
+  (await evalJs(`document.querySelectorAll('.shortcut-row').length`)) === 1 &&
+    (await evalJs(`document.querySelector('.shortcut-row [data-act="action"]').disabled`)) === true
+);
+// 录入 Ctrl+Shift+F9
 await evalJs(`document.querySelector('.shortcut-capture').click()`);
 await sleep(120);
 await evalJs(`document.dispatchEvent(new KeyboardEvent('keydown', {
   key: 'F9', code: 'F9', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true
 }))`);
 await sleep(250);
-const setCalls = await evalJs(
-  `JSON.stringify(window.__invoked.filter(i => i.cmd === 'set_toggle_shortcut').map(i => i.args.shortcut))`
+const bindings1 = await evalJs(`JSON.stringify(window.__bindings)`);
+check(
+  "快捷键录入提交给后端（含作用类型 toggle-window）",
+  bindings1 === '[{"shortcut":"ctrl+shift+f9","action":"toggle-window","target":null}]',
+  bindings1
 );
-check("快捷键录入提交给后端", setCalls.includes("ctrl+shift+f9"), setCalls);
 check(
   "键帽展示为 Ctrl + Shift + F9",
   (await evalJs(`JSON.stringify([...document.querySelectorAll('.shortcut-caps .kbd')].map(k => k.textContent))`)) ===
     '["Ctrl","Shift","F9"]'
+);
+
+// 3b. 没有可打开插件时：点击「+ 添加快捷键」给出引导提示，不新增行
+await evalJs(`document.querySelector('.shortcut-add').click()`);
+await sleep(200);
+check(
+  "无可用插件时不允许新增插件快捷键",
+  (await evalJs(`document.querySelectorAll('.shortcut-row').length`)) === 1,
+  `rows=${await evalJs(`document.querySelectorAll('.shortcut-row').length`)}`
+);
+
+// 3c. 插入一个假插件后：新增一行 → 作用类型 = 打开插件 → 作用对象可选该插件
+await evalJs(`
+  localStorage.setItem('my-search-desktop:PLUGIN_REGISTRY_CACHE_KEY', JSON.stringify({
+    version: 1,
+    plugins: [{
+      id: 'com.test.demo', name: '演示插件', version: '1.0.0', apiVersion: 1,
+      manifest: { id: 'com.test.demo', name: '演示插件', version: '1.0.0', apiVersion: 1, contributes: { detailView: { entry: 'ui/index.html' } } },
+      dir: '', source: { kind: 'market' }, installedAt: 0, updatedAt: 0,
+      enabled: true, autoStart: 'on-demand', requestedAutoStart: 'on-demand',
+      grants: [], denied: [], runtime: {}, integrity: { sha256: null, signed: false }
+    }]
+  }));
+  1;
+`);
+// 重新进入面板（触发插件列表重读）
+await evalJs(`document.querySelector('.cfg-nav .nav-item[data-pane="cache"]').click()`);
+await sleep(150);
+await evalJs(`document.querySelector('.cfg-nav .nav-item[data-pane="shortcut"]').click()`);
+await sleep(350);
+await evalJs(`document.querySelector('.shortcut-add').click()`);
+await sleep(350);
+const rows2 = await evalJs(`document.querySelectorAll('.shortcut-row').length`);
+check("有可用插件后可新增一条快捷键", rows2 === 2, `rows=${rows2}`);
+const pluginSelect = await evalJs(`JSON.stringify({
+  action: document.querySelectorAll('.shortcut-row')[1].querySelector('[data-act="action"]').value,
+  target: document.querySelectorAll('.shortcut-row')[1].querySelector('[data-act="target"]').value,
+  options: [...document.querySelectorAll('.shortcut-row')[1].querySelectorAll('[data-act="target"] option')].map(o => o.value)
+})`);
+check(
+  "新行作用类型=打开插件且作用对象选中该插件",
+  JSON.parse(pluginSelect).action === "open-plugin" &&
+    JSON.parse(pluginSelect).target === "com.test.demo" &&
+    JSON.parse(pluginSelect).options.includes("com.test.demo"),
+  pluginSelect
+);
+const bindings2 = await evalJs(`JSON.stringify(window.__bindings)`);
+check(
+  "新增的插件快捷键提交给后端（含 target）",
+  bindings2.includes('"action":"open-plugin"') && bindings2.includes('"target":"com.test.demo"'),
+  bindings2
+);
+
+// 3d. 删除插件快捷键 → 回到一条
+await evalJs(`document.querySelectorAll('.shortcut-row')[1].querySelector('[data-act="remove"]').click()`);
+await sleep(300);
+check(
+  "删除插件快捷键后只剩呼出/隐藏",
+  (await evalJs(`JSON.stringify(window.__bindings)`)) ===
+    '[{"shortcut":"ctrl+shift+f9","action":"toggle-window","target":null}]',
+  await evalJs(`JSON.stringify(window.__bindings)`)
 );
 
 // 4. 缓存面板：条目 + 剩余有效期

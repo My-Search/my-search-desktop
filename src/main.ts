@@ -22,8 +22,34 @@ window.addEventListener("unhandledrejection", (event) => {
   console.error("[我的搜索] 未处理的 Promise 拒绝:", event.reason);
 });
 
+/**
+ * 移除骨架屏。
+ *
+ * 为什么用 requestAnimationFrame 而不是 mount() 后立即移除：
+ * mount() 只保证 Vue 的虚拟 DOM 已挂载到真实 DOM，但浏览器/WebView 可能
+ * 还没有完成首帧合成。如果在首帧合成前移除骨架屏，会出现「骨架屏消失 →
+ * 首帧未合成 → 白屏闪烁」的糟糕体验。
+ *
+ * requestAnimationFrame 在浏览器绘制前触发，此时 Vue 渲染的 DOM 已就绪，
+ * 骨架屏淡出后 Vue 内容立即可见，不会出现任何空白间隙。
+ *
+ * 双 rAF：第一帧确保 Vue patch 完成，第二帧确保浏览器已完成首次绘制。
+ */
+function removeSkeleton(): void {
+  const skeleton = document.getElementById("ms-skeleton");
+  if (!skeleton) return;
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      skeleton.style.transition = "opacity 0.15s ease";
+      skeleton.style.opacity = "0";
+      setTimeout(() => skeleton.remove(), 200);
+    });
+  });
+}
+
 const app = createApp(App);
 app.config.errorHandler = (err, _instance, info) => {
   console.error("[我的搜索] Vue 渲染错误:", err, info);
 };
-app.mount("#app");
+app.mount("#ms-app");
+removeSkeleton();

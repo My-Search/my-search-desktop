@@ -58,14 +58,14 @@ export function useDetailHeight() {
   /**
    * 量取 #my_search_box 的实测高度并下发为窗口高度。
    *
-   * 测量前临时解除 #app/#my_search_box/#my_search_view 上的固定高度约束
+   * 测量前临时解除 #ms-app/#my_search_box/#my_search_view 上的固定高度约束
    * （脚本视图可能设置过），让盒子按内容自然撑开，读完立即恢复（同一帧内，
    * 不产生闪烁）。
    */
   function fit(): void {
     const textView = document.getElementById("text_show");
     if (!textView || textView.style.display === "none") return;
-    const app = document.getElementById("app");
+    const app = document.getElementById("ms-app");
     const box = document.getElementById("my_search_box");
     const view = document.getElementById("my_search_view");
     if (!box) return;

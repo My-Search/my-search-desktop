@@ -24,8 +24,32 @@ reqwest = { version = "0.12", features = ["json", "blocking", "rustls-tls", "str
 tokio = { version = "1", features = ["full"] }
 base64 = "0.22"
 futures-util = "0.3"
+# 目录挂载插件（开发模式）的自动重载：监听源目录变化并广播事件
+notify = "8"
+tauri-plugin-autostart = "2"
+tauri-plugin-dialog = "2.7.3"
+# 备份归档（.msbackup = ZIP）：导出/导入与云同步共用同一套打包/解包实现。
+# 只开 deflate：本应用不需要 zip64 之外的加密、bzip2、zstd 等（保持依赖最小）。
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# 插件后台进程：Unix 上结束整个进程组（插件可能自己拉起孙进程，只 kill 直接子进程会留孤儿）
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 # 托盘菜单导致鼠标光标消失的修复（见 src/lib.rs 的 force_cursor_visible）
 # 仅 Windows 需要；复用 tauri 依赖树中已有的 windows-sys，不额外引入 winapi
+# JobObjects：插件后台进程的 Job Object（KILL_ON_JOB_CLOSE，宿主崩溃时子进程一起走）
+# ProcessStatus：面板上显示插件进程的内存占用
+# winreg：读自启动项里记录的 exe 路径，用于「路径自愈」
+#   （见 lib.rs refresh_autostart_exe_path；与 auto-launch 是同款实现，
+#    tauri 依赖树里本就已有 winreg 0.55，不新增实际下载量）
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.60", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }
+windows-sys = { version = "0.60", features = [
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+  "Win32_System_ProcessStatus",
+] }
+winreg = "0.55"

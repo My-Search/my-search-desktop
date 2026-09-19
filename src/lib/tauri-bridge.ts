@@ -4,6 +4,13 @@
  */
 
 import { invoke } from "@tauri-apps/api/core";
+import {
+  DEFAULT_TOGGLE_SHORTCUT,
+  defaultToggleBinding,
+  parseBindings,
+  serializeBindings,
+  type ShortcutBinding,
+} from "./shortcut-bindings.ts";
 import type {
   HttpRequestOptions,
   RawGithubUrl,
@@ -162,9 +169,6 @@ export async function getDefaultSubscribeText(): Promise<string> {
   return DEFAULT_SUBSCRIBE_TEXT;
 }
 
-/** 浏览器调试环境下的默认快捷键（与 Rust 端 DEFAULT_TOGGLE_SHORTCUT 一致） */
-const DEFAULT_TOGGLE_SHORTCUT = "ctrl+alt+s";
-
 /**
  * 获取当前「呼出/隐藏」全局快捷键字符串（如 "ctrl+alt+s"）。
  * 非 Tauri 环境（浏览器调试）返回默认值。
@@ -188,6 +192,95 @@ export async function getToggleShortcut(): Promise<string> {
 export async function setToggleShortcut(shortcut: string): Promise<void> {
   if (isTauri) {
     await invoke("set_toggle_shortcut", { shortcut });
+  }
+}
+
+/**
+ * 获取全部快捷键绑定（**快捷键 / 作用类型 / 作用对象**）。
+ *
+ * 非 Tauri 环境（浏览器调试）返回默认的「呼出/隐藏搜索框」一条，
+ * 保证设置面板在浏览器里也能渲染。
+ */
+export async function getShortcutBindings(): Promise<ShortcutBinding[]> {
+  if (isTauri) {
+    try {
+      return parseBindings(await invoke<unknown>("get_shortcut_bindings"));
+    } catch (e) {
+      console.warn("读取快捷键设置失败:", e);
+    }
+  }
+  return [defaultToggleBinding(DEFAULT_TOGGLE_SHORTCUT)];
+}
+
+/**
+ * 设置整套快捷键绑定（Rust 端整体重新注册并持久化）。
+ * @throws 校验不通过 / 注册失败（如组合键被其它程序占用）时抛错
+ */
+export async function setShortcutBindings(bindings: readonly ShortcutBinding[]): Promise<void> {
+  if (!isTauri) return;
+  await invoke("set_shortcut_bindings", { bindings: serializeBindings(bindings) });
+}
+
+/**
+ * 监听「插件快捷键」触发事件（Rust 端注册的 open-plugin 热键按下时广播）。
+ * 主窗口据此打开对应插件的视图。
+ */
+export async function onShortcutOpenPlugin(
+  handler: (pluginId: string) => void
+): Promise<UnlistenFn | null> {
+  if (!isTauri) return null;
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    return await listen<{ pluginId?: string }>("my-search://shortcut-open-plugin", (event) => {
+      const id = event.payload?.pluginId;
+      if (typeof id === "string" && id !== "") handler(id);
+    });
+  } catch (e) {
+    console.warn("监听插件快捷键事件失败:", e);
+    return null;
+  }
+}
+
+/** 浏览器调试环境下的「开机自启动」默认值（与 Rust 端 DEFAULT_AUTOSTART_ENABLED 一致） */
+const DEFAULT_AUTOSTART = true;
+
+/**
+ * 获取「开机自启动」当前是否生效（供「设置 → 常规设置」展示）。
+ * 返回的是**系统里的真实状态**（而非用户偏好），与任务管理器一致。
+ */
+export async function getAutostartEnabled(): Promise<boolean> {
+  if (isTauri) {
+    try {
+      return await invoke<boolean>("get_autostart_enabled");
+    } catch (e) {
+      console.warn("读取开机自启动状态失败:", e);
+    }
+  }
+  return DEFAULT_AUTOSTART;
+}
+
+/**
+ * 设置「开机自启动」（Rust 端立即写入系统启动项并持久化偏好）。
+ */
+export async function setAutostartEnabled(enabled: boolean): Promise<void> {
+  if (isTauri) {
+    await invoke("set_autostart_enabled_cmd", { enabled });
+  }
+}
+
+/**
+ * 监听「开机自启动」状态变更（托盘菜单里切换后同步设置窗口开关）。
+ */
+export async function onAutostartChanged(
+  handler: (enabled: boolean) => void
+): Promise<UnlistenFn | null> {
+  if (!isTauri) return null;
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    return await listen<boolean>("my-search://autostart-changed", (event) => handler(event.payload));
+  } catch (e) {
+    console.warn("监听自启动状态变更失败:", e);
+    return null;
   }
 }
 
