@@ -681,7 +681,9 @@ onMounted(async () => {
   await nextTick();
 
   // 插件注册表必须在「数据加载」之前就绪：插件项在 loadAllData 收尾时会挂进检索库
+  // 内置插件先修补/安装（写 localStorage），再 reload 使内存注册表拿到最新权限
   try {
+    unlistenBuiltin = await setupBuiltinAutoInstall();
     await pluginHost.reload(true);
     search.bindPluginItems(() => pluginHost.pluginItems());
     // 目录挂载插件的热重载：监听 Rust 侧广播的源目录变化（幂等，可安全重复调用）
@@ -689,9 +691,6 @@ onMounted(async () => {
   } catch (e) {
     console.warn("[我的搜索] 插件加载失败:", e);
   }
-
-  // 内置插件自动安装（幂等，已装/已卸载的自动跳过）
-  unlistenBuiltin = setupBuiltinAutoInstall();
 
   try {
     await search.loadSubscribes();

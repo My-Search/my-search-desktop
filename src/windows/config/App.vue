@@ -245,7 +245,7 @@ onMounted(async () => {
     tags.load();
     installed.reload();
     // 内置插件自动安装（幂等，设置窗第二次打开时同样走一遍确保齐全）
-    setupBuiltinAutoInstall();
+    await setupBuiltinAutoInstall();
   } catch (e) {
     console.error("[我的搜索-设置] 初始化失败:", e);
   }

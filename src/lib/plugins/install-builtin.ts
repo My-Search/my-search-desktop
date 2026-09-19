@@ -65,7 +65,7 @@ async function installSingleBuiltin(id: string): Promise<boolean> {
  *
  * @returns 取消监听的函数
  */
-export function setupBuiltinAutoInstall(): () => void {
+export async function setupBuiltinAutoInstall(): Promise<() => void> {
   if (!isTauri) return () => {};
 
   /** 启动时修补已装内置插件的 optionalPermissions（旧版安装没授予它们） */
@@ -112,10 +112,10 @@ export function setupBuiltinAutoInstall(): () => void {
   }
 
   // 0) 修补已装内置插件缺失的 optionalPermissions
-  fixupBuiltinGrants();
+  await fixupBuiltinGrants();
 
   // 1) 主动拉取（克服 setup emit 早于前端监听导致事件丢失）
-  pullAndInstall();
+  await pullAndInstall();
 
   // 2) 被动监听（后续窗口加载 / 事件重发）
   const unlisten = onBuiltinAvailable((report: BootstrapReport) => {
