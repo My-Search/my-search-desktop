@@ -41,6 +41,8 @@ const runningSessions = new Map();
 let creatingSession = false;
 /** 会话列表定期同步的定时器 */
 let sessionPollTimer = null;
+/** 会话列表加载态：true 时中间栏显示「加载中…」占位（首屏初始化 / 切换项目期间） */
+let sessionsLoading = false;
 /** 已加载的会话消息（用于「加载更多历史」分页） */
 let loadedMessages = [];
 /** 当前已渲染区间的左端点（向前渲染，值只会变小）；-1 = 还没渲染任何历史 */
@@ -64,8 +66,6 @@ let sessionVisibleCount = SESSIONS_PER_PAGE;
  * 刷新后才正常」。改为显式持有本轮节点，不再靠 DOM 反查。
  */
 let turnAgentNode = null;
-/** 当前轮的工具调用 DOM 节点列表 */
-let currentToolNodes = [];
 
 /**
  * 上次卸载（cleanup）时保存的会话视图状态，用于 remount 后恢复。
@@ -160,16 +160,23 @@ async function init() {
   bindEvents();
   setupNotificationHandlers();
   updateSendButtonState();
+  // 会话列表先进入加载态：从后端就绪到会话拉取完成，中间栏持续显示「加载中…」
+  sessionsLoading = true;
+  renderSessions();
 
   // Step 1: 后端就绪（加载 pi + 模型注册表）
   try {
     const ready = await ms.backend.call("init", { pluginId: plugin?.id || "pi-agent" });
     if (!ready?.hasPi) {
+      sessionsLoading = false;
+      renderSessions();
       showInstallPrompt(ready?.piError || "未找到 pi（@earendil-works/pi-coding-agent）");
       return;
     }
   } catch (e) {
     // 后端初始化失败也可能是 pi 未安装，显示安装提示
+    sessionsLoading = false;
+    renderSessions();
     showInstallPrompt(`后端初始化失败: ${e.message || e}`);
     return;
   }
@@ -1012,9 +1019,12 @@ async function loadProjects() {
         await selectProject(last.path);
       }
     } else {
+      sessionsLoading = false;
       renderSessions();
     }
   } catch (e) {
+    sessionsLoading = false;
+    renderSessions();
     showError(`加载项目失败: ${e.message || e}`);
   }
 }
@@ -1089,6 +1099,7 @@ async function selectProject(projectPath) {
   renderedFrom = -1;
   renderedFromEnd = 0;
   sessionVisibleCount = SESSIONS_PER_PAGE;
+  sessionsLoading = true;
   renderProjects();
   renderSessions();
   clearChat();
@@ -1151,6 +1162,7 @@ async function confirmAddProject() {
 
 async function loadSessions() {
   if (!currentProject) {
+    sessionsLoading = false;
     renderSessions();
     return;
   }
@@ -1170,6 +1182,7 @@ async function loadSessions() {
     for (const s of sessions) {
       if (s.flag === "running") runningSessions.set(s.id, { projectPath: currentProject.path, sessionId: s.id });
     }
+    sessionsLoading = false;
     renderSessions();
     renderProjects();
 
@@ -1183,6 +1196,8 @@ async function loadSessions() {
     }
     startSessionPolling();
   } catch (e) {
+    sessionsLoading = false;
+    renderSessions();
     showError(`加载会话失败: ${e.message || e}`);
   }
 }
@@ -1207,6 +1222,14 @@ function patchSessionFlag(sid, flag) {
 
 function renderSessions() {
   sessionListEl.innerHTML = "";
+  // 加载态占位：切换项目/首屏期间先显示「加载中…」，避免闪一下「暂无历史会话」
+  if (sessionsLoading) {
+    const loading = document.createElement("div");
+    loading.className = "pi-empty pi-sessions-loading";
+    loading.innerHTML = '<span class="pi-loading-dot"></span>加载中…';
+    sessionListEl.appendChild(loading);
+    return;
+  }
   if (!currentProject) {
     const empty = document.createElement("div");
     empty.className = "pi-empty";
@@ -1378,7 +1401,14 @@ function findPrevRoundStart(messages, from, rounds = 1) {
 }
 
 /**
- * 渲染历史消息。
+ * 渲染历史消息（含思考 / 工具调用的收纳展示）。
+ *
+ * transcript 条目（后端 buildTranscriptFromMessages 产出）：
+ *   - { role: "user", content }
+ *   - { role: "assistant", content, thinking?, toolCalls? }
+ *   - { role: "toolResult", toolCallId, toolName, isError, content }
+ * 工具结果条目按 toolCallId 回填到对应工具卡片（成功 / 失败徽标 + 结果文本），
+ * 不产生独立气泡；assistant 条目里的思考与工具调用渲染进折叠区（默认收起，点开可看）。
  */
 function renderFrom(from, scrollToEnd = false) {
   const nothingRendered = renderedFrom < 0;
@@ -1386,12 +1416,58 @@ function renderFrom(from, scrollToEnd = false) {
   const batch = loadedMessages.slice(from, Math.max(from, end));
   const anchor = chatBody.querySelector(".message, .pi-error");
   for (const msg of batch) {
+    // 工具结果：挂到对应调用的卡片上
+    if (msg && msg.role === "toolResult") {
+      const card = msg.toolCallId ? findToolCard({ toolCallId: msg.toolCallId }) : null;
+      if (card) {
+        updateToolCard(card, { status: msg.isError ? "error" : "success", result: msg.content });
+        updateAccordionSummaryCount(card.closest(".thought-accordion"));
+      }
+      continue;
+    }
     const node = appendMessage(msg.role === "user" ? "user" : "agent", msg.content, anchor);
     node.dataset.sealed = "1";
+    // 纯动作（无正文）的历史回答：不显示空气泡
+    if (msg.role === "assistant" && !msg.content) {
+      const bubble = node.querySelector(".message-content");
+      if (bubble) bubble.hidden = true;
+    }
+    if (msg.role === "assistant" && (msg.thinking || (msg.toolCalls && msg.toolCalls.length))) {
+      renderHistoryActions(node, msg);
+    }
+  }
+  // 历史里仍挂着「执行中」的卡片：会话并未在跑时说明是中断遗留，标记为已停止
+  if (!currentSessionIsRunning()) {
+    stopRunningToolCards(chatBody);
   }
   renderedFrom = from;
   updateRoundMoreButton();
   if (scrollToEnd) forceScrollToBottom();
+}
+
+/** 渲染一条历史 assistant 消息里的动作（思考段 + 工具卡片），默认收起 */
+function renderHistoryActions(node, msg) {
+  const acc = ensureThoughtAccordion(node);
+  const body = acc.querySelector(".accordion-content");
+  if (msg.thinking) {
+    const block = document.createElement("div");
+    block.className = "thought-text";
+    block.dataset.raw = msg.thinking;
+    block.textContent = msg.thinking;
+    body.appendChild(block);
+  }
+  for (const call of msg.toolCalls || []) {
+    body.appendChild(createToolCard({
+      toolCallId: call.id,
+      toolName: call.name,
+      label: call.label,
+      detail: call.detail,
+      status: "running",
+    }));
+  }
+  updateAccordionSummaryCount(acc);
+  // 历史动作默认收起：点开即可回看思考与每次工具调用
+  acc.open = false;
 }
 
 /** 上方按钮：还有更早的轮次就显示 */
@@ -1479,7 +1555,6 @@ async function createSession() {
 function clearChat() {
   chatBody.querySelectorAll(".message, .pi-error, .tool-call-item").forEach((el) => el.remove());
   turnAgentNode = null;
-  currentToolNodes = [];
   renderedFrom = -1;
   renderedFromEnd = 0;
   loadMoreBtn.hidden = true;
@@ -1555,10 +1630,16 @@ function appendDelta(params) {
   scrollToBottom();
 }
 
-/** 思考/工具调用折叠区 */
-function ensureThoughtNode() {
-  hideWelcome();
-  const node = currentTurnNode();
+/**
+ * 动作折叠区（思考 / 工具调用）。
+ *
+ * 同一轮里的思考文字与工具卡片统一收纳进 .accordion-content：
+ *   - 运行中默认展开（能实时看到在做些什么）；
+ *   - 本轮结束后由 settleTurnAccordion() 收起，标题带动作计数，
+ *     随时可以点开回看思考与每次工具调用的输入 / 结果。
+ */
+function ensureThoughtAccordion(node) {
+  node = node || currentTurnNode();
   let acc = node.querySelector(".thought-accordion");
   if (!acc) {
     acc = document.createElement("details");
@@ -1576,71 +1657,114 @@ function ensureThoughtNode() {
   return acc;
 }
 
-/** 思考增量 */
+/** 折叠区标题上的动作计数（思考段数 + 工具卡片数）：收起后也能看出收纳了多少动作 */
+function updateAccordionSummaryCount(acc) {
+  if (!acc) return;
+  const summary = acc.querySelector("summary");
+  if (!summary) return;
+  const n = acc.querySelectorAll(".accordion-content > .thought-text, .accordion-content > .tool-call-item").length;
+  summary.textContent = n > 0 ? "思考过程 / 工具调用 (" + n + ")" : "思考过程 / 工具调用";
+}
+
+/**
+ * 思考增量：写入当前思考段。
+ *
+ * 后端 chat:thinking 的 content 是**整轮累计**的思考文本（工具调用后继续累加），
+ * 这里要把它切成「按发生顺序排列、互不重复」的段落：
+ *   - 末尾还是思考块（上一段仍开放）→ 只追加增长的部分；
+ *   - 末尾是工具卡片（说明上一段已结束）→ 新起一段，展示全量里的新增部分。
+ */
 function appendThinking(params) {
   const full = typeof params?.content === "string" ? params.content : null;
   const delta = params?.delta || "";
-  const acc = ensureThoughtNode();
+  const acc = ensureThoughtAccordion();
   const body = acc.querySelector(".accordion-content");
-  body.dataset.raw = full != null ? full : (body.dataset.raw || "") + delta;
-  body.textContent = body.dataset.raw;
+  const prevFull = acc.dataset.thinkingFull || "";
+  const nextFull = full != null ? full : prevFull + delta;
+  // 正常情况下全量渐进增长；若后端重置过缓冲（不以旧全量为前缀），退化为「整段重写」
+  const grown = nextFull.startsWith(prevFull);
+  let block = body.lastElementChild;
+  const openBlock = block && block.classList.contains("thought-text") ? block : null;
+  if (openBlock && grown) {
+    // 当前段仍开放：追加增长部分
+    const part = nextFull.slice(prevFull.length);
+    openBlock.dataset.raw = (openBlock.dataset.raw || "") + part;
+    openBlock.textContent = (openBlock.textContent || "") + part;
+  } else {
+    block = document.createElement("div");
+    block.className = "thought-text";
+    block.dataset.raw = grown ? nextFull.slice(prevFull.length) : nextFull;
+    block.textContent = block.dataset.raw;
+    body.appendChild(block);
+  }
+  acc.dataset.thinkingFull = nextFull;
+  updateAccordionSummaryCount(acc);
   scrollToBottom();
 }
 
-/** 工具调用 — 渲染为可视化卡片 */
-function appendTool(params) {
-  hideWelcome();
-  removeTyping();
-  const node = currentTurnNode();
-  const refNode = node.querySelector(".message-content");
-  const toolName = params.label || params.toolName || "未知工具";
-  const existing = node.querySelector(`.tool-call-item[data-tool="${toolName}"]`);
-  if (existing && params.status !== "running") {
-    existing.dataset.status = params.status === "success" ? "success" : "error";
-    existing.classList.remove("tool-running");
-    if (params.status === "error") existing.classList.add("tool-error");
-    const badge = existing.querySelector(".tool-call-status-badge");
-    if (badge) {
-      badge.className = "tool-call-status-badge " + (params.status === "success" ? "success" : "error");
-      badge.textContent = params.status === "success" ? "✓ 完成" : "✗ 失败";
-    }
-    const icon = existing.querySelector(".tool-call-icon");
-    if (icon) {
-      icon.className = "tool-call-icon tool-icon-" + (params.status === "success" ? "success" : "error");
-      icon.innerHTML = params.status === "success"
-        ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg>'
-        : '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>';
-    }
-    scrollToBottom();
-    return;
-  }
+/** 工具状态 → 徽标样式与文案 */
+function toolBadgeInfo(status) {
+  if (status === "running") return { className: "tool-call-status-badge running", text: "执行中…" };
+  if (status === "success") return { className: "tool-call-status-badge success", text: "✓ 完成" };
+  if (status === "error") return { className: "tool-call-status-badge error", text: "✗ 失败" };
+  return { className: "tool-call-status-badge", text: "已停止" };
+}
 
+/** 工具状态 → 图标 */
+function toolIconSvg(status) {
+  if (status === "running") {
+    return '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"></circle><path d="M12 6v6l4 2"></path></svg>';
+  }
+  if (status === "success") {
+    return '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+  }
+  if (status === "error") {
+    return '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>';
+  }
+  return '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="6" y1="12" x2="18" y2="12"></line></svg>';
+}
+
+/** 过长文本截断（工具结果） */
+function clipText(text, max) {
+  const t = String(text == null ? "" : text);
+  return t.length > max ? t.slice(0, max) + "…" : t;
+}
+
+/** 工具状态 → 图标容器类名 */
+function toolIconClass(status) {
+  if (status === "running") return "tool-call-icon tool-icon-running";
+  if (status === "success") return "tool-call-icon tool-icon-success";
+  if (status === "error") return "tool-call-icon tool-icon-error";
+  return "tool-call-icon";
+}
+
+/** 新建工具调用卡片 */
+function createToolCard(params) {
+  const toolName = params.label || params.toolName || "未知工具";
+  const status = params.status || "running";
   const card = document.createElement("div");
-  card.className = "tool-call-item" + (params.status === "running" ? " tool-running" : params.status === "error" ? " tool-error" : "");
+  card.className = "tool-call-item" + (status === "running" ? " tool-running" : status === "error" ? " tool-error" : "");
+  if (params.toolCallId) card.dataset.toolId = params.toolCallId;
   card.dataset.tool = toolName;
-  card.dataset.status = params.status || "running";
+  card.dataset.status = status;
 
   const header = document.createElement("div");
   header.className = "tool-call-header";
   const icon = document.createElement("div");
-  icon.className = "tool-call-icon tool-icon-" + (params.status === "running" ? "running" : params.status === "success" ? "success" : "error");
-  if (params.status === "running") {
-    icon.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"></circle><path d="M12 6v6l4 2"></path></svg>';
-  } else if (params.status === "success") {
-    icon.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg>';
-  } else {
-    icon.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>';
-  }
+  icon.className = toolIconClass(status);
+  icon.innerHTML = toolIconSvg(status);
   header.appendChild(icon);
   const nameSpan = document.createElement("span");
   nameSpan.className = "tool-call-name";
   nameSpan.textContent = toolName;
   header.appendChild(nameSpan);
   const badge = document.createElement("span");
-  badge.className = "tool-call-status-badge " + (params.status === "running" ? "running" : params.status === "success" ? "success" : "error");
-  badge.textContent = params.status === "running" ? "执行中…" : params.status === "success" ? "✓ 完成" : "✗ 失败";
+  const info = toolBadgeInfo(status);
+  badge.className = info.className;
+  badge.textContent = info.text;
   header.appendChild(badge);
   card.appendChild(header);
+
   if (params.detail) {
     const detail = document.createElement("div");
     let detailClass = "tool-call-detail";
@@ -1649,27 +1773,96 @@ function appendTool(params) {
       detailClass += " cmd-detail";
     } else if (rawTool === "edit" || rawTool === "write" || rawTool === "write_file" || rawTool === "edit_file" || rawTool === "read" || rawTool === "read_file") {
       detailClass += " edit-detail";
-    } else if (params.status === "error") {
+    } else if (status === "error") {
       detailClass += " error-detail";
     }
     detail.className = detailClass;
     detail.textContent = params.detail;
     card.appendChild(detail);
   }
-  node.insertBefore(card, refNode);
+  return card;
+}
+
+/** 更新工具卡片状态 / 结果（实时事件与历史回填共用） */
+function updateToolCard(card, params) {
+  if (!card) return;
+  const status = params.status || "success";
+  card.dataset.status = status;
+  card.classList.remove("tool-running", "tool-error");
+  if (status === "running") card.classList.add("tool-running");
+  if (status === "error") card.classList.add("tool-error");
+  const icon = card.querySelector(".tool-call-icon");
+  if (icon) {
+    icon.className = toolIconClass(status);
+    icon.innerHTML = toolIconSvg(status);
+  }
+  const badge = card.querySelector(".tool-call-status-badge");
+  if (badge) {
+    const info = toolBadgeInfo(status);
+    badge.className = info.className;
+    badge.textContent = info.text;
+  }
+  if (params.result != null && params.result !== "") {
+    let resultEl = card.querySelector(".tool-call-result");
+    if (!resultEl) {
+      resultEl = document.createElement("div");
+      resultEl.className = "tool-call-result";
+      card.appendChild(resultEl);
+    }
+    resultEl.textContent = clipText(params.result, 2000);
+  }
+}
+
+/** 按 toolCallId 查已有卡片（全聊天区查——历史与实时共用同一轮时也能对上） */
+function findToolCard(params) {
+  const id = params && params.toolCallId;
+  if (id) {
+    const esc = String(id).replace(/"/g, '\\"');
+    return chatBody.querySelector('.tool-call-item[data-tool-id="' + esc + '"]');
+  }
+  // 无 id 时兜底：本轮最后一张「执行中」卡片
+  const acc = turnAgentNode && turnAgentNode.querySelector(".thought-accordion .accordion-content");
+  if (!acc) return null;
+  const cards = acc.querySelectorAll(".tool-call-item");
+  for (let i = cards.length - 1; i >= 0; i--) {
+    if (cards[i].dataset.status === "running") return cards[i];
+  }
+  return null;
+}
+
+/** 把节点内仍在「执行中」的工具卡片标记为已停止（用户中止 / 请求被打断） */
+function stopRunningToolCards(root) {
+  if (!root) return;
+  root.querySelectorAll(".tool-call-item.tool-running").forEach((el) => updateToolCard(el, { status: "stopped" }));
+}
+
+/** 工具调用 — 渲染为可视化卡片（按 toolCallId 精确配对，避免同名工具串台） */
+function appendTool(params) {
+  hideWelcome();
+  removeTyping();
+  const status = params.status || "running";
+  const existing = findToolCard(params);
+  if (existing) {
+    // 运行中的重复通知不覆盖；结束通知更新状态与结果
+    if (status !== "running") updateToolCard(existing, { status, result: params.detail });
+    scrollToBottom();
+    return;
+  }
+  const acc = ensureThoughtAccordion();
+  const body = acc.querySelector(".accordion-content");
+  const card = createToolCard(params);
+  body.appendChild(card);
+  if (status !== "running") updateToolCard(card, { status, result: params.detail });
+  updateAccordionSummaryCount(acc);
   scrollToBottom();
 }
 
-/** 正文开始输出：收起本轮折叠区 */
-function collapseThought() {
+/** 本轮结束：收起折叠区（动作仍可随时手动展开查看） */
+function settleTurnAccordion() {
   if (!turnAgentNode || turnAgentNode.parentNode !== chatBody) return;
   const acc = turnAgentNode.querySelector(".thought-accordion");
   if (!acc) return;
-  if (acc.dataset.done === "1") return;
-  acc.dataset.done = "1";
   acc.open = false;
-  const summary = acc.querySelector("summary");
-  if (summary) summary.textContent = "思考过程 / 工具调用 (已收纳)";
 }
 
 function showTyping() {
@@ -1788,6 +1981,7 @@ function setupNotificationHandlers() {
       syncSendButton();
     } else if (isIdle) {
       removeTyping();
+      settleTurnAccordion();
       syncSendButton();
     }
   });
@@ -1799,16 +1993,8 @@ function setupNotificationHandlers() {
     if (!isCurrentSessionNotification(params)) return;
     removeTyping();
     if (turnAgentNode) turnAgentNode.dataset.sealed = "1";
-    if (turnAgentNode) {
-      turnAgentNode.querySelectorAll(".tool-call-item.tool-running").forEach((el) => {
-        el.classList.remove("tool-running");
-        const badge = el.querySelector(".tool-call-status-badge");
-        if (badge) {
-          badge.className = "tool-call-status-badge";
-          badge.textContent = "已停止";
-        }
-      });
-    }
+    stopRunningToolCards(chatBody);
+    settleTurnAccordion();
     syncSendButton();
   });
 }
@@ -1835,7 +2021,6 @@ async function sendMessage(text) {
   runningSessions.set(thisSessionId, { projectPath: currentProject.path, sessionId: thisSessionId });
   patchSessionFlag(thisSessionId, "running");
   setSendButtonRunning(true);
-  currentToolNodes = [];
 
   try {
     const result = await ms.backend.call("chat", {
@@ -1861,12 +2046,14 @@ async function sendMessage(text) {
         node.dataset.raw = next;
       }
       if (turnAgentNode) turnAgentNode.dataset.sealed = "1";
+      settleTurnAccordion();
     }
     void refreshSessionMeta();
   } catch (e) {
     if (currentSessionId === thisSessionId) {
       removeTyping();
       if (turnAgentNode) turnAgentNode.dataset.sealed = "1";
+      settleTurnAccordion();
       if (e.message && (e.message.includes("abort") || e.message.includes("cancel"))) {
         // 静默处理
       } else {
@@ -1894,17 +2081,9 @@ async function stopAgent() {
   } catch (e) {
     console.warn("[PI] 停止 agent 失败:", e);
   }
-  if (turnAgentNode) {
-    turnAgentNode.dataset.sealed = "1";
-    turnAgentNode.querySelectorAll(".tool-call-item.tool-running").forEach((el) => {
-      el.classList.remove("tool-running");
-      const badge = el.querySelector(".tool-call-status-badge");
-      if (badge) {
-        badge.className = "tool-call-status-badge";
-        badge.textContent = "已停止";
-      }
-    });
-  }
+  if (turnAgentNode) turnAgentNode.dataset.sealed = "1";
+  stopRunningToolCards(chatBody);
+  settleTurnAccordion();
   removeTyping();
   if (currentSessionId) runningSessions.delete(currentSessionId);
   patchSessionFlag(currentSessionId, null);

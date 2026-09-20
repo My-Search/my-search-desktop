@@ -241,7 +241,7 @@ export function usePluginRuntime() {
         manifest: parsed.manifest,
         dir,
         source: { kind: "folder", ref: dir, dev: true },
-        grants: parsed.manifest.permissions ?? [],
+        grants: [...(parsed.manifest.permissions ?? []), ...(parsed.manifest.optionalPermissions ?? [])],
         integrity: { sha256: null, signed: false },
       });
       const merged = upsertPlugin(registry, record);

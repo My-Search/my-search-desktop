@@ -95,6 +95,27 @@ export async function setupBuiltinAutoInstall(): Promise<() => void> {
     }
   }
 
+  /** 启动时修补已挂载 dev 插件缺失的 optionalPermissions（旧版目录挂载没授予它们） */
+  function fixupDevGrants() {
+    try {
+      const registry = loadRegistry();
+      let changed = false;
+      for (const rec of registry.plugins) {
+        if (!rec.source.dev) continue;
+        const opts = rec.manifest.optionalPermissions ?? [];
+        for (const p of opts) {
+          if (!rec.grants.some((g: any) => g.permission === p)) {
+            rec.grants.push({ permission: p, at: Date.now(), source: "install" });
+            changed = true;
+          }
+        }
+      }
+      if (changed) saveRegistry(registry);
+    } catch (e) {
+      console.warn("[内置插件] 修复 dev 挂载权限失败:", e);
+    }
+  }
+
   /** 拉取当前 bootstrap 状态并安装应装未装的插件 */
   async function pullAndInstall() {
     try {
@@ -113,6 +134,9 @@ export async function setupBuiltinAutoInstall(): Promise<() => void> {
 
   // 0) 修补已装内置插件缺失的 optionalPermissions
   await fixupBuiltinGrants();
+
+  // 0.5) 修补已挂载 dev 插件缺失的 optionalPermissions
+  fixupDevGrants();
 
   // 1) 主动拉取（克服 setup emit 早于前端监听导致事件丢失）
   await pullAndInstall();

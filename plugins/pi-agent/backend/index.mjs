@@ -724,6 +724,78 @@ function toolDisplayName(name) {
   };
   return map[name.toLowerCase()] || `🛠️ ${name}`;
 }
+/**
+ * 从工具调用参数生成可读摘要（工具卡片上展示的「输入」）。
+ * 事件推送（tool_execution_start）与历史提取（transcript）共用同一套文案。
+ */
+function describeToolCallArguments(args) {
+  const a = args || {};
+  let detail = "";
+  // 命令执行：显示命令本身
+  if (a.command) {
+    detail = String(a.command);
+    if (detail.length > 120) detail = detail.slice(0, 120) + "…";
+  }
+  // 编辑/写入文件：显示文件路径 + 处理策略（追加/替换等）
+  else if (a.file_path || a.filePath) {
+    const fp = a.file_path || a.filePath;
+    if (a.old_str) {
+      detail = `📄 ${fp}\n替换: ${String(a.old_str).slice(0, 60)} → ${String(a.new_str || "").slice(0, 60)}`;
+    } else if (a.insert) {
+      detail = `📄 ${fp}\n插入: ${String(a.insert).slice(0, 80)}`;
+    } else if (a.content) {
+      detail = `📄 ${fp}\n${String(a.content).slice(0, 80)}`;
+    } else {
+      detail = `📄 ${fp}`;
+    }
+  }
+  // 读取/删除/移动文件等：至少显示路径
+  else if (a.path) {
+    detail = String(a.path);
+  }
+  else if (a.url) detail = `🔗 ${a.url}`;
+  else if (a.query) detail = `🔍 ${String(a.query).slice(0, 100)}`;
+  else if (a.pattern) detail = `🔍 ${a.pattern}`;
+  else if (a.directory || a.dir) detail = `📂 ${a.directory || a.dir}`;
+  else if (a.text) detail = String(a.text).slice(0, 80);
+  // fallback: 把 args 序列化成可读格式
+  else if (typeof a === "object" && Object.keys(a).length > 0) {
+    const entries = Object.entries(a).slice(0, 3);
+    detail = entries.map(([k, v]) => `${k}=${String(v).slice(0, 40)}`).join(", ");
+  }
+  return detail;
+}
+
+/**
+ * 从 tool_execution_end 事件生成可读结果（工具卡片展开后展示）。
+ *
+ * pi 的工具结果形状是 { content: [{type:"text", text}], details }；
+ * 失败时 isError=true，正文通常就是错误信息。统一在这里抽文本并截断，
+ * 保证前端「展开动作」时能看到每次调用的输出 / 报错。
+ */
+function describeToolResult(event) {
+  const result = event?.result;
+  let text = "";
+  if (result && typeof result === "object") {
+    if (Array.isArray(result.content)) {
+      text = result.content.filter((c) => c?.type === "text").map((c) => c.text || "").join("\n");
+    } else if (typeof result.content === "string") {
+      text = result.content;
+    }
+    if (!text) text = String(result.output || result.stdout || result.error || "");
+    // 兼容旧形状：带退出码的命令结果
+    const exitCode = result.exitCode ?? result.exit_code;
+    if (exitCode != null && exitCode !== 0 && !text) text = "退出码 " + exitCode;
+  } else if (typeof result === "string") {
+    text = result;
+  }
+  if (!text && event?.error) text = String(event.error);
+  text = text.trim();
+  if (!text && event?.isError) text = "工具执行失败";
+  if (text.length > 1500) text = text.slice(0, 1500) + "…";
+  return text || undefined;
+}
+
 function handleAgentEvent(rec, event) {
   if (!event || typeof event !== "object") return;
   switch (event.type) {
@@ -747,80 +819,25 @@ function handleAgentEvent(rec, event) {
       break;
     }
     case "tool_execution_start":
-      // 提取工具的详细动作信息
-      let detail = "";
-      const startArgs = event.args || event.arguments || {};
-      // 命令执行：显示命令本身
-      if (startArgs.command) {
-        detail = startArgs.command;
-        if (detail.length > 120) detail = detail.slice(0, 120) + "…";
-      }
-      // 编辑/写入文件：显示文件路径 + 处理策略（追加/替换等）
-      else if (startArgs.file_path || startArgs.filePath) {
-        const fp = startArgs.file_path || startArgs.filePath;
-        if (startArgs.old_str) {
-          detail = `📄 ${fp}\n替换: ${startArgs.old_str.slice(0, 60)} → ${(startArgs.new_str || "").slice(0, 60)}`;
-        } else if (startArgs.insert) {
-          detail = `📄 ${fp}\n插入: ${String(startArgs.insert).slice(0, 80)}`;
-        } else if (startArgs.content) {
-          detail = `📄 ${fp}\n${String(startArgs.content).slice(0, 80)}`;
-        } else {
-          detail = `📄 ${fp}`;
-        }
-      }
-      else if (startArgs.path) {
-        if (event.toolName === "read" || event.toolName === "read_file") detail = `📄 ${startArgs.path}`;
-        else if (event.toolName === "delete") detail = `🗑️ ${startArgs.path}`;
-        else if (event.toolName === "move" || event.toolName === "rename") {
-          detail = `📦 ${startArgs.path} → ${startArgs.destination || startArgs.newPath || "?"}`;
-        } else detail = startArgs.path;
-      }
-      else if (startArgs.url) detail = `🔗 ${startArgs.url}`;
-      else if (startArgs.query) detail = `🔍 ${String(startArgs.query).slice(0, 100)}`;
-      else if (startArgs.pattern) detail = `🔍 ${startArgs.pattern}`;
-      else if (startArgs.directory || startArgs.dir) detail = `📂 ${startArgs.directory || startArgs.dir}`;
-      else if (startArgs.text) detail = String(startArgs.text).slice(0, 80);
-      // fallback: 把 args 序列化成可读格式
-      else if (typeof startArgs === "object" && Object.keys(startArgs).length > 0) {
-        const entries = Object.entries(startArgs).slice(0, 3);
-        detail = entries.map(([k, v]) => `${k}=${String(v).slice(0, 40)}`).join(", ");
-      }
+      // 提取工具的详细动作信息（toolCallId 供前端按调用配对，避免同名工具串台）
       sendNotification("chat:tool", {
         sessionId: rec.sessionId,
+        toolCallId: event.toolCallId,
         toolName: event.toolName,
         status: "running",
         label: toolDisplayName(event.toolName),
-        detail,
+        detail: describeToolCallArguments(event.args || event.arguments || {}),
       });
       break;
     case "tool_execution_end":
-      // 完成时：对命令工具显示退出码 + 输出摘要，对编辑工具显示结果
-      let endDetail = undefined;
-      const result = event.result;
-      if (result) {
-        if (event.toolName === "bash" || event.toolName === "shell" || event.toolName === "terminal" || event.toolName === "command") {
-          const exitCode = result.exitCode ?? result.exit_code;
-          const output = (result.output || result.stdout || "").slice(0, 200);
-          if (output) {
-            endDetail = exitCode != null ? `退出码 ${exitCode}\n${output}` : output;
-          } else if (exitCode != null) {
-            endDetail = `退出码 ${exitCode}`;
-          }
-        } else if (event.isError && result.error) {
-          endDetail = String(result.error).slice(0, 200);
-        } else if (event.toolName === "read" || event.toolName === "read_file") {
-          const content = (result.content || result.text || result.output || "").slice(0, 100);
-          if (content) endDetail = content;
-        }
-      } else if (event.error) {
-        endDetail = String(event.error).slice(0, 200);
-      }
+      // 完成时：把可读结果带回（工具卡片展开后能看到输出 / 报错）
       sendNotification("chat:tool", {
         sessionId: rec.sessionId,
+        toolCallId: event.toolCallId,
         toolName: event.toolName,
         status: event.isError ? "error" : "success",
         label: toolDisplayName(event.toolName),
-        detail: endDetail,
+        detail: describeToolResult(event),
       });
       break;
     case "agent_start":
@@ -896,22 +913,84 @@ function isPersisted(rec) {
   }
 }
 
-/** 从内存 runtime 抽取 user/assistant 文本（草稿会话未落盘时用） */
-function readMessagesOfRuntime(rec) {
+/**
+ * 把 pi 的上下文消息（buildSessionContext().messages / session.messages）转成前端可渲染的
+ * transcript 条目列表。
+ *
+ * 关键点：**不只提取文本**。历史里的顺序产物要完整带出，聊天区才能「展开查看动作」：
+ *   - assistant.content[].thinking   → { role:"assistant", content:文本, thinking:"..." }
+ *   - assistant.content[].toolCall   → { role:"assistant", content:文本, toolCalls:[...] }
+ *   - role==="toolResult" 的消息     → { role:"toolResult", toolCallId, toolName, isError, content }
+ * 文本与动作挂在同一条 assistant 条目上，前端渲染时会把它们放回同一个气泡（含折叠区）。
+ */
+function buildTranscriptFromMessages(messages) {
   const out = [];
   try {
-    for (const m of rec?.session?.messages || []) {
-      if (m?.role !== "user" && m?.role !== "assistant") continue;
-      const content = m.content;
-      let text = "";
-      if (typeof content === "string") text = content;
-      else if (Array.isArray(content)) {
-        text = content.filter((c) => c?.type === "text").map((c) => c.text || "").join("\n");
+    const pushAssistant = (text, thinking, toolCalls) => {
+      if (!text && !thinking && !toolCalls.length) return;
+      const entry = { role: "assistant", content: text || "" };
+      if (thinking) entry.thinking = thinking;
+      if (toolCalls.length) entry.toolCalls = toolCalls;
+      out.push(entry);
+    };
+
+    for (const m of messages || []) {
+      const role = m?.role;
+      const content = m?.content;
+      if (role === "user") {
+        const text = typeof content === "string" ? content
+          : Array.isArray(content) ? content.filter((c) => c?.type === "text").map((c) => c.text || "").join("\n") : "";
+        if (text) out.push({ role: "user", content: text });
+        continue;
       }
-      if (text) out.push({ role: m.role, content: text });
+      if (role === "toolResult") {
+        const text = typeof content === "string" ? content
+          : Array.isArray(content) ? content.filter((c) => c?.type === "text").map((c) => c.text || "").join("\n") : "";
+        out.push({
+          role: "toolResult",
+          toolCallId: m.toolCallId || "",
+          toolName: m.toolName || "",
+          isError: Boolean(m.isError),
+          content: text,
+        });
+        continue;
+      }
+      if (role === "assistant") {
+        let text = "";
+        let thinking = "";
+        const toolCalls = [];
+        if (typeof content === "string") text = content;
+        else if (Array.isArray(content)) {
+          for (const c of content) {
+            if (c?.type === "text") text += (text ? "\n" : "") + (c.text || "");
+            else if (c?.type === "thinking" && c.thinking) thinking += (thinking ? "\n" : "") + c.thinking;
+            else if (c?.type === "toolCall") {
+              toolCalls.push({
+                id: c.id || "",
+                name: c.name || "",
+                label: toolDisplayName(c.name),
+                detail: describeToolCallArguments(c.arguments || {}),
+              });
+            }
+          }
+        }
+        // 带思考但不带任何工具调用、也没有正文的中间态（如仅思考的回复）也需要保留
+        pushAssistant(text, thinking, toolCalls);
+        continue;
+      }
+      // system / 其它角色：忽略
     }
   } catch (e) { /* ignore */ }
   return out;
+}
+
+/** 从内存 runtime 抽取转录（草稿会话未落盘时用，与磁盘读取共用同一转换） */
+function readMessagesOfRuntime(rec) {
+  try {
+    return buildTranscriptFromMessages(rec?.session?.messages || []);
+  } catch (e) {
+    return [];
+  }
 }
 
 /** 读取会话历史（从 pi 的 JSONL） */
@@ -933,17 +1012,8 @@ async function handleLoadSession(id, params) {
     if (!file || !fs.existsSync(file)) { sendResult(id, { transcript: [] }); return; }
     const manager = sdk.SessionManager.open(file);
     const context = manager.buildSessionContext();
-    const transcript = [];
-    for (const msg of context?.messages || []) {
-      const role = msg?.role;
-      const content = msg?.content;
-      let text = "";
-      if (typeof content === "string") text = content;
-      else if (Array.isArray(content)) {
-        text = content.filter((c) => c?.type === "text").map((c) => c.text || "").join("\n");
-      }
-      if ((role === "user" || role === "assistant") && text) transcript.push({ role, content: text });
-    }
+    // 完整转录：文本 + 思考 + 工具调用 + 工具结果（前端据此渲染可展开的动作区）
+    const transcript = buildTranscriptFromMessages(context?.messages || []);
     sendResult(id, { transcript });
   } catch (e) {
     sendLog("warn", `读取会话失败: ${e.message}`);

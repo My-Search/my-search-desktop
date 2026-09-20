@@ -461,6 +461,23 @@
   line-height: 1.7;
 }
 
+/* 会话列表加载态（首屏初始化 / 切换项目）：蓝点脉冲 + 文案，避免闪「暂无历史会话」 */
+.pi-agent-container .pi-sessions-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+
+.pi-agent-container .pi-sessions-loading .pi-loading-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent-blue);
+  animation: pi-pulse 1.6s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
 /* ================= 3. 右侧主内容区 ================= */
 .pi-agent-container .main-content {
   flex: 1;
@@ -574,6 +591,7 @@
   line-height: 1.6;
   word-break: break-word;
   overflow-wrap: anywhere;
+  min-width: 0;
 }
 
 .pi-agent-container .message.user .message-content {
@@ -750,7 +768,7 @@
   background: rgba(239, 68, 68, 0.07);
 }
 
-/* 思考过程（推理）区域 */
+/* ================= 动作折叠区（思考 + 工具调用） ================= */
 .pi-agent-container .thought-accordion {
   margin-bottom: 8px;
   border: 1px solid var(--border-color);
@@ -771,20 +789,63 @@
   display: flex;
   align-items: center;
   gap: 6px;
+  list-style: none;
 }
+
+/* 收/展箭头（原生 marker 在 Chromium 下对齐差，用伪元素自绘） */
+.pi-agent-container .thought-accordion summary::-webkit-details-marker { display: none; }
+.pi-agent-container .thought-accordion summary::before {
+  content: "";
+  width: 0;
+  height: 0;
+  border-left: 5px solid currentColor;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  transition: transform 0.15s ease;
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+.pi-agent-container .thought-accordion[open] summary::before { transform: rotate(90deg); }
 
 .pi-agent-container .thought-accordion summary:hover { background-color: var(--bg-hover); }
 
 .pi-agent-container .thought-accordion .accordion-content {
-  padding: 12px;
-  font-size: 13px;
-  color: var(--text-muted);
+  padding: 10px 12px;
   border-top: 1px solid var(--border-color);
-  font-family: monospace;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+/* 一段思考文字（等宽字体、淡化；工具卡片之间的思考另起一段） */
+.pi-agent-container .thought-text {
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--text-muted);
+  font-family: "Consolas", "Monaco", "Menlo", monospace;
   white-space: pre-wrap;
   word-break: break-word;
-  max-height: 220px;
+  padding: 2px 0;
+}
+
+/* 工具卡片在折叠区里撑满宽度 */
+.pi-agent-container .accordion-content > .tool-call-item { width: 100%; }
+
+/* 工具执行结果（结束事件 / 历史回填） */
+.pi-agent-container .tool-call-result {
+  padding: 8px 12px;
+  border-top: 1px solid var(--border-color);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-family: "Consolas", "Monaco", "Menlo", monospace;
+  max-height: 180px;
   overflow-y: auto;
+  background: rgba(0, 0, 0, 0.18);
 }
 
 /* Agent 运行状态指示 */

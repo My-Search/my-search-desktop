@@ -132,7 +132,9 @@ pub(crate) async fn market_fetch_raw(
         return Err("插件未获授权「安装与更新插件」（plugin.install）".into());
     }
 
-    if !is_valid_sha256(&expected_sha256) {
+    // 目录拉取（catalog.json）不传 sha256；安装包下载必须传
+    let verify_sha = !expected_sha256.is_empty();
+    if verify_sha && !is_valid_sha256(&expected_sha256) {
         return Err("sha256 校验值必须是 64 位十六进制".into());
     }
     let bases = market_bases();
@@ -164,7 +166,7 @@ pub(crate) async fn market_fetch_raw(
     }
 
     let actual = sha256_hex(&bytes);
-    if !actual.eq_ignore_ascii_case(&expected_sha256) {
+    if verify_sha && !actual.eq_ignore_ascii_case(&expected_sha256) {
         return Err("下载内容 sha256 校验失败（可能已被篡改，或目录数据过期）".into());
     }
 
@@ -257,6 +259,21 @@ mod tests {
         assert!(!is_valid_sha256(&"a".repeat(63)));
         assert!(!is_valid_sha256(&"zz".repeat(32)));
         assert!(!is_valid_sha256(""));
+    }
+
+    #[test]
+    fn empty_sha256_skips_verification_for_catalog() {
+        // 目录拉取（catalog.json）传空 sha256，应跳过校验而非报错
+        let empty_sha = "";
+        assert!(empty_sha.is_empty(), "空 sha256 应被识别为跳过校验");
+
+        // 安装包下载必须传有效 sha256
+        let valid_sha = "a".repeat(64);
+        assert!(!valid_sha.is_empty() && is_valid_sha256(&valid_sha));
+
+        // 非法 sha256（非空但格式不对）仍应报错
+        let bad_sha = "not-64-hex";
+        assert!(!bad_sha.is_empty() && !is_valid_sha256(bad_sha));
     }
 
     #[test]
