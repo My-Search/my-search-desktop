@@ -356,13 +356,6 @@ const commonProps = computed(() => ({
           </svg>
           <span>快捷键</span>
         </button>
-        <button class="nav-item" :class="{ on: navPane === 'general' }" data-pane="general" @click="switchPane('general')">
-          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" width="17" height="17">
-            <circle cx="10" cy="10" r="2.6" />
-            <path d="M10 2.2v2M10 15.8v2M2.2 10h2M15.8 10h2M4.5 4.5l1.4 1.4M14.1 14.1l1.4 1.4M15.5 4.5l-1.4 1.4M5.9 14.1l-1.4 1.4" />
-          </svg>
-          <span>常规</span>
-        </button>
         <button class="nav-item" :class="{ on: navPane === 'plugins' }" data-pane="plugins" @click="switchPane('plugins')">
           <svg viewBox="0 0 24 24" fill="currentColor" width="17" height="17">
             <path d="M4 11a9 9 0 0 1 9 9H4v-9zm0 11h18v2H4v-2zm0-4h12v2H4v-2zm0-4h6v2H4v-2z"/>
@@ -370,6 +363,13 @@ const commonProps = computed(() => ({
             <path d="M22 5.5A3.5 3.5 0 1 1 15 4a3.5 3.5 0 0 1 7 1.5z" opacity="0.3"/>
           </svg>
           <span>插件</span>
+        </button>
+        <button class="nav-item" :class="{ on: navPane === 'general' }" data-pane="general" @click="switchPane('general')">
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" width="17" height="17">
+            <circle cx="10" cy="10" r="2.6" />
+            <path d="M10 2.2v2M10 15.8v2M2.2 10h2M15.8 10h2M4.5 4.5l1.4 1.4M14.1 14.1l1.4 1.4M15.5 4.5l-1.4 1.4M5.9 14.1l-1.4 1.4" />
+          </svg>
+          <span>基础配置</span>
         </button>
         <button class="nav-item" :class="{ on: navPane === 'sync' }" data-pane="sync" @click="switchPane('sync')">
           <svg viewBox="0 0 20 20" fill="currentColor" width="17" height="17">

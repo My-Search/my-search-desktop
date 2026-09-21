@@ -140,14 +140,13 @@ export function emptyRuntime(): PluginRuntimeState {
 /** 清单请求 → 有效策略的默认落点（prompt 在用户表态前按「仅前台运行」处理） */
 export function defaultAutoStartFrom(requested: PluginAutostart): AutoStartMode {
   switch (requested) {
-    case "always":
-      return "always";
     case "never":
       return "never";
+    case "always":
     case "prompt":
     case "on-demand":
     default:
-      return "on-demand";
+      return "always";
   }
 }
 

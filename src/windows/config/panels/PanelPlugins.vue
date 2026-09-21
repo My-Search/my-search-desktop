@@ -89,6 +89,7 @@ async function restoreBuiltin(id: string): Promise<void> {
 type FilterMode = "all" | "running" | "error";
 const filterMode = ref<FilterMode>("all");
 const showDev = ref(true);
+const discardedExpanded = ref(false);
 
 const runningCount = computed(() => rt.runningCount());
 
@@ -104,6 +105,12 @@ const displayList = computed(() => {
     if (filterMode.value === "error" && s.status !== "error" && s.status !== "crashed") continue;
     items.push(rec);
   }
+  items.sort((a, b) => {
+    const aBuiltin = isBuiltin(a.id) ? 1 : 0;
+    const bBuiltin = isBuiltin(b.id) ? 1 : 0;
+    if (aBuiltin !== bBuiltin) return aBuiltin - bBuiltin;
+    return (b.installedAt ?? 0) - (a.installedAt ?? 0);
+  });
   return items;
 });
 
@@ -658,27 +665,30 @@ function durFrom(ts: number | null): string {
 
     <!-- 已卸载的内置插件（可恢复） -->
     <div v-if="builtinEntries.filter(e => e.removed && e.available).length > 0" class="cfg-card plugins-list">
-      <div class="cfg-card-head">
+      <div class="cfg-card-head" @click="discardedExpanded = !discardedExpanded" style="cursor: pointer;">
         <h4>已丢弃的内置插件</h4>
-        <span class="cfg-hint">升级不会自动恢复，可手动重新安装</span>
+        <span class="cfg-hint" style="margin-left: auto;">升级不会自动恢复，可手动重新安装</span>
+        <span class="plugin-arrow" style="margin-left: 8px;">{{ discardedExpanded ? '▼' : '▶' }}</span>
       </div>
-      <div
-        v-for="entry in builtinEntries.filter(e => e.removed && e.available)"
-        :key="entry.id"
-        class="plugin-item"
-      >
-        <div class="plugin-header">
-          <div class="plugin-icon"><span>🧩</span></div>
-          <div class="plugin-meta">
-            <div class="plugin-name">{{ entry.id }}<span class="tag-builtin">内置</span></div>
-            <div class="plugin-desc">已被卸载，升级不会自动恢复</div>
+      <div v-if="discardedExpanded">
+        <div
+          v-for="entry in builtinEntries.filter(e => e.removed && e.available)"
+          :key="entry.id"
+          class="plugin-item"
+        >
+          <div class="plugin-header">
+            <div class="plugin-icon"><span>🧩</span></div>
+            <div class="plugin-meta">
+              <div class="plugin-name">{{ entry.id }}<span class="tag-builtin">内置</span></div>
+              <div class="plugin-desc">已被卸载，升级不会自动恢复</div>
+            </div>
+            <div class="plugin-state"></div>
+            <div class="plugin-arrow"></div>
           </div>
-          <div class="plugin-state"></div>
-          <div class="plugin-arrow"></div>
-        </div>
-        <div class="plugin-detail" style="display: block;">
-          <div class="plugin-detail-actions">
-            <button class="btn-sm" @click.stop="restoreBuiltin(entry.id)">重新安装</button>
+          <div class="plugin-detail" style="display: block;">
+            <div class="plugin-detail-actions">
+              <button class="btn-sm" @click.stop="restoreBuiltin(entry.id)">重新安装</button>
+            </div>
           </div>
         </div>
       </div>
