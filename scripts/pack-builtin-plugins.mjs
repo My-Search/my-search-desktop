@@ -21,7 +21,6 @@ const pluginsDir = path.join(root, "plugins");
 const outputDir = path.join(root, "src-tauri", "resources", "plugins");
 
 const BUILTIN_PLUGINS = [
-  "baidu-translate",
   "pi-agent",
   "market",
 ];

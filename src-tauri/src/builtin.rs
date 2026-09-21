@@ -19,8 +19,7 @@ use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
 /// 允许随资源引导的内置插件 id（防资源被篡改成任意插件走免确认通道）。
-pub(crate) const BUILTIN_ALLOWLIST: [&str; 3] = [
-    "com.mysearch.baidu-translate",
+pub(crate) const BUILTIN_ALLOWLIST: [&str; 2] = [
     "com.mysearch.pi-agent",
     "com.mysearch.market",
 ];

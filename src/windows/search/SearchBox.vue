@@ -4,7 +4,7 @@
  *
  * - 输入框：v-model + input 事件（防抖搜索由父层处理）
  * - 键盘：↑↓ 选择、Enter 打开、Ctrl+Enter 附加内容、Esc 隐藏、Tab 进/出 PRO 模式、Backspace 清标签
- * - logo 按钮：左键 = 搜索 [系统项]（有更新时由 UpdateBadge 接管）/ 右键 = 打开设置
+ * - logo 按钮：左键 = 打开设置 / 右键 = 切换 [系统项]（有更新时由 UpdateBadge 接管）
  * - 更新徽章：环形进度（有更新时替换叶子）
  */
 import { computed, ref, watch } from "vue";
@@ -25,9 +25,9 @@ const emit = defineEmits<{
   (e: "update:modelValue", v: string): void;
   (e: "input", v: string): void;
   (e: "keydown", ev: KeyboardEvent): void;
-  (e: "logo-click"): void;
   (e: "settings"): void;
   (e: "badge-click"): void;
+  (e: "system-item"): void;
 }>();
 
 const inputEl = ref<HTMLInputElement | null>(null);
@@ -84,10 +84,22 @@ watch(
   }
 );
 
-/** logo 右键菜单 */
+/** logo 点击处理：区分左键和右键 */
+function onLogoClick(e: MouseEvent) {
+  // 左键：判断是否有更新
+  if (props.update.state.info && props.update.state.info.has_update) {
+    // 有更新：触发 badge-click 处理更新
+    emit("badge-click");
+  } else {
+    // 无更新：打开设置
+    emit("settings");
+  }
+}
+
+/** logo 右击菜单（切换 [系统项]） */
 function onLogoContextMenu(e: MouseEvent) {
   e.preventDefault();
-  emit("settings");
+  emit("system-item");
 }
 </script>
 
@@ -110,8 +122,8 @@ function onLogoContextMenu(e: MouseEvent) {
       <button
         v-show="showLogo"
         id="logoButton"
-        title="查看系统项（右键：设置）"
-        @click="emit('logo-click')"
+        title="打开设置（右击：切换 [系统项]）"
+        @click="onLogoClick"
         @contextmenu="onLogoContextMenu"
       >
         <img :src="LOGO_ICON" draggable="false" alt="logo" />
@@ -120,7 +132,7 @@ function onLogoContextMenu(e: MouseEvent) {
       <UpdateBadge
         v-show="showBadge"
         :update="props.update"
-        @click="emit('badge-click')"
+        @click="onLogoClick"
         @contextmenu="onLogoContextMenu"
       />
     </div>

@@ -612,6 +612,15 @@ function onLogoClick(): void {
   searchBoxRef.value?.focus();
 }
 
+/** 右击 logo：触发 [系统项] 切换 */
+function onSystemItemClick(): void {
+  const keyword = "[系统项]";
+  const next = inputValue.value === keyword ? "" : keyword;
+  inputValue.value = next;
+  onInput(next);
+  searchBoxRef.value?.focus();
+}
+
 /** 结果项点击（由 ResultList 冒泡） */
 function onResultOpen(index: number): void {
   const result = state.results[index];
@@ -815,9 +824,9 @@ defineExpose({ inputValue });
         :update="update"
         @input="onInput"
         @keydown="onKeydown"
-        @logo-click="onLogoClick"
         @badge-click="onLogoClick"
         @settings="openConfigWindow()"
+        @system-item="onSystemItemClick"
       />
       <div id="matchResult" :style="{ display: resultVisible ? 'block' : 'none' }" :class="{ show: resultVisible }">
         <ResultList

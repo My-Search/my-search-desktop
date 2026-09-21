@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "apiVersion": 1,
   "minAppVersion": "7.9.16",
-  "author": "MySearch Team",
+  "author": "my-search",
   "description": "浏览、安装、更新与卸载插件",
   "homepage": "https://github.com/My-Search",
   "icon": "icon.svg",
