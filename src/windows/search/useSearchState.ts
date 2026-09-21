@@ -200,14 +200,13 @@ export function useSearchState() {
     setPlaceholder(text, restoreMs);
   }
 
-  function updatePlaceholder(fromCache = false): void {
+  function updatePlaceholder(): void {
     const count = engine.searchData.length;
     const failed = engine.failedUrls.length;
     const { text, restoreMs } = resolvePlaceholder({
       loading: false,
       count,
       failed,
-      fromCache,
       restoreMs: PLACEHOLDER_RESTORE_MS,
     });
     setPlaceholder(text, restoreMs);
@@ -352,7 +351,7 @@ export function useSearchState() {
     state.unfollowSnapshot = currentUnfollowSnapshot();
     if (!silent) {
       // 非静默模式才更新界面占位提示
-      updatePlaceholder(fromCache);
+      updatePlaceholder();
     }
     // 若已有输入，重新搜索一次（还原原版数据更新后的 triggerSearchHandle）
     const value = currentInputValue();

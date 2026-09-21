@@ -43,6 +43,7 @@ import {
   type RemoteMeta,
 } from "./bridge";
 import { fingerprint, settingsFingerprint } from "./snapshot";
+import { debug, warn } from "../../lib/logger";
 
 /** 默认兜底检查间隔（毫秒） */
 const DEFAULT_CHECK_INTERVAL_MS = 30 * 60 * 1000;
@@ -104,7 +105,10 @@ export function createSyncEngine(
    * 已上锁时直接返回（不排队）。
    */
   async function sync(trigger: string): Promise<void> {
-    if (syncLock) return;
+    if (syncLock) {
+      debug(`[同步] 已有任务在执行，跳过触发:${trigger}`);
+      return;
+    }
     syncLock = true;
     const start = Date.now();
     update({ status: "syncing" });
@@ -156,11 +160,11 @@ export function createSyncEngine(
     } catch (e) {
       const msg = (e as Error)?.message ?? String(e);
       update({ status: "error", lastError: msg });
-      console.warn("[同步] 失败:", msg);
+      warn(`[同步] 失败 (${trigger}):`, msg);
     } finally {
       syncLock = false;
       const elapsed = Date.now() - start;
-      console.log(`[同步] ${trigger}: ${elapsed}ms`);
+      debug(`[同步] ${trigger}完成:${elapsed}ms`);
     }
   }
 
@@ -171,7 +175,7 @@ export function createSyncEngine(
     // 上传到远端
     await syncUpload(exported);
     update({ status: "idle", lastSyncAt: Date.now(), lastError: "" });
-    console.log(`[同步] ${trigger}: 上传成功`);
+    debug(`[同步] ${trigger}: 上传成功`);
   }
 
   async function doDownload(trigger: string): Promise<void> {
@@ -186,7 +190,7 @@ export function createSyncEngine(
       restoreState(restored.localStorage);
     }
     update({ status: "idle", lastSyncAt: Date.now(), lastError: "" });
-    console.log(`[同步] ${trigger}: 从远端还原成功`);
+    debug(`[同步] ${trigger}: 从远端还原成功`);
   }
 
   // ===================== 决策 =====================

@@ -11,6 +11,9 @@ export default defineConfig({
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version),
   },
+  // 暴露环境变量给应用代码
+  envDir: ".",
+  envPrefix: "VITE_",
   build: {
     outDir: "dist",
     rollupOptions: {

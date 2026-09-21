@@ -11,6 +11,7 @@
 
 import { parseTag, parseTags, captureRegEx } from "./tags.ts";
 import type { SearchItem, SubscribeItem } from "../types/index.ts";
+import { warn, debug } from "./logger";
 
 export { parseTag, parseTags };
 
@@ -517,7 +518,9 @@ export function getFetchFunByName(name: string, globalFetchFun: CustomFetchFun[]
       ) => SearchItem[];
       return (text) => fn(text);
     } catch (e) {
-      console.warn("[我的搜索] 自定义提取函数编译失败:", name, e);
+      warn(`[订阅解析] 自定义提取函数编译失败 (${name}):`, e);
+      debug(`回退到默认 mLineFetchFun:`, e);
+      // 编译失败回退到默认实现
     }
   }
   return mLineFetchFun;

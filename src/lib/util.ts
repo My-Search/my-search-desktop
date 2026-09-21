@@ -555,7 +555,6 @@ export function placeholderProgressText(count: number): string {
  * @param {boolean} [s.preparing]   true=尚未收到任何数据块（数据准备更新中）
  * @param {number}  s.count         当前已就绪的数据条数（加载中即为已解析到的条数）
  * @param {number}  [s.failed]      本次加载失败的内容源数量
- * @param {boolean} [s.fromCache]   本次是否直接复用了未过期的本地缓存
  * @param {number}  [s.restoreMs]   进度/状态提示的自动恢复时长（默认 1200，对应原版 duration）
  * @param {number}  [s.prepareMs]   准备中提示的自动恢复时长（默认 5000，对应原版 dataInitFun）
  * @returns {{text:string, restoreMs:number}} restoreMs>0 → 计时结束后恢复默认提示
@@ -565,7 +564,6 @@ export interface PlaceholderState {
   preparing?: boolean;
   count?: number;
   failed?: number;
-  fromCache?: boolean;
   restoreMs?: number;
   prepareMs?: number;
 }
@@ -575,7 +573,6 @@ export function resolvePlaceholder({
   preparing = false,
   count = 0,
   failed = 0,
-  fromCache = false,
   restoreMs = PLACEHOLDER_RESTORE_MS,
   prepareMs = PLACEHOLDER_PREPARE_MS,
 }: PlaceholderState = {}): { text: string; restoreMs: number } {
@@ -597,9 +594,6 @@ export function resolvePlaceholder({
   }
   if (failed > 0) {
     return { text: `${placeholderProgressText(count)}（${failed} 个订阅加载失败）`, restoreMs };
-  }
-  if (fromCache) {
-    return { text: `⚡ 数据库已就绪（本地缓存）：${count}条`, restoreMs };
   }
   return { text: placeholderProgressText(count), restoreMs };
 }

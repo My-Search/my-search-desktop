@@ -36,6 +36,7 @@ import { setupBuiltinAutoInstall } from "../../lib/plugins/install-builtin";
 import MessageDialog from "../../components/MessageDialog.vue";
 import ToastHost from "../../components/ToastHost.vue";
 import { isUrl, clearUrlSearchTemplate } from "../../lib/util";
+import { debug, warn } from "../../lib/logger";
 import {
   openExternal,
   openConfigWindow,
@@ -157,7 +158,13 @@ async function remountPluginView(pluginId: string, notice: string | null): Promi
     detailRef.value?.onScriptMounted();
     if (notice) toast.showToast(notice, "ok");
   } catch (e) {
-    console.warn(`[插件] 开发热重载重挂视图失败（${pluginId}）:`, e);
+    warn(`[插件] 开发热重载重挂失败 (${pluginId}):`, e);
+    
+    // 重挂失败后的降级处理：提示用户手动刷新
+    toast.showToast(
+      `「${item.plugin.name}」自动热重载失败，请尝试刷新或重启插件`,
+      "error"
+    );
   }
 }
 
@@ -174,7 +181,8 @@ const pluginViewHost = usePluginViewHost({
   },
   fitHeight: () => detailRef.value?.fitHeight(),
   flushHeight: () => detailRef.value?.flushHeight(),
-  container: computed(() => detailRef.value?.pluginContainer ?? null),  onError: (id, msg) => console.warn(`[插件 ${id}] ${msg}`),
+  container: computed(() => detailRef.value?.pluginContainer ?? null),  
+  onError: (id, msg) => warn(`[插件 ${id}]`, msg),
   // 关闭界面时是否停后台进程由插件的 closeBehavior 决定（判定在 usePluginViewHost.clear）
   stopBackend: (id) => pluginHost.stopBackend(id),
 });
@@ -698,14 +706,14 @@ onMounted(async () => {
     // 目录挂载插件的热重载：监听 Rust 侧广播的源目录变化（幂等，可安全重复调用）
     await pluginHost.startDevWatcher();
   } catch (e) {
-    console.warn("[我的搜索] 插件加载失败:", e);
+    warn("[我的搜索] 插件加载失败:", e);
   }
 
   try {
     await search.loadSubscribes();
     await search.loadAllData();
   } catch (e) {
-    console.error("[我的搜索] 初始化加载失败:", e);
+    warn("[我的搜索] 初始化加载失败:", e);
   }
   update.scheduleUpdateCheck();
 
