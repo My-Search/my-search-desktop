@@ -1,7 +1,7 @@
 name: 构建插件市场索引
 
 # 读取 plugins/index.json（人工维护的源清单），解析出每个插件的
-# 版本/哈希/下载地址，生成 index.dist.json（客户端读）与 error-item.txt（开发者自查），
+# 版本/哈希/下载地址，生成 index.dist.json（客户端读）与 index.error.json（开发者自查），
 # 提交回仓库。客户端通过 raw 地址读取，因此发布只需 git push，不需要额外 token。
 #
 # 开发者在自己的仓库发版后，最长一小时内市场自动跟进——无需联系我们。
@@ -48,7 +48,7 @@ jobs:
           name: market-index
           path: |
             dist/market/index.dist.json
-            dist/market/error-item.txt
+            dist/market/index.error.json
 
       # 索引文件提交回仓库根目录，客户端从 raw 读取
       - name: 提交索引
@@ -56,10 +56,10 @@ jobs:
         run: |
           set -euo pipefail
           cp dist/market/index.dist.json index.dist.json
-          cp dist/market/error-item.txt error-item.txt
+          cp dist/market/index.error.json index.error.json
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add index.dist.json error-item.txt plugins/index.json
+          git add index.dist.json index.error.json plugins/index.json
           if git diff --cached --quiet; then
             echo "索引无变化，跳过提交"
           else

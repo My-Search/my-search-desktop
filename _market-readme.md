@@ -10,7 +10,7 @@
 | --- | --- | --- | --- |
 | `index.json` | **人工维护** | 源清单：官方插件路径 + 第三方仓库 | 我们的构建工具 |
 | `index.dist.json` | **工具自动生成** | 完整索引：版本、sha256、下载地址… | **客户端** |
-| `error-item.txt` | 工具自动生成 | 被排除的项与原因 | 开发者自查 |
+| `index.error.json` | 工具自动生成 | 被排除的项与原因 | 开发者自查 |
 
 客户端读的是：
 
@@ -65,7 +65,7 @@ official-plugins/
 1. 读 `index.json`
 2. 逐个解析（官方列版本目录 / 三方下载 Release 包）
 3. 计算 sha256、校验包内清单、取最大版本
-4. 生成 `index.dist.json` 与 `error-item.txt`，**提交回仓库**
+4. 生成 `index.dist.json` 与 `index.error.json`，**提交回仓库**
 5. 客户端下次读取即拿到最新索引
 
 整个过程只需本仓库的 `GITHUB_TOKEN`，**不依赖任何额外 secret**——
@@ -74,7 +74,7 @@ official-plugins/
 ## 构建异常
 
 不符合规范的项不会进入 `index.dist.json`，原因写入
-[`error-item.txt`](./error-item.txt)，开发者可自行查看。常见原因：
+[`index.error.json`](./index.error.json)，开发者可自行查看。常见原因：
 
 - 仓库不存在（404，会同时从 `index.json` 自动移除）
 - tag 不符合「插件 id」格式

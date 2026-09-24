@@ -17,7 +17,7 @@
 如果索引构建时你的插件不符合规范，它**不会进入市场**，但原因会写在一份公开清单里：
 
 ```
-https://github.com/My-Search/my-search-plugin-market/blob/main/error-item.txt
+https://github.com/My-Search/my-search-plugin-market/blob/main/index.error.json
 ```
 
 该文件列出每个被排除的项及原因（例如"包内 id 与 tag 不一致"、"仓库不存在"）。
@@ -180,7 +180,7 @@ gh release create com.yourname.my-plugin \
 gh release upload com.yourname.my-plugin dist/com.yourname.my-plugin.mspp --clobber
 ```
 
-**后缀必须是 `.mspp`**，用别的后缀会导致市场索引构建失败（你会在 `error-item.txt` 里看到原因）。
+**后缀必须是 `.mspp`**，用别的后缀会导致市场索引构建失败（你会在 `index.error.json` 里看到原因）。
 
 #### 发布规范要点（务必逐条对照）
 

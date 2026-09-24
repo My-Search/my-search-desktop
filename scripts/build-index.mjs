@@ -3,8 +3,9 @@
  *
  * 读取 `plugins/index.json`（人工维护的源清单）→ 逐个解析出插件信息
  * → 生成两个产物：
- *   - `index.dist.json`：完整索引（客户端读它，走 raw 地址）
- *   - `error-item.txt` ：被排除的项与原因（开发者可自查为什么没上架）
+ *   - `index.dist.json` ：完整索引（客户端读它，走 raw 地址）
+ *   - `index.error.json`：被排除的项与原因，**与 index.json 同构**
+ *     （官方错误在 official-repo、三方错误在 three-parties，供开发者自查）
  *
  * 用法：
  *   node scripts/build-index.mjs                     # 全量构建
@@ -23,7 +24,7 @@
  *
  * ## 异常处理
  *
- * - 不符合规范（缺包、清单非法、版本不匹配等）→ 排除该条，原因写入 error-item.txt；
+ * - 不符合规范（缺包、清单非法、版本不匹配等）→ 排除该条，原因写入 index.error.json；
  * - 仓库 404（已删除/转私有）→ **自动从 index.json 移除**，下次不再处理。
  *
  * ## 设计约束（与客户端契约严格对齐）
@@ -68,10 +69,24 @@ function sha256(buf) {
   return createHash("sha256").update(buf).digest("hex");
 }
 
-/** 出错记录：写入 error-item.txt，供开发者自查 */
-const errors = [];
-function recordError(source, reason) {
-  errors.push({ source, reason });
+/**
+ * 出错记录：写入 index.error.json，供开发者自查为什么没上架。
+ * 结构与 index.json 同构——官方错误进 official-repo、三方错误进 three-parties，
+ * 每项保留**原条目信息 + reason**，便于精确定位。
+ */
+const errors = { official: [], threeParties: [] };
+/** 记录一条排除项。kind: 'official' | 'three-party' */
+function recordError(kind, item, reason) {
+  if (kind === "official") {
+    // 官方条目可能是字符串或 {path, official} 对象，统一记录为 {path, reason}（保留 official）
+    const entry = { path: typeof item === "string" ? item : item.path, reason };
+    if (typeof item === "object" && item !== null && item.official !== undefined) {
+      entry.official = item.official;
+    }
+    errors.official.push(entry);
+  } else {
+    errors.threeParties.push({ repo: item, reason });
+  }
 }
 
 // ===================== 通用工具 =====================
@@ -394,11 +409,15 @@ async function resolveThreeParty(repo) {
 const entries = [];
 const seen = new Set();
 
-async function processOne(label, fn) {
+/**
+ * 处理一个源：成功则收集条目，失败则记入 index.error.json。
+ * kind: 'official' | 'three-party'；item 为原条目（字符串或对象）
+ */
+async function processOne(kind, item, label, fn) {
   process.stdout.write(`🔄 ${label} … `);
   try {
     const entry = await fn();
-    if (entry === null) { console.log("跳过（仓库不存在）"); return; }
+    if (entry === null) { console.log("跳过（仓库不存在，已从 index.json 移除）"); return; }
     if (seen.has(entry.id)) throw new Error(`插件 id 重复：${entry.id}`);
     seen.add(entry.id);
     entries.push(entry);
@@ -406,15 +425,15 @@ async function processOne(label, fn) {
   } catch (e) {
     console.log("排除");
     console.error(`   ✗ ${e.message}`);
-    recordError(label, e.message);
+    recordError(kind, item, e.message);
   }
 }
 
 for (const p of officialRepos) {
   const label = typeof p === "string" ? p : p.path;
-  await processOne(`official-repo:${label}`, () => resolveOfficial(p));
+  await processOne("official", p, `official-repo:${label}`, () => resolveOfficial(p));
 }
-for (const r of threeParties) await processOne(`three-parties:${r}`, () => resolveThreeParty(r));
+for (const r of threeParties) await processOne("three-party", r, `three-parties:${r}`, () => resolveThreeParty(r));
 
 if (entries.length === 0) {
   console.error("✗ 没有任何插件解析成功");
@@ -431,20 +450,16 @@ const dist = {
 const distPath = path.join(outDir, "index.dist.json");
 writeFileSync(distPath, JSON.stringify(dist, null, 2) + "\n");
 
-// ---- 生成 error-item.txt（开发者自查）----
-const errPath = path.join(outDir, "error-item.txt");
-if (errors.length === 0) {
-  writeFileSync(errPath, `# 构建时间：${new Date().toISOString()}\n# 本次构建没有排除任何项\n`);
-} else {
-  const lines = [
-    `# 插件索引构建：被排除的项`,
-    `# 构建时间：${new Date().toISOString()}`,
-    `# 以下条目未能进入 index.dist.json，请按原因修正后等待下次构建。`,
-    "",
-  ];
-  for (const e of errors) lines.push(`[排除] ${e.source}`, `       原因：${e.reason}`, "");
-  writeFileSync(errPath, lines.join("\n"));
-}
+// ---- 生成 index.error.json（开发者自查）----
+// 结构与 index.json 同构：官方错误进 official-repo、三方错误进 three-parties，
+// 每项保留原条目信息 + reason。始终生成（无错误时两个数组为空）。
+const errDoc = {
+  generatedAt: new Date().toISOString(),
+  "official-repo": errors.official,
+  "three-parties": errors.threeParties,
+};
+const errPath = path.join(outDir, "index.error.json");
+writeFileSync(errPath, JSON.stringify(errDoc, null, 2) + "\n");
 
 // ---- 用宿主解析器回验 ----
 const { parseCatalog, describeCatalogErrors } = await import("../src/lib/plugins/market-types.ts");
@@ -457,8 +472,15 @@ if (!parsed.ok) {
 
 console.log("");
 console.log(`✅ index.dist.json：${path.relative(root, distPath)}（${entries.length} 个插件）`);
-if (errors.length > 0) console.log(`⚠ error-item.txt：${errors.length} 个项被排除（见该文件）`);
-else console.log(`✅ error-item.txt：无排除项`);
+const errCount = errors.official.length + errors.threeParties.length;
+if (errCount > 0) {
+  console.log(
+    `⚠ index.error.json：${errCount} 个项被排除` +
+      `（官方 ${errors.official.length} / 三方 ${errors.threeParties.length}）`
+  );
+} else {
+  console.log(`✅ index.error.json：无排除项`);
+}
 
 // ---- 404 仓库自动移除：重写 index.json ----
 if (autoRemoved.length > 0) {
