@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-09-24T10:29:39.107Z",
+  "generatedAt": "2026-09-24T10:46:27.967Z",
   "baseUrl": "https://github.com/My-Search/my-search-plugin-market/releases/download",
   "plugins": [
     {
@@ -22,8 +22,8 @@
         "store",
         "backend.spawn"
       ],
-      "publishedAt": "2026-09-24T10:29:36.030Z",
-      "updatedAt": "2026-09-24T10:29:36.030Z",
+      "publishedAt": "2026-09-24T10:46:24.978Z",
+      "updatedAt": "2026-09-24T10:46:24.978Z",
       "minAppVersion": "7.9.15",
       "homepage": "https://github.com/My-Search/my-search-desktop",
       "icon": "https://raw.githubusercontent.com/My-Search/my-search-plugin-market/main/official-plugins/com.mysearch.pi-agent/2.5.2/icon.svg",
@@ -48,8 +48,8 @@
         "plugin.install",
         "ui.notify"
       ],
-      "publishedAt": "2026-09-24T10:29:37.539Z",
-      "updatedAt": "2026-09-24T10:29:37.539Z",
+      "publishedAt": "2026-09-24T10:46:26.365Z",
+      "updatedAt": "2026-09-24T10:46:26.365Z",
       "minAppVersion": "7.9.16",
       "homepage": "https://github.com/My-Search",
       "icon": "https://raw.githubusercontent.com/My-Search/my-search-plugin-market/main/official-plugins/com.mysearch.market/1.0.0/icon.svg",
@@ -71,8 +71,8 @@
       "permissions": [
         "ui.inlay"
       ],
-      "publishedAt": "2026-09-24T10:29:38.228Z",
-      "updatedAt": "2026-09-24T10:29:38.228Z",
+      "publishedAt": "2026-09-24T10:46:27.099Z",
+      "updatedAt": "2026-09-24T10:46:27.099Z",
       "minAppVersion": "7.9.15",
       "homepage": "https://fanyi.baidu.com",
       "icon": "https://api.xinac.net/icon/?url=https://fanyi.baidu.com",
