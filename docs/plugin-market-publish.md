@@ -2,6 +2,11 @@
 
 > English version: [plugin-market-publish.en.md](./plugin-market-publish.en.md)
 
+> 本文在市场仓库有一份副本，供第三方开发者直接查阅：
+> https://github.com/My-Search/my-search-plugin-market/blob/main/docs/plugin-market-publish.md
+> **改动本文件后请同步推送该副本**（内容需保持一致）。
+
+
 本文从零开始，带你完成：**写一个插件 → 本地调试 → 打包 → 发布到市场**。
 
 如果你只想快速了解发布约定，可跳转到 [第四节](#四打包与发布)。
