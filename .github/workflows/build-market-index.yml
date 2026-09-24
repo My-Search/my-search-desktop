@@ -56,8 +56,11 @@ jobs:
             dist/market/index.error.json
 
       # 索引要提交到**市场仓库**（客户端从这里读）。
-      # 默认 GITHUB_TOKEN 只能写本仓库，因此这里用 MARKET_REPO_TOKEN
+      # 默认 GITHUB_TOKEN 只能写本仓库，跨仓库提交需要 MARKET_REPO_TOKEN
       # （PAT，scopes: repo）。
+      #
+      # 未配置该 secret 时不使流程失败：索引已作为 artifact 上传，
+      # 这里只发出警告（::warning 会显示在 Actions 摘要里）。
       - name: 提交索引到市场仓库
         if: ${{ github.event_name == 'schedule' || inputs.dry_run == false }}
         env:
@@ -65,8 +68,10 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::error::缺少 MARKET_REPO_TOKEN（需对 $MARKET_REPO 有 contents:write）"
-            exit 1
+            echo "::warning::未配置 MARKET_REPO_TOKEN，索引未自动发布到 $MARKET_REPO。"
+            echo "  索引已作为 artifact 'market-index' 上传，可手动下载后提交；"
+            echo "  或按 README/docs 说明配置一个对市场仓库有 contents:write 的 PAT secret。"
+            exit 0
           fi
 
           # 检出市场仓库到独立目录
