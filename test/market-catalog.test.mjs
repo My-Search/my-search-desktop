@@ -67,7 +67,7 @@ const entryOf = (over = {}) => ({
   description: "演示目录条目",
   categories: ["工具"],
   permissions: ["ui.inlay", "store"],
-  downloadUrl: "https://github.com/org/market/releases/download/v1.0.0/com.example.demo.msplugin",
+  downloadUrl: "https://github.com/org/market/releases/download/v1.0.0/com.example.demo.mspp",
   sha256: "a".repeat(64),
   publishedAt: "2026-09-01T00:00:00Z",
   updatedAt: "2026-09-01T00:00:00Z",
@@ -101,16 +101,73 @@ const catalogOf = (plugins, over = {}) => ({
   ok(r.ok === false && r.errors.some((e) => e.includes("catalog.baseUrl.invalid")), "非 https baseUrl 被拒");
 }
 {
-  const r = parseCatalog(catalogOf([entryOf({ downloadUrl: "https://evil.com/x.msplugin" })]));
-  ok(r.ok === false && r.errors.some((e) => e.endsWith("downloadUrl.outOfBase")), "下载地址越出受控前缀被拒");
+  const r = parseCatalog(catalogOf([entryOf({ downloadUrl: "https://evil.com/x.mspp" })]));
+  ok(r.ok === false && r.errors.some((e) => e.endsWith("downloadUrl.notAllowed")), "非白名单 host 的下载地址被拒");
 }
 {
   const r = parseCatalog(catalogOf([entryOf({ sha256: "zz".repeat(32) })]));
   ok(r.ok === false && r.errors.some((e) => e.endsWith("sha256.invalid")), "非法 sha256 被拒");
 }
 {
-  const r = parseCatalog(catalogOf([entryOf({ downloadUrl: "http://github.com/org/market/releases/download/v1.0.0/a.msplugin" })]));
-  ok(r.ok === false && r.errors.some((e) => e.endsWith("downloadUrl.insecure")), "http 下载地址被拒（非 localhost）");
+  const r = parseCatalog(catalogOf([entryOf({ downloadUrl: "http://github.com/org/market/releases/download/v1.0.0/a.mspp" })]));
+  ok(r.ok === false && r.errors.some((e) => e.endsWith("downloadUrl.notAllowed")), "http 下载地址被拒（非 localhost）");
+}
+{
+  // 第三方开发者仓库：插件包托管在开发者自己的仓库里，应被接受
+  const r = parseCatalog(catalogOf([entryOf({ downloadUrl: "https://github.com/someone/my-plugin/releases/download/v1.0.0/com.x.y.mspp" })]));
+  ok(r.ok === true, "第三方开发者仓库地址被接受");
+}
+{
+  // 官方插件目录（raw 直链）：按版本归档的包应被接受
+  const url = "https://raw.githubusercontent.com/My-Search/my-search-plugin-market/main/official-plugins/com.mysearch.market/2.0.0/com.mysearch.market.mspp";
+  const r = parseCatalog(catalogOf([entryOf({ downloadUrl: url })]));
+  ok(r.ok === true, "官方插件 raw 直链被接受");
+}
+{
+  // raw 域不可被借用取仓库里的任意文件
+  const base = "https://raw.githubusercontent.com/My-Search/my-search-plugin-market/main";
+  const bad = [
+    ["借 raw 取源码", `${base}/src/lib/main.ts`],
+    ["相似目录名", `${base}/official-plugins-evil/x/1.0.0/x.mspp`],
+    ["缺版本层", `${base}/official-plugins/x/x.mspp`],
+    ["资产非 .mspp", `${base}/official-plugins/x/1.0.0/x.sh`],
+  ];
+  for (const [name, url] of bad) {
+    const r = parseCatalog(catalogOf([entryOf({ downloadUrl: url })]));
+    ok(r.ok === false, `raw 地址拒绝：${name}`);
+  }
+}
+{
+  // 各类伪造与越权地址必须拒绝
+  const bad = [
+    ["子域名伪造", "https://github.com.evil.com/a/b/releases/download/v1/x.mspp"],
+    ["userinfo 伪造", "https://github.com@evil.com/a/b/releases/download/v1/x.mspp"],
+    ["非标端口", "https://github.com:8443/a/b/releases/download/v1/x.mspp"],
+    ["非 Release 路径", "https://github.com/a/b/raw/main/x.mspp"],
+    ["路径段伪造", "https://github.com/a/b/releases/download-evil/v1/x.mspp"],
+    ["缺少资产名", "https://github.com/a/b/releases/download"],
+  ];
+  for (const [name, url] of bad) {
+    const r = parseCatalog(catalogOf([entryOf({ downloadUrl: url })]));
+    ok(r.ok === false, `下载地址拒绝：${name}`);
+  }
+}
+{
+  // 废弃标记：仅作提醒，不影响解析通过（不禁止安装）
+  const r = parseCatalog(catalogOf([entryOf({ deprecated: true, deprecatedReason: "作者已归档该仓库，插件不再维护" })]));
+  ok(r.ok === true, "带 deprecated 的条目解析通过");
+  ok(r.ok && r.catalog.plugins[0].deprecated === true, "deprecated 字段被保留");
+  ok(r.ok && r.catalog.plugins[0].deprecatedReason === "作者已归档该仓库，插件不再维护", "废弃原因被保留");
+}
+{
+  // 未标废弃时不应凭空产生字段
+  const r = parseCatalog(catalogOf([entryOf()]));
+  ok(r.ok && r.catalog.plugins[0].deprecated === undefined, "未标记时 deprecated 为 undefined");
+}
+{
+  // 非法类型应被拒
+  const r = parseCatalog(catalogOf([entryOf({ deprecated: "yes" })]));
+  ok(r.ok === false && r.errors.some((e) => e.endsWith("deprecated.invalid")), "deprecated 非布尔被拒");
 }
 {
   // 重复 id：更高版本胜出
@@ -130,9 +187,9 @@ const catalogOf = (plugins, over = {}) => ({
 }
 {
   // 错误文案可读
-  const r = parseCatalog(catalogOf([entryOf({ downloadUrl: "https://evil.com/x.msplugin" })]));
+  const r = parseCatalog(catalogOf([entryOf({ downloadUrl: "https://evil.com/x.mspp" })]));
   const text = describeCatalogErrors(r.ok ? [] : r.errors).join("；");
-  ok(text.includes("受控前缀"), "outOfBase 文案点名前缀", text);
+  ok(text.includes("github.com"), "notAllowed 文案点明允许的 host", text);
 }
 {
   const perms = r => ok(

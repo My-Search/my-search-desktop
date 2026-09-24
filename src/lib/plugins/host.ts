@@ -18,16 +18,23 @@ import type { SearchItem } from "../../types/index.ts";
 import type { SearchResult } from "../../types/index.ts";
 import { storageGet } from "../util.ts";
 import { openExternal } from "../tauri-bridge.ts";
+import { effectiveTheme, THEME_CHANGED_EVENT } from "../theme.ts";
 import { isKnownPermission, permissionBaseId } from "./permissions.ts";
 import type { PluginRecord, PluginRegistryFile } from "./registry.ts";
 import {
+  findPlugin,
   isGranted,
+  loadRegistry,
   markDenied,
   pluginDataGet,
   pluginDataSet,
   pluginDataRemove,
+  resolvePluginTheme,
   saveRegistry,
 } from "./registry.ts";
+import { loadEnvVars } from "./env-store.ts";
+import { attachmentList, attachmentListCancel, attachmentOpen, attachmentRead, attachmentReveal } from "./ipc.ts";
+import type { AttachedEntry } from "./attachments.ts";
 
 /** 权限不足（插件视图宿主据此弹授权，而不是当异常吞掉） */
 export class PluginPermissionError extends Error {
@@ -73,6 +80,17 @@ export interface PluginHostContext {
   openPluginWindow?: (pluginId: string, entry: string, title: string) => void;
   /** 面板里请求授权（由面板注入；详情视图内为 null 时走内联弹窗） */
   requestPermission?: (pluginId: string, permission: string) => Promise<boolean>;
+  /** 当前附加在搜索框里的文件/文件夹（ms.input.attachments 的数据源） */
+  getAttachments?: () => readonly AttachedEntry[];
+  /**
+   * 请求宿主重新求解并应用一次插件主题（`ms.ui.registerThemeProvider` /
+   * `ms.ui.applyTheme` 的下游）。
+   *
+   * 由搜索窗的视图宿主注入：它会读走本模块登记的 provider 返回值，再决定
+   * 把呼出窗口切成插件主题还是恢复软件主题（详见 usePluginViewHost 与
+   * theme-override.ts）。未注入时两个 API 退化为空操作。
+   */
+  refreshPluginTheme?: () => void;
 }
 
 /** 一次调用的审计记录（环形缓冲，面板「权限与调用记录」页签展示） */
@@ -166,6 +184,96 @@ function clearNotificationHandlers(pluginId: string): void {
   notificationHandlers.delete(pluginId);
 }
 
+/* ============================================================
+ * 主题变更监听管理器（模块级，跨 API 实例共享）
+ *
+ * 通知源只有一个 DOM 事件（THEME_CHANGED_EVENT，由 theme.ts 的 applyTheme
+ * 派发）：跨窗口同步（设置窗口切主题 → Rust 事件 → 本窗口 theme.ts 监听
+ * → applyTheme）与 system 模式下系统偏好变化，最终都汇聚到那里。
+ * 因此本模块不需要自己碰 Tauri 事件 / matchMedia，浏览器调试环境同样工作。
+ * ============================================================ */
+
+/** 主题变更监听器：pluginId → Set<fn> */
+const themeHandlers = new Map<string, Set<(theme: "light" | "dark") => void>>();
+/** document 上的全局监听是否已挂（只挂一次） */
+let themeListenerReady = false;
+
+function notifyThemeHandlers(): void {
+  if (themeHandlers.size === 0) return;
+  const theme = effectiveTheme();
+  for (const handlers of themeHandlers.values()) {
+    for (const h of handlers) {
+      try {
+        h(theme);
+      } catch (e) {
+        console.warn("[插件] 主题变更处理器异常:", e);
+      }
+    }
+  }
+}
+
+/** 确保全局监听已注册（首次订阅时挂，避免模块启动期依赖 DOM 就绪） */
+function ensureThemeListener(): void {
+  if (themeListenerReady) return;
+  themeListenerReady = true;
+  try {
+    document.addEventListener(THEME_CHANGED_EVENT, notifyThemeHandlers);
+  } catch (e) {
+    console.warn("[插件] 注册主题监听失败:", e);
+  }
+}
+
+/** 清理某插件的所有主题监听（视图卸载时调用） */
+function clearThemeHandlers(pluginId: string): void {
+  themeHandlers.delete(pluginId);
+}
+
+/* ============================================================
+ * 插件主题 provider（插件自报「我该用深色还是浅色」）
+ *
+ * 与上面的 themeHandlers 方向相反：那是宿主 → 插件的通知；这是插件 → 宿主的
+ * 上报。插件（如 pi-agent 左下角的主题切换）在入口脚本里调用
+ * `ms.ui.registerThemeProvider(fn)` 登记一个返回 "dark" | "light" | "inherit"
+ * 的函数，宿主在**每次打开/恢复插件视图**时读一次，据此决定呼出窗口的主题；
+ * 插件界面内改主题后调用 `ms.ui.applyTheme()` 让宿主立即重新求解。
+ *
+ * 值缓存在模块级（跨挂载/恢复保留），随会话卸载（`_clearThemeProvider`）清理。
+ * ============================================================ */
+
+/** 插件主题 provider：pluginId → 返回当前偏好的函数 */
+const themeProviders = new Map<string, () => "light" | "dark" | "inherit">();
+
+/**
+ * 市场目录地址（客户端唯一切入口）。
+ * 目录里每条 `downloadUrl` 指向插件包的实际位置（可能在各开发者仓库的 Release），
+ * 由 `plugins/sources.json` 的准入名单经同步工具生成。
+ */
+const MARKET_CATALOG_URL =
+  "https://github.com/My-Search/my-search-plugin-market/releases/download/catalog/catalog.json";
+
+/**
+ * 取某插件自报的主题偏好（无 provider / provider 抛错 → null，由调用方回落到
+ * 清单声明与用户偏好）。宿主不缓存返回值的合法性：插件每次读都可能给新值。
+ */
+export function readPluginThemeProvider(
+  pluginId: string
+): "light" | "dark" | "inherit" | null {
+  const fn = themeProviders.get(pluginId);
+  if (!fn) return null;
+  try {
+    const v = fn();
+    return v === "light" || v === "dark" || v === "inherit" ? v : null;
+  } catch (e) {
+    console.warn(`[插件 ${pluginId}] 主题 provider 异常:`, e);
+    return null;
+  }
+}
+
+/** 清理某插件的主题 provider（视图卸载时调用） */
+function clearThemeProvider(pluginId: string): void {
+  themeProviders.delete(pluginId);
+}
+
 /**
  * 创建某个插件的宿主 API 实例。
  *
@@ -253,8 +361,22 @@ export function createHostApi(pluginId: string, ctx: PluginHostContext): Record<
       get info() {
         const rec = record();
         return rec
-          ? { id: rec.id, name: rec.name, version: rec.version, enabled: rec.enabled }
-          : { id: pluginId, name: pluginId, version: "?", enabled: false };
+          ? {
+              id: rec.id,
+              name: rec.name,
+              version: rec.version,
+              enabled: rec.enabled,
+              /**
+               * 本插件界面**声明的**默认主题（"dark" | "light" | "inherit"）。
+               *
+               * 供插件初始化自己的主题偏好用：插件在界面里提供主题切换时，默认值
+               * 应当取自这里（而不是硬编码 "inherit"）——否则插件会用自己的默认值
+               * 覆盖清单声明，出现「清单写了 dark、界面却仍跟随宿主」的怪象。
+               * 口径与视图宿主一致：用户面板选择 → 清单声明 → inherit。
+               */
+              theme: resolvePluginTheme(rec),
+            }
+          : { id: pluginId, name: pluginId, version: "?", enabled: false, theme: "inherit" as const };
       },
       granted: () => record()?.grants.map((g) => g.permission) ?? [],
       has: (permission: string) => {
@@ -373,6 +495,174 @@ export function createHostApi(pluginId: string, ctx: PluginHostContext): Record<
             return true;
           },
         }),
+
+      /**
+       * 当前生效主题（"light"/"dark"；「跟随系统」时返回按系统偏好解析后的结果）。
+       * 不做权限门控：属环境信息（同 plugin.*），插件据此做逻辑级主题适配
+       * （如选图标、切动态渲染的配色）。纯 CSS 换色不需要它——直接用宿主
+       * 共享变量 `var(--text, 兜底)` 即可（见 style.css「插件共享主题变量」节）。
+       */
+      get theme(): "light" | "dark" {
+        return effectiveTheme();
+      },
+      /**
+       * 订阅主题变更，返回退订函数（与 backend.onNotification 同形态）。
+       * 保活（停靠）会话继续收到；会话卸载时由宿主统一清理（_clearThemeHandlers）。
+       */
+      onThemeChanged: (fn: (theme: "light" | "dark") => void): (() => void) => {
+        if (typeof fn !== "function") return () => {};
+        let handlers = themeHandlers.get(pluginId);
+        if (!handlers) {
+          handlers = new Set();
+          themeHandlers.set(pluginId, handlers);
+        }
+        handlers.add(fn);
+        ensureThemeListener();
+        return () => {
+          handlers.delete(fn);
+          if (handlers.size === 0) themeHandlers.delete(pluginId);
+        };
+      },
+      /** 清理本插件的全部主题订阅（视图宿主卸载会话时调用） */
+      _clearThemeHandlers: (): void => {
+        clearThemeHandlers(pluginId);
+      },
+      /**
+       * 登记「本插件界面当前想用哪套主题」的 provider，返回退订函数。
+       *
+       * provider 返回 `"dark"` / `"light"` 时，宿主在打开本插件视图期间会把
+       * **整个呼出窗口**切成该主题（搜索框与插件面板同色），关闭后恢复软件主题；
+       * 返回 `"inherit"` 表示跟随宿主主题。宿主在每次打开/恢复视图时读一次，
+       * 因此保活（最小化）的会话也能在再次打开时被重新询问。
+       *
+       * 典型用法（插件自带的主题切换，如 pi-agent 左下角）：
+       * ```js
+       * let pref = await ms.store.get("theme") ?? "inherit";
+       * ms.ui.registerThemeProvider(() => pref);
+       * // 用户切换后：
+       * pref = "light";
+       * await ms.store.set("theme", pref);
+       * ms.ui.applyTheme();   // 让宿主立即重新求解并应用
+       * ```
+       * 不做权限门控：与 `theme` 同源，属界面环境信息。
+       */
+      registerThemeProvider: (
+        fn: () => "light" | "dark" | "inherit"
+      ): (() => void) => {
+        if (typeof fn !== "function") return () => {};
+        themeProviders.set(pluginId, fn);
+        return () => {
+          if (themeProviders.get(pluginId) === fn) themeProviders.delete(pluginId);
+        };
+      },
+      /**
+       * 让宿主立即重新求解并应用一次本插件的主题（provider 值变化后调用）。
+       * 不做权限门控：纯界面行为，且只影响本插件自己的视图。
+       */
+      applyTheme: (): boolean => {
+        try {
+          ctx.refreshPluginTheme?.();
+        } catch (e) {
+          console.warn(`[插件 ${pluginId}] 应用插件主题失败:`, e);
+        }
+        return true;
+      },
+      /** 清理本插件的主题 provider（视图宿主卸载会话时调用） */
+      _clearThemeProvider: (): void => {
+        clearThemeProvider(pluginId);
+      },
+    },
+
+    /* ---------------- 输入附件（粘贴/拖入搜索框的文件与文件夹） ----------------
+     *
+     * 整个命名空间挂在 `file.read` 权限下：元数据、内容读取、目录列举、
+     * 系统打开一并受控。前端查权限是第一道；Rust 侧（attachment_* 命令）
+     * 还会复核网关 grants +「路径必须落在已登记的附加集合内」，插件因此
+     * 拿不到集合之外的本地文件。
+     *
+     * 语义提醒：附件是**用户主动放进搜索框**的内容，插件可以选择不处理
+     * （如文件搜索插件遇到非目标文件夹时给出提示即可）。
+     */
+    input: {
+      /** 当前附加的文件/文件夹（浅拷贝：插件改不动宿主状态） */
+      attachments: () =>
+        call({
+          api: "input.attachments",
+          permission: "file.read",
+          run: () => (ctx.getAttachments?.() ?? []).map((a) => ({ ...a })),
+        }),
+      /** 读附加文件内容 → data URL（`data:<mime>;base64,...`） */
+      readFile: (path: string) =>
+        call({
+          api: "input.readFile",
+          permission: "file.read",
+          detail: String(path ?? "").slice(0, 300),
+          run: async () => {
+            const p = String(path ?? "").trim();
+            if (!p) throw new Error("缺少文件路径");
+            return await attachmentRead(pluginId, p);
+          },
+        }),
+      /** 递归列举附加文件夹（{path,name,relPath,isDir,size,mtimeMs}[]；gen 见 cancelListFolder） */
+      listFolder: (path: string, opts: { limit?: number; gen?: number } = {}) =>
+        call({
+          api: "input.listFolder",
+          permission: "file.read",
+          detail: String(path ?? "").slice(0, 300),
+          run: async () => {
+            const p = String(path ?? "").trim();
+            if (!p) throw new Error("缺少文件夹路径");
+            const limit = Number(opts?.limit) || 20000;
+            const gen = Math.floor(Number(opts?.gen));
+            return await attachmentList(
+              pluginId,
+              p,
+              limit,
+              Number.isFinite(gen) && gen > 0 ? gen : undefined
+            );
+          },
+        }),
+      /** 取消一代列举（gen = 该轮 listFolder 传入的 gen）：在途 walk 尽快带着部分结果返回 */
+      cancelListFolder: (gen: number) =>
+        call({
+          api: "input.cancelListFolder",
+          permission: "file.read",
+          run: async () => {
+            const g = Math.floor(Number(gen));
+            if (!Number.isFinite(g) || g <= 0) throw new Error("缺少列举代次（gen）");
+            await attachmentListCancel(g);
+            return true;
+          },
+        }),
+      /** 用系统默认程序打开附加的文件 / 文件夹 */
+      open: (path: string) =>
+        call({
+          api: "input.open",
+          permission: "file.read",
+          detail: String(path ?? "").slice(0, 300),
+          run: async () => {
+            const p = String(path ?? "").trim();
+            if (!p) throw new Error("缺少路径");
+            await attachmentOpen(pluginId, p);
+            return true;
+          },
+        }),
+      /**
+       * 在系统文件管理器（Windows 资源管理器）中定位附加的文件 / 文件夹：
+       * 打开所在目录并选中该条目。与 `open` 同权限、同「附加集合」校验。
+       */
+      reveal: (path: string) =>
+        call({
+          api: "input.reveal",
+          permission: "file.read",
+          detail: String(path ?? "").slice(0, 300),
+          run: async () => {
+            const p = String(path ?? "").trim();
+            if (!p) throw new Error("缺少路径");
+            await attachmentReveal(pluginId, p);
+            return true;
+          },
+        }),
     },
 
     /* ---------------- 存储 ---------------- */
@@ -409,6 +699,49 @@ export function createHostApi(pluginId: string, ctx: PluginHostContext): Record<
         }),
     },
 
+    /* ---------------- 环境变量（宿主集中配置；逐项授权） ----------------
+     *
+     * 设计要点（与 README「环境变量」一节对应）：
+     *   - **只看得见被授权的**：`list()` / `granted()` / `has()` 都以注册表里的
+     *     `env.read:<NAME>` 授予记录为准，未授权的变量对插件**完全不可见**；
+     *   - **值不出插件上下文**：本命名空间**不提供 `get()`**。值只由宿主在下发
+     *     网关配置时交给 Rust，由 Rust 在 spawn 后台进程时注入为真正的进程环境
+     *     变量（插件在自己的配置里写 `$NAME` 引用即可）。这样密钥不会进入插件
+     *     JS 上下文，也不会出现在插件可读的 DOM 里（inlay 不是沙箱）；
+     *   - `pick()` 打开**宿主绘制**的授权弹层：用户亲自选择/授权，插件无法伪造。
+     */
+    env: {
+      /** 已授权可见的变量名（不带值） */
+      granted: () => envGrantedNames(pluginId),
+      /** 是否已获授权使用某个变量 */
+      has: (name: string) => envGrantedNames(pluginId).includes(String(name ?? "")),
+      /**
+       * 已授权变量的元信息（名字 + 用途说明；**绝不含值**）。
+       * 插件据此渲染「从环境变量取密钥」那类只读提示或下拉。
+       */
+      list: () =>
+        call({
+          api: "env.list",
+          run: () => envDescribe(pluginId),
+        }),
+      /**
+       * 打开宿主的授权选择器（用户亲自操作）。
+       * 返回 `{ kind:"ref", name, ref:"$NAME" }`（插件把它填进自己的输入框）、
+       * `{ kind:"literal", value }`（用户选择手工输入字面量）、或 `null`（取消）。
+       */
+      pick: (opts: { title?: string; purpose?: string } = {}) =>
+        call({
+          api: "env.pick",
+          run: async () => {
+            if (!ctx.pickEnvVar) return null;
+            return await ctx.pickEnvVar(pluginId, {
+              title: opts?.title ? String(opts.title) : undefined,
+              purpose: opts?.purpose ? String(opts.purpose) : undefined,
+            });
+          },
+        }),
+    },
+
     /* ---------------- 网络 ---------------- */
     net: {
       /**
@@ -428,7 +761,7 @@ export function createHostApi(pluginId: string, ctx: PluginHostContext): Record<
             if (!allowed) {
               throw new PluginPermissionError(pluginId, `net.fetch:${originOf(target)}/*`);
             }
-            return await pluginFetch(target, options);
+            return await pluginFetch(pluginId, target, options);
           },
         }),
     },
@@ -574,8 +907,7 @@ function createMarketApi(pluginId: string, call: <T>(opts: {
     const { diffCatalog, applyUpdateAvailable } = await import("./market.ts");
     const { loadRegistry } = await import("./registry.ts");
     const reg = loadRegistry();
-    const catalogUrl = "https://github.com/My-Search/my-search-plugin-market/releases/download/catalog/catalog.json";
-    const raw = await marketFetchRaw(pluginId, catalogUrl, "");
+    const raw = await marketFetchRaw(pluginId, MARKET_CATALOG_URL, "");
     const text = new TextDecoder("utf-8").decode(raw);
     const parsed = parseCatalog(text);
     if (!parsed.ok) return null;
@@ -607,12 +939,13 @@ function createMarketApi(pluginId: string, call: <T>(opts: {
     const { loadRegistry, saveRegistry, createPluginRecord, upsertPlugin } = await import("./registry.ts");
     const { isKnownPermission } = await import("./permissions.ts");
     const { parseCatalog } = await import("./market-types.ts");
-    const catalogUrl = "https://github.com/My-Search/my-search-plugin-market/releases/download/catalog/catalog.json";
-    const catalogRaw = await marketFetchRaw(pluginId, catalogUrl, "");
+    const catalogRaw = await marketFetchRaw(pluginId, MARKET_CATALOG_URL, "");
     const parsed = parseCatalog(new TextDecoder("utf-8").decode(catalogRaw));
     const entry = parsed.ok ? parsed.catalog.plugins.find((e) => e.id === id) : null;
     if (!entry) return { ok: false, error: `市场中未找到插件: ${id}` };
-    const pkgUrl = `https://github.com/My-Search/my-search-plugin-market/releases/download/${id}/${id}.msplugin`;
+    // 下载地址以目录条目为准：插件包可能托管在开发者自己的仓库（见 sources.json
+    // 准入名单），因此不能再按固定模板拼 URL。Rust 侧会按 host 白名单再判一次。
+    const pkgUrl = entry.downloadUrl;
     const b64 = await marketFetchRaw(pluginId, pkgUrl, entry.sha256);
     const { preparePackage } = await import("./install.ts");
     const prepared = await preparePackage(b64, {
@@ -625,7 +958,8 @@ function createMarketApi(pluginId: string, call: <T>(opts: {
     const record = createPluginRecord({
       manifest: prepared.manifest,
       dir: `plugins/${id}`,
-      source: { kind: "market" },
+      // ref 记录实际下载地址，便于排障与「来源仓库」展示
+      source: { kind: "market", ref: pkgUrl },
       grants: allPerms,
       integrity: { sha256: prepared.sha256, signed: false },
     });
@@ -749,10 +1083,47 @@ function pluginDataKeys(pluginId: string): string[] {
 }
 
 /**
+ * 该插件**已授权可见**的环境变量名（来自注册表的 `env.read:<NAME>` 授予记录）。
+ *
+ * 这是 `ms.env.*` 的唯一数据源：未授权的变量对插件完全不可见
+ * （列不出、`has()` 为 false、也不会被注入它的后台进程）。
+ */
+function envGrantedNames(pluginId: string): string[] {
+  try {
+    const rec = findPlugin(loadRegistry(), pluginId);
+    if (!rec) return [];
+    const out: string[] = [];
+    for (const g of rec.grants) {
+      const p = String(g?.permission ?? "");
+      if (!p.startsWith("env.read:")) continue;
+      const name = p.slice("env.read:".length);
+      if (name && !out.includes(name)) out.push(name);
+    }
+    return out;
+  } catch (e) {
+    return [];
+  }
+}
+
+/** 已授权变量的元信息（名字 + 说明；**绝不含值**） */
+function envDescribe(pluginId: string): Array<{ name: string; description: string; secret: boolean }> {
+  const granted = new Set(envGrantedNames(pluginId));
+  if (granted.size === 0) return [];
+  try {
+    return loadEnvVars()
+      .filter((v) => granted.has(v.name))
+      .map((v) => ({ name: v.name, description: String(v.description ?? ""), secret: v.secret !== false }));
+  } catch (e) {
+    return [];
+  }
+}
+
+/**
  * 经宿主发起的网络请求（Rust 代理，绕 CORS）。
  * 与 `http_request` 共用实现，但**只对已通过 scope 判定的 URL 放行**。
  */
 async function pluginFetch(
+  pluginId: string,
   url: string,
   options: { method?: string; headers?: Record<string, string>; body?: string }
 ): Promise<{ status: number; ok: boolean; text: string; headers: Record<string, string> }> {
@@ -760,6 +1131,7 @@ async function pluginFetch(
   if (isTauri) {
     const { invoke } = await import("@tauri-apps/api/core");
     const text = await invoke<string>("plugin_net_fetch", {
+      pluginId,
       url,
       method: options.method ?? "GET",
       headers: options.headers ?? {},
@@ -814,6 +1186,11 @@ declare module "./host.ts" {
     log?: (pluginId: string, level: "info" | "warn" | "error", text: string) => void;
     getSecret?: (pluginId: string, name: string) => Promise<string | null>;
     callBackend?: (pluginId: string, method: string, params: unknown) => Promise<unknown>;
+    /** 打开宿主的「选择环境变量」授权弹层（ms.env.pick） */
+    pickEnvVar?: (
+      pluginId: string,
+      opts: { title?: string; purpose?: string }
+    ) => Promise<{ kind: "ref"; name: string; ref: string } | { kind: "literal"; value: string } | null>;
   }
 }
 

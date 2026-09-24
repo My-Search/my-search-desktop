@@ -1,0 +1,60 @@
+{
+  "$comment": "插件上架准入名单（我们维护，是审核的唯一产物）。开发者提 issue 报仓库地址，审核通过后在此加一条；之后开发者自行发版，只需更新仓库 Release，再跑 npm run sync:market 即可，无需再联系我们。",
+  "$fields": {
+    "id": "插件 id，必须与包内 plugin.json 的 id 一致",
+    "dir": "本地源码目录名（可选，用于读取 meta.json 的分类/标签）",
+    "repo": "开发者仓库 owner/name —— 用 repo + asset 间接指定包位置（推荐，可自动检测仓库归档）",
+    "url": "直接指定完整包地址（可选，与 repo/path 三选一）—— 必须是 github.com 的 Release 资产地址",
+    "path": "布尔：以「仓库内按版本归档」方式发布。包放在 <repo>/<pathRoot>/<插件id>/<版本>/<插件id>.mspp，同步时自动列出所有版本目录并取版本号最大者（官方插件用此模式）。需同时提供 repo",
+    "pathRoot": "path 模式的根目录（可选，默认 official-plugins）",
+    "asset": "包文件名（可选，默认 <插件id>.mspp）。仅 url/repo 模式需要",
+    "tag": "Release tag（可选，用 repo 时默认取插件 id）",
+    "official": "是否第一方插件",
+    "verified": "第三方策展徽标（评审后标记）",
+    "deprecated": "人工标记为废弃（可选）。官方插件无法靠仓库归档自动检测，用这个字段手动下架",
+    "deprecatedReason": "废弃原因（展示给用户）",
+    "addedAt": "准入日期"
+  },
+  "sources": [
+    {
+      "id": "com.mysearch.pi-agent",
+      "dir": "pi-agent",
+      "repo": "My-Search/my-search-plugin-market",
+      "official": true,
+      "addedAt": "2026-09-24",
+      "path": true
+    },
+    {
+      "id": "com.mysearch.file-search",
+      "dir": "file-search",
+      "repo": "My-Search/my-search-plugin-market",
+      "official": true,
+      "addedAt": "2026-09-24",
+      "path": true
+    },
+    {
+      "id": "com.mysearch.market",
+      "dir": "market",
+      "repo": "My-Search/my-search-plugin-market",
+      "official": true,
+      "addedAt": "2026-09-24",
+      "path": true
+    },
+    {
+      "id": "com.mysearch.baidu-translate",
+      "dir": "baidu-translate",
+      "repo": "My-Search/my-search-plugin-market",
+      "official": true,
+      "addedAt": "2026-09-24",
+      "path": true
+    },
+    {
+      "id": "com.zhuangjie.github-upload",
+      "dir": "com.zhuangjie.github-upload",
+      "repo": "My-Search/my-search-plugin-market",
+      "official": false,
+      "addedAt": "2026-09-24",
+      "path": true
+    }
+  ]
+}

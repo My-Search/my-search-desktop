@@ -1,14 +1,18 @@
 //! 插件市场下载（Rust 侧第二道防线）。
 //!
-//! 职责：`market_fetch_raw` 是市场插件里「下载 .msplugin 安装包」的唯一通道。
+//! 职责：`market_fetch_raw` 是市场插件里「下载 .mspp 安装包」的唯一通道。
 //! 前端（市场 UI）先做了权限与目录校验，这里在**前端被自动绕过的假设**下
 //! 再做一次深防（与 `plugin_net_fetch` 同一哲学）：
 //!
 //! 1. **调用者身份**：只有「已启用 + 授予 `plugin.install`」的插件才能下载
 //!    （网关镜像 `plugin-gateway.json` 由前端同步而来，Rust 侧读内存镜像）；
-//! 2. **源受限**：`url` 必须以白名单 base 为前缀（默认官方发布地址，可用
-//!    环境变量 `MY_SEARCH_MARKET_BASES` 覆盖，逗号分隔）——目录被攻破时
-//!    下载也只能落在受控前缀内，SSRF 面归零；
+//! 2. **源受限**：`url` 必须是 https 且 host 落在允许白名单内
+//!    （`github.com` 的 Release 资产 / `raw.githubusercontent.com` 的官方插件目录 /
+//!    `objects.githubusercontent.com` 的资产 302 终点），路径形态另行严格校验——
+//!    插件包可以托管在开发者自己的仓库里，准入由 `plugins/sources.json` 审核控制。
+//!    另兼容受控 base 前缀通道（默认官方发布地址，可用环境变量
+//!    `MY_SEARCH_MARKET_BASES` 覆盖）供本地目录服务/镜像调试。
+//!    **重定向不自动跟随**：逐跳重新校验，避免 302 把下载引到任意地址（SSRF）；
 //! 3. **完整性**：下载完成在 Rust 侧再验一次 sha256（前端验完这里还验），
 //!    返回 body 打包成 base64（与 `plugin_read_local_base64` / `InstallFile`
 //!    的既有传输形态一致，避免大数组 JSON 的 IPC 膨胀）。
@@ -83,6 +87,116 @@ fn is_url_under_base(url: &str, base: &str) -> bool {
     rest.is_empty() || rest.starts_with('/')
 }
 
+// ===================== 第三方源（开发者自助发布） =====================
+
+/// 允许作为插件包下载 host 的白名单。
+///
+/// 插件包可以托管在**开发者自己的仓库**里（准入由 `plugins/sources.json` 审核控制），
+/// 因此下载地址不再要求落在我们自己的 base 前缀内。收紧点改为 host + 路径：
+///   - `github.com`：开发者仓库的 Release 资产；
+///   - `objects.githubusercontent.com`：GitHub Release 资产下载的真实 302 终点，
+///     github.com 会把资产请求重定向到这里（必须放行，否则正常下载也失败）；
+///   - `raw.githubusercontent.com`：官方插件的仓库文件直链
+///     （`official-plugins/<id>/<版本>/<id>.mspp`，便于按版本归档而无需逐个建 Release）。
+const ALLOWED_DOWNLOAD_HOSTS: [&str; 3] = [
+    "github.com",
+    "objects.githubusercontent.com",
+    "raw.githubusercontent.com",
+];
+
+/// 解析 URL 的 (host, path)。返回 None 表示格式非法或含 userinfo。
+///
+/// 刻意**不做**字符串前缀比对：`https://github.com@evil.com/x` 的 `starts_with`
+/// 会通过但真实 host 是 evil.com。这里显式拒绝任何含 `@` 的地址（userinfo），
+/// 再取出 host（去端口）与 path，交给调用方精确匹配。
+fn split_host_path(url: &str) -> Option<(String, String)> {
+    let rest = url.strip_prefix("https://")?;
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    if authority.is_empty() || authority.contains('@') {
+        return None; // userinfo 一律拒绝（含 `github.com@evil.com` 这类伪造）
+    }
+    // 端口必须为空或 443：github.com:8443 不能借非标端口绕过。
+    // 注意只在 authority 内切分，且冒号后必须是纯数字，避免误把
+    // `github.com/a/b` 的路径部分当成端口。
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((h, p)) => (h, Some(p)),
+        None => (authority, None),
+    };
+    if let Some(p) = port {
+        if p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()) || p != "443" {
+            return None;
+        }
+    }
+    if host.is_empty() {
+        return None;
+    }
+    let path = rest[authority_end..].to_string();
+    Some((host.to_ascii_lowercase(), path))
+}
+
+/// 是否为允许的插件包地址：https + host 在白名单 + 路径含 Release 资产段。
+///
+/// 与前端 `isAllowedDownloadUrl`（market-types.ts）同一口径，**两侧必须一起改**。
+///
+/// 路径形如 `/<owner>/<repo>/releases/download/<tag>/<asset>`：受控段
+/// `/releases/download/` 位于中间而非开头，因此按"段"匹配：
+/// before 必须是 `<owner>/<repo>`（两段），after 必须是 `<tag>/<asset>`（两段）。
+/// 这样 `/releases/download-evil/` 之类的伪造路径无法通过。
+fn is_allowed_release_url(url: &str) -> bool {
+    let Some((host, path)) = split_host_path(url) else {
+        return false;
+    };
+    if !ALLOWED_DOWNLOAD_HOSTS.contains(&host.as_str()) {
+        return false;
+    }
+    // raw 域只允许官方插件目录下的 .mspp（严格路径形态，见函数注释）
+    if host == "raw.githubusercontent.com" {
+        return is_allowed_official_raw_url(&host, &path);
+    }
+    // objects.githubusercontent.com 是 GitHub 资产 302 的真实终点，其路径形如
+    // /github-production-release-asset/<id>/<id>，不含 /releases/download/ 段；
+    // 该 host 本身已是受控终点，因此只要求路径非空。
+    if host == "objects.githubusercontent.com" {
+        return path.starts_with('/') && path.len() > 1;
+    }
+    // github.com：必须是 <owner>/<repo>/releases/download/<tag>/<asset> 形态
+    const MARKER: &str = "/releases/download/";
+    let Some(idx) = path.find(MARKER) else {
+        return false;
+    };
+    let owner_repo: Vec<&str> = path[..idx].trim_start_matches('/').split('/').collect();
+    if owner_repo.len() != 2 || owner_repo.iter().any(|s| s.is_empty()) {
+        return false;
+    }
+    let tag_asset: Vec<&str> = path[idx + MARKER.len()..].split('/').collect();
+    tag_asset.len() == 2 && tag_asset.iter().all(|s| !s.is_empty())
+}
+
+/// 官方插件的仓库文件直链：`/<owner>/<repo>/<ref>/official-plugins/<id>/<版本>/<id>.mspp`
+///
+/// 用于官方插件按版本归档（一个插件一个目录，发新版加一层版本目录），
+/// 免去逐个 Release 的维护成本。路径结构**严格限定**：
+///   - 前两段是 owner/repo，第三段是分支/tag（官方仓库的默认分支）；
+///   - 第四段必须是 `official-plugins`；
+///   - 之后恰为 `<id>/<版本>/<资产名>` 三段，且资产名以 `.mspp` 结尾。
+/// 这样即使放宽到 raw 域，也只能取到官方插件目录下的 `.mspp`，
+/// 而不是任意 raw 文件。
+fn is_allowed_official_raw_url(host: &str, path: &str) -> bool {
+    if !host.eq_ignore_ascii_case("raw.githubusercontent.com") {
+        return false;
+    }
+    let segs: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    // owner / repo / ref / official-plugins / id / version / asset
+    if segs.len() != 7 || segs.iter().any(|s| s.is_empty()) {
+        return false;
+    }
+    if segs[3] != "official-plugins" {
+        return false;
+    }
+    segs[6].ends_with(".mspp")
+}
+
 // ===================== 准入（权限门） =====================
 
 /// 准入判定（纯函数便于单测）：插件必须启用且授予 `plugin.install`。
@@ -138,16 +252,60 @@ pub(crate) async fn market_fetch_raw(
         return Err("sha256 校验值必须是 64 位十六进制".into());
     }
     let bases = market_bases();
-    if !bases.iter().any(|b| is_url_under_base(&url, b)) {
+    // 两条通道取或：① 白名单 host 的 Release 资产（开发者自助发布）；
+    // ② 受控 base 前缀（我们自己的目录/镜像，兼容本地调试）。
+    if !is_allowed_release_url(&url) && !bases.iter().any(|b| is_url_under_base(&url, b)) {
         return Err(format!("下载地址不在允许的市场前缀内: {url}"));
     }
 
-    let client = crate::build_client(120, crate::UA)?;
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("下载请求失败: {e}"))?;
+    // 不跟随重定向：白名单只约束了首跳，若自动跟随，302 的终点可以落到任意
+    // 地址（SSRF）。这里手动逐跳校验，每跳都要求仍是不在受控前缀内且
+    // host 合法的地址。
+    let client = reqwest::Client::builder()
+        .user_agent(crate::UA)
+        .timeout(std::time::Duration::from_secs(120))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| format!("构建下载客户端失败: {e}"))?;
+    let mut current = url.clone();
+    let mut resp = None;
+    for _ in 0..5 {
+        let r = client
+            .get(&current)
+            .send()
+            .await
+            .map_err(|e| format!("下载请求失败: {e}"))?;
+        if r.status().is_redirection() {
+            let Some(loc) = r.headers().get(reqwest::header::LOCATION) else {
+                return Err("下载被重定向但缺少 Location 头".into());
+            };
+            let loc = loc
+                .to_str()
+                .map_err(|_| "重定向地址非法".to_string())?
+                .to_string();
+            // 相对跳转按当前地址补全（GitHub 只用绝对跳转，这里兜底）
+            let next = if loc.starts_with("http") {
+                loc
+            } else if loc.starts_with('/') {
+                current
+                    .split_once("://")
+                    .and_then(|(s, rest)| rest.find('/').map(|i| format!("{s}://{}", &rest[..i])))
+                    .map(|origin| format!("{origin}{loc}"))
+                    .unwrap_or(loc)
+            } else {
+                loc
+            };
+            // 关键：重定向终点必须重新过白名单，否则 SSRF 面敞开
+            if !is_allowed_release_url(&next) && !bases.iter().any(|b| is_url_under_base(&next, b)) {
+                return Err(format!("下载重定向到不允许的地址: {next}"));
+            }
+            current = next;
+            continue;
+        }
+        resp = Some(r);
+        break;
+    }
+    let resp = resp.ok_or_else(|| "下载重定向次数过多".to_string())?;
     if !resp.status().is_success() {
         return Err(format!("下载失败（HTTP {}）", resp.status().as_u16()));
     }
@@ -221,7 +379,7 @@ mod tests {
     fn url_must_stay_under_base() {
         let base = "https://github.com/org/market/releases/download";
         assert!(is_url_under_base(
-            "https://github.com/org/market/releases/download/com.a.msplugin",
+            "https://github.com/org/market/releases/download/com.a.mspp",
             base
         ));
         assert!(is_url_under_base(
@@ -230,7 +388,7 @@ mod tests {
         ));
         // 前缀边界：download-evil 不能被 download 覆盖
         assert!(!is_url_under_base(
-            "https://github.com/org/market/releases/downloadevil/com.a.msplugin",
+            "https://github.com/org/market/releases/downloadevil/com.a.mspp",
             base
         ));
         // 主机不同 / 协议降级
@@ -241,6 +399,162 @@ mod tests {
         assert!(!is_url_under_base(
             "http://github.com/org/market/releases/download/x",
             base
+        ));
+    }
+
+    // ---------- 第三方源（开发者自助发布）白名单 ----------
+
+    #[test]
+    fn release_url_allows_any_github_repo() {
+        // 任意开发者的任意仓库 Release 资产都放行
+        assert!(is_allowed_release_url(
+            "https://github.com/someone/my-plugin/releases/download/v1.0.0/com.x.y.mspp"
+        ));
+        assert!(is_allowed_release_url(
+            "https://github.com/My-Search/my-search-plugin-market/releases/download/catalog/catalog.json"
+        ));
+        // GitHub 资产下载的真实 302 终点
+        assert!(is_allowed_release_url(
+            "https://objects.githubusercontent.com/github-production-release-asset/x/y"
+        ));
+    }
+
+    #[test]
+    fn release_url_rejects_subdomain_spoof() {
+        // github.com.evil.com 的 host 不是 github.com
+        assert!(!is_allowed_release_url(
+            "https://github.com.evil.com/a/b/releases/download/v1/x.mspp"
+        ));
+        assert!(!is_allowed_release_url(
+            "https://evilgithub.com/a/b/releases/download/v1/x.mspp"
+        ));
+    }
+
+    #[test]
+    fn release_url_rejects_userinfo_spoof() {
+        // 真实 host 是 evil.com，github.com 只是 userinfo
+        assert!(!is_allowed_release_url(
+            "https://github.com@evil.com/a/b/releases/download/v1/x.mspp"
+        ));
+        // 反向：userinfo 是 evil，真 host 是 github.com —— 一律拒绝含 @ 的地址
+        assert!(!is_allowed_release_url(
+            "https://evil.com@github.com/a/b/releases/download/v1/x.mspp"
+        ));
+    }
+
+    #[test]
+    fn release_url_rejects_nonstandard_port() {
+        assert!(!is_allowed_release_url(
+            "https://github.com:8443/a/b/releases/download/v1/x.mspp"
+        ));
+        // 443 是显式允许的
+        assert!(is_allowed_release_url(
+            "https://github.com:443/a/b/releases/download/v1/x.mspp"
+        ));
+    }
+
+    #[test]
+    fn release_url_requires_https_and_release_path() {
+        // 协议降级
+        assert!(!is_allowed_release_url(
+            "http://github.com/a/b/releases/download/v1/x.mspp"
+        ));
+        // 非 Release 路径
+        assert!(!is_allowed_release_url(
+            "https://github.com/a/b/raw/main/x.mspp"
+        ));
+        assert!(!is_allowed_release_url(
+            "https://github.com/a/b/releases/tag/v1"
+        ));
+        // 路径用 starts_with 而非 contains：download-evil 不可通过
+        assert!(!is_allowed_release_url(
+            "https://github.com/a/b/releases/download-evil/v1/x.mspp"
+        ));
+    }
+
+    #[test]
+    fn release_url_host_case_insensitive_path_case_sensitive() {
+        // host 大小写不敏感（DNS 语义）
+        assert!(is_allowed_release_url(
+            "https://GitHub.com/a/b/releases/download/v1/x.mspp"
+        ));
+        // path 大小写敏感（GitHub 实际路径为小写）
+        assert!(!is_allowed_release_url(
+            "https://github.com/a/b/Releases/Download/v1/x.mspp"
+        ));
+    }
+
+    #[test]
+    fn release_url_rejects_garbage() {
+        assert!(!is_allowed_release_url(""));
+        assert!(!is_allowed_release_url("javascript:alert(1)"));
+        assert!(!is_allowed_release_url("file:///etc/passwd"));
+        assert!(!is_allowed_release_url("not a url"));
+    }
+
+    // ---------- 官方插件仓库文件直链（raw） ----------
+
+    #[test]
+    fn official_raw_url_allows_expected_shape() {
+        assert!(is_allowed_release_url(
+            "https://raw.githubusercontent.com/My-Search/my-search-plugin-market/main/official-plugins/com.mysearch.pi-agent/2.5.2/com.mysearch.pi-agent.mspp"
+        ));
+        // 分支名可以是其它值（第三段即 ref）
+        assert!(is_allowed_release_url(
+            "https://raw.githubusercontent.com/My-Search/my-search-plugin-market/master/official-plugins/com.a.b/1.0.0/com.a.b.mspp"
+        ));
+    }
+
+    #[test]
+    fn official_raw_url_rejects_wrong_shape() {
+        let base = "https://raw.githubusercontent.com/My-Search/my-search-plugin-market/main";
+        // 不是 official-plugins 目录（防借 raw 域取任意仓库文件，如源码/密钥）
+        assert!(!is_allowed_release_url(&format!("{base}/src/lib/main.ts")));
+        assert!(!is_allowed_release_url(&format!("{base}/plugins/evil.txt")));
+        // 目录名相近但不等
+        assert!(!is_allowed_release_url(&format!(
+            "{base}/official-plugins-evil/com.a.b/1.0.0/com.a.b.mspp"
+        )));
+        // 段数不对（缺版本层 / 多一层）
+        assert!(!is_allowed_release_url(&format!(
+            "{base}/official-plugins/com.a.b/com.a.b.mspp"
+        )));
+        assert!(!is_allowed_release_url(&format!(
+            "{base}/official-plugins/com.a.b/1.0.0/extra/com.a.b.mspp"
+        )));
+        // 资产不是 .mspp
+        assert!(!is_allowed_release_url(&format!(
+            "{base}/official-plugins/com.a.b/1.0.0/com.a.b.sh"
+        )));
+    }
+
+    #[test]
+    fn official_raw_url_rejects_spoofing() {
+        // userinfo / 非标端口 / 协议降级 在 raw 域同样要挡住
+        assert!(!is_allowed_release_url(
+            "https://raw.githubusercontent.com@evil.com/a/b/main/official-plugins/x/1.0.0/x.mspp"
+        ));
+        assert!(!is_allowed_release_url(
+            "https://raw.githubusercontent.com:8443/a/b/main/official-plugins/x/1.0.0/x.mspp"
+        ));
+        assert!(!is_allowed_release_url(
+            "http://raw.githubusercontent.com/a/b/main/official-plugins/x/1.0.0/x.mspp"
+        ));
+        // 子域名伪造
+        assert!(!is_allowed_release_url(
+            "https://raw.githubusercontent.com.evil.com/a/b/main/official-plugins/x/1.0.0/x.mspp"
+        ));
+    }
+
+    #[test]
+    fn release_and_raw_channels_do_not_leak() {
+        // github.com 的 raw 式路径不通过（github.com 只认 releases/download）
+        assert!(!is_allowed_release_url(
+            "https://github.com/a/b/main/official-plugins/x/1.0.0/x.mspp"
+        ));
+        // raw 域的 releases 式路径也不通过
+        assert!(!is_allowed_release_url(
+            "https://raw.githubusercontent.com/a/b/releases/download/v1/x.mspp"
         ));
     }
 

@@ -5,8 +5,15 @@
   const $list = document.getElementById("market-list");
   const $loading = document.getElementById("market-loading");
   const $error = document.getElementById("market-error");
+  const $search = document.getElementById("market-search");
+  const $pager = document.getElementById("market-pager");
+
+  const PAGE_SIZE = 10; // 每页卡片数
 
   let view = null; // { entries, installedMap, updates, blocked }
+  let query = ""; // 搜索关键字（作用于当前 tab）
+  let page = 1; // 当前页码（1 起）
+  let totalPages = 1;
 
   function escapeHtml(s) {
     const d = document.createElement("div");
@@ -18,19 +25,47 @@
     $loading.style.display = "none";
     $error.style.display = "none";
     $list.style.display = "none";
+    $pager.style.display = "none";
     if (el) el.style.display = show ? "block" : "none";
   }
 
-  function renderCards(entries, activeTab) {
-    if (!entries || entries.length === 0) {
-      $list.innerHTML = '<div class="market-state">暂无插件</div>';
-      showState($list, true);
-      return;
-    }
+  function activeTab() {
+    const t = document.querySelector(".tab.active");
+    return t ? t.dataset.tab : "featured";
+  }
 
+  /** 当前 tab 的完整条目（未搜索、未分页） */
+  function tabEntries(tab) {
+    if (!view) return [];
+    if (tab === "installed") {
+      return view.entries.filter((e) => view.installedMap[e.id]);
+    }
+    if (tab === "updates") {
+      return view.updates.map((u) => view.entries.find((e) => e.id === u.id)).filter(Boolean);
+    }
+    // 精选：已安装优先
+    const featured = view.entries.filter((e) => view.installedMap[e.id]);
+    const others = view.entries.filter((e) => !view.installedMap[e.id]);
+    return [...featured, ...others];
+  }
+
+  /** 关键字过滤：匹配名称/描述/ID/作者/标签/分类 */
+  function filterEntries(entries) {
+    const q = query.trim().toLowerCase();
+    if (!q) return entries;
+    return entries.filter(function (e) {
+      return [e.name, e.description, e.id, e.author]
+        .concat(e.tags || [])
+        .concat(e.categories || [])
+        .join(" ")
+        .toLowerCase()
+        .includes(q);
+    });
+  }
+
+  function renderCards(entries) {
     let html = "";
-    const limit = activeTab === "updates" ? entries.length : entries.length;
-    for (let i = 0; i < limit; i++) {
+    for (let i = 0; i < entries.length; i++) {
       const e = entries[i];
       const installed = view.installedMap[e.id];
       const hasUpdate = view.updates.some((u) => u.id === e.id);
@@ -40,6 +75,7 @@
 
       if (e.official) badgeHtml += '<span class="badge badge-official">官方</span>';
       if (hasUpdate) badgeHtml += '<span class="badge badge-update">可更新</span>';
+      if (e.deprecated) badgeHtml += '<span class="badge badge-deprecated">已废弃</span>';
 
       if (isBlocked) {
         actionHtml = '<button class="btn-market" disabled>已屏蔽</button>';
@@ -48,14 +84,18 @@
       } else if (installed) {
         actionHtml = '<button class="btn-market btn-outline" data-action="uninstall" data-id="' + escapeHtml(e.id) + '">卸载</button><span class="plugin-footer" style="margin-top:0;margin-left:8px">v' + escapeHtml(installed) + "</span>";
       } else {
+        // 已废弃不禁止安装：用户可能仍在依赖它，或需要装上做数据迁移
         actionHtml = '<button class="btn-market" data-action="install" data-id="' + escapeHtml(e.id) + '">安装</button>';
       }
 
-      html += '<div class="plugin-card">';
+      html += '<div class="plugin-card' + (e.deprecated ? " plugin-card-deprecated" : "") + '">';
       html += '<div class="plugin-icon">' + (e.icon ? '<img src="' + escapeHtml(e.icon) + '" style="width:24px;height:24px">' : "🧩") + "</div>";
       html += '<div class="plugin-meta">';
       html += '<div class="plugin-name">' + escapeHtml(e.name) + badgeHtml + "</div>";
       if (e.description) html += '<div class="plugin-desc">' + escapeHtml(e.description) + "</div>";
+      if (e.deprecated) {
+        html += '<div class="plugin-deprecated-hint">⚠ ' + escapeHtml(e.deprecatedReason || "该插件已停止维护，可能不再可用") + "</div>";
+      }
       html += '<div class="plugin-footer">';
       html += "v" + escapeHtml(e.version);
       if (e.author) html += " · " + escapeHtml(e.author);
@@ -65,7 +105,64 @@
       html += "</div>";
     }
     $list.innerHTML = html;
-    showState($list, true);
+    showState($list, true); // 顺带隐藏分页条，由 renderPager 决定是否重新显示
+  }
+
+  /** 页码按钮：≤7 页全显，否则只显首尾与当前页附近（… 省略） */
+  function pageItems(current, pages) {
+    if (pages <= 7) {
+      return Array.from({ length: pages }, function (_, i) {
+        return i + 1;
+      });
+    }
+    const items = [1];
+    const start = Math.max(2, current - 1);
+    const end = Math.min(pages - 1, current + 1);
+    if (start > 2) items.push("…");
+    for (let i = start; i <= end; i++) items.push(i);
+    if (end < pages - 1) items.push("…");
+    items.push(pages);
+    return items;
+  }
+
+  function renderPager(total) {
+    totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+    if (totalPages <= 1) {
+      $pager.innerHTML = "";
+      $pager.style.display = "none";
+      return;
+    }
+    let html = '<span class="pager-info">共 ' + total + " 个 · 第 " + page + "/" + totalPages + " 页</span>";
+    html += '<button class="pager-btn" data-page="prev"' + (page <= 1 ? " disabled" : "") + ">上一页</button>";
+    pageItems(page, totalPages).forEach(function (it) {
+      if (it === "…") {
+        html += '<span class="pager-ellipsis">…</span>';
+      } else {
+        html += '<button class="pager-btn' + (it === page ? " active" : "") + '" data-page="' + it + '">' + it + "</button>";
+      }
+    });
+    html += '<button class="pager-btn" data-page="next"' + (page >= totalPages ? " disabled" : "") + ">下一页</button>";
+    $pager.innerHTML = html;
+    $pager.style.display = "flex";
+  }
+
+  /** 统一渲染入口：tab 过滤 → 搜索过滤 → 分页切片 */
+  function render() {
+    if (!view) return;
+    const entries = filterEntries(tabEntries(activeTab()));
+    if (entries.length === 0) {
+      page = 1;
+      totalPages = 1;
+      $list.innerHTML = '<div class="market-state">' + (query.trim() ? "没有找到匹配「" + escapeHtml(query.trim()) + "」的插件" : "暂无插件") + "</div>";
+      showState($list, true);
+      return;
+    }
+    totalPages = Math.max(1, Math.ceil(entries.length / PAGE_SIZE));
+    if (page > totalPages) page = totalPages;
+    if (page < 1) page = 1;
+    const start = (page - 1) * PAGE_SIZE;
+    renderCards(entries.slice(start, start + PAGE_SIZE));
+    renderPager(entries.length);
   }
 
   async function loadMarket() {
@@ -82,11 +179,8 @@
         $error.textContent = "加载失败：" + escapeHtml(view.error);
         return;
       }
-      // 已安装优先 + 精选排序
-      const featured = view.entries.filter((e) => view.installedMap[e.id]);
-      const others = view.entries.filter((e) => !view.installedMap[e.id]);
-      const sorted = [...featured, ...others];
-      renderCards(sorted, "featured");
+      // 安装/更新/卸载后重载也保留当前 tab 与搜索词
+      render();
     } catch (e) {
       showState($error, true);
       $error.textContent = "加载失败：" + escapeHtml(String(e.message || e));
@@ -98,7 +192,12 @@
     if (!btn) return;
     const id = btn.dataset.id;
     const action = btn.dataset.action;
+    const originalText = btn.textContent;
     btn.disabled = true;
+    // 安装/更新/卸载都可能耗时较长，先切换文案给出进行中的反馈
+    if (action === "install") btn.textContent = "安装中…";
+    else if (action === "update") btn.textContent = "更新中…";
+    else if (action === "uninstall") btn.textContent = "卸载中…";
 
     try {
       if (action === "install") {
@@ -116,35 +215,61 @@
       }
     } catch (e) {
       btn.disabled = false;
-      if (typeof ms !== "undefined" && ms.ui) ms.ui.toast("操作失败: " + String(e.message || e), "error");
+      btn.textContent = originalText;
+      const msg = "操作失败: " + String(e.message || e);
+      // ms.ui.toast 需要 ui.notify 权限；未授予（或被用户撤销）时退回内联错误提示，
+      // 避免错误处理器自身再抛一个未捕获的 PluginPermissionError
+      const canNotify =
+        typeof ms !== "undefined" &&
+        ms.ui &&
+        (!ms.plugin || !ms.plugin.has || ms.plugin.has("ui.notify"));
+      if (canNotify) {
+        ms.ui.toast(msg, "error");
+      } else {
+        $error.textContent = msg;
+        showState($error, true);
+      }
     }
   });
 
-  // Tab切换
+  // Tab切换（切换后回到第 1 页，保留搜索词）
   document.querySelectorAll(".tab").forEach(function (tab) {
     tab.addEventListener("click", function () {
       document.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
       tab.classList.add("active");
-      const tabName = tab.dataset.tab;
-      if (!view) return;
-      let entries;
-      if (tabName === "featured") {
-        const featured = view.entries.filter((e) => view.installedMap[e.id]);
-        const others = view.entries.filter((e) => !view.installedMap[e.id]);
-        entries = [...featured, ...others];
-      } else if (tabName === "installed") {
-        entries = view.entries.filter((e) => view.installedMap[e.id]);
-      } else if (tabName === "updates") {
-        entries = view.updates.map((u) => view.entries.find((e) => e.id === u.id)).filter(Boolean);
-      }
-      if (entries) renderCards(entries, tabName);
+      page = 1;
+      render();
     });
   });
 
-  // 启动
+  // 搜索：输入即过滤，回到第 1 页
+  $search.addEventListener("input", function () {
+    query = $search.value;
+    page = 1;
+    render();
+  });
+
+  // 分页条点击：上一页/下一页/指定页
+  $pager.addEventListener("click", function (ev) {
+    const btn = ev.target.closest("[data-page]");
+    if (!btn || btn.disabled) return;
+    const v = btn.dataset.page;
+    if (v === "prev") page = Math.max(1, page - 1);
+    else if (v === "next") page = Math.min(totalPages, page + 1);
+    else {
+      const n = parseInt(v, 10);
+      if (!Number.isNaN(n)) page = n;
+    }
+    render();
+  });
+
+  // 启动：主搜索框「插件市场 : 关键字」转发的子关键字 → 同步到搜索框过滤
   if (typeof onSubKeyword === "function") {
     onSubKeyword(function (msg) {
-      // 插件市场: 关键字 → 可用作搜索过滤
+      query = String(msg == null ? "" : msg);
+      $search.value = query;
+      page = 1;
+      render();
     });
   }
 

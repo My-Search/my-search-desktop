@@ -6,8 +6,10 @@
  * 校验在解析期掐死「下载地址越权 / 哈希缺失 / 重复条目」三类硬伤。
  *
  * 安全设计：
- *   - `downloadUrl` 必须以目录 `baseUrl` 为前缀（且限定 https），目录被攻破
- *     时也只能把下载指向受控前缀内——真正的完整性靠 sha256（客户端安装前验）。
+ *   - `downloadUrl` 限定 https + host 白名单（github.com 的 Release 资产路径），
+ *     目录被攻破时也只能把下载指向白名单 host——真正的完整性靠 sha256
+ *     （客户端安装前验）。允许指向开发者自己仓库，是为了让开发者自助发版，
+ *     准入由 `plugins/sources.json` 的审核名单控制。
  *   - `sha256` 必须是 64 位小写 hex，缺则整条目拒绝。
  *   - 同一 id 重复出现时取版本更高的一条；版本相同视为冲突拒绝（防漂移）。
  */
@@ -64,7 +66,7 @@ export interface MarketPluginEntry {
   changelog?: string;
   /** 完整 URL，必须以 baseUrl 为前缀；安装前宿主与前端会再对 sha256 验包 */
   downloadUrl: string;
-  /** .msplugin 包摘要（CI 计算填入，作者不手写） */
+  /** .mspp 包摘要（CI 计算填入，作者不手写） */
   sha256: string;
   /** 包字节数（列表展示） */
   size?: number;
@@ -75,6 +77,14 @@ export interface MarketPluginEntry {
   /** 第三方策展徽标（维护组评审后标记） */
   verified?: boolean;
   downloads?: number;
+  /**
+   * 已废弃：作者归档仓库、或维护组主动下架。
+   * 仅作**提醒**用途 —— 市场 UI 会打徽标并说明原因，但**不禁止安装**
+   * （用户可能仍在依赖它，或需要装来迁移数据）。
+   */
+  deprecated?: boolean;
+  /** 废弃原因（面向用户展示） */
+  deprecatedReason?: string;
   publishedAt: string;
   updatedAt: string;
 }
@@ -105,6 +115,88 @@ function isWebUrl(v: unknown): boolean {
 /** 版本号与 id 复用 manifest 的语法（同一套契约，不另造） */
 const validVersion = (v: unknown): boolean => isValidVersion(v);
 const validPluginId = (v: unknown): boolean => isValidPluginId(v);
+
+/**
+ * 下载地址允许的 host 白名单。
+ *
+ * 插件包可以托管在开发者自己的仓库里（审核一次入 sources.json，之后开发者自行发版），
+ * 因此 downloadUrl 不再要求以目录的单一 baseUrl 为前缀。真正收紧的是 host：
+ *   - `github.com`           —— 开发者仓库的 Release 资产
+ *   - 官方 market 仓库       —— 第一方插件（与 Rust DEFAULT_MARKET_BASE 同源）
+ * 与 Rust 侧 `is_allowed_release_url` 同一口径：**两侧必须一起改**，
+ * 前端这层只是数据契约校验，真正的安全边界在 Rust（下载时再判一次）。
+ */
+const ALLOWED_DOWNLOAD_HOSTS = [
+  "github.com",
+  "objects.githubusercontent.com",
+  "raw.githubusercontent.com",
+];
+
+/** 解析 URL 的 host（小写，去端口与 userinfo）；无法解析/含 userinfo/非标端口返回 null */
+function urlHostOf(v: string): string | null {
+  // 拒绝 userinfo：https://github.com@evil.com 的真实 host 是 evil.com，
+  // 任何按字符串前缀判断的写法都会中招，这里直接判死。
+  const m = /^https:\/\/([^/?#]+)/i.exec(v);
+  if (!m) return null;
+  const authority = m[1];
+  if (authority.includes("@")) return null;
+  const colon = authority.lastIndexOf(":");
+  if (colon >= 0) {
+    // 端口必须为空或缺省 443；github.com:8443 不能借非标端口绕过
+    const port = authority.slice(colon + 1);
+    if (port !== "443") return null;
+  }
+  const host = (colon >= 0 ? authority.slice(0, colon) : authority).toLowerCase();
+  return host || null;
+}
+
+/**
+ * 是否为允许的插件包下载地址。允许两种形态（host + 路径双重收紧）：
+ *
+ * 1. Release 资产：`github.com/<owner>/<repo>/releases/download/<tag>/<asset>`
+ *    —— 第三方插件在自己的仓库发 Release；
+ * 2. 官方插件目录（仓库文件直链）：
+ *    `raw.githubusercontent.com/<owner>/<repo>/<ref>/official-plugins/<id>/<版本>/<id>.mspp`
+ *    —— 官方插件按版本归档，免去逐个建 Release。
+ *
+ * （http 仅放行 localhost，供本地目录服务调试）
+ *
+ * 与 Rust 侧 `is_allowed_release_url`（market.rs）同一口径，**两侧必须一起改**。
+ */
+export function isAllowedDownloadUrl(v: unknown): boolean {
+  if (typeof v !== "string" || v.length === 0) return false;
+  if (v.startsWith("http://")) {
+    // 本地目录服务调试：仅 localhost，端口不限
+    const m = /^http:\/\/([^/?#]+)/i.exec(v);
+    if (!m) return false;
+    const host = m[1].split(":")[0].toLowerCase();
+    return host === "localhost" || host === "127.0.0.1";
+  }
+  const host = urlHostOf(v);
+  if (!host || !ALLOWED_DOWNLOAD_HOSTS.includes(host)) return false;
+  const schemeEnd = v.indexOf("://") + 3;
+  const slash = v.indexOf("/", schemeEnd);
+  const path = slash < 0 ? "" : v.slice(slash);
+
+  // 官方插件目录：owner/repo/ref/official-plugins/<id>/<版本>/<资产>.mspp（严格 7 段）
+  if (host === "raw.githubusercontent.com") {
+    const segs = path.replace(/^\//, "").split("/");
+    if (segs.length !== 7 || segs.some((s) => s === "")) return false;
+    if (segs[3] !== "official-plugins") return false;
+    return segs[6].endsWith(".mspp");
+  }
+
+  // GitHub 资产 302 的真实终点，路径不含 release 段，host 本身即受控
+  if (host === "objects.githubusercontent.com") return path.startsWith("/") && path.length > 1;
+  const MARKER = "/releases/download/";
+  const idx = path.indexOf(MARKER);
+  if (idx < 0) return false;
+  const ownerRepo = path.slice(0, idx).replace(/^\//, "").split("/");
+  if (ownerRepo.length !== 2 || ownerRepo.some((s) => s === "")) return false;
+  const tagAsset = path.slice(idx + MARKER.length).split("/");
+  return tagAsset.length === 2 && tagAsset.every((s) => s !== "");
+}
+
 
 /* ============================================================
  * 解析与校验
@@ -186,13 +278,14 @@ export function parseCatalog(raw: unknown): CatalogParseResult {
         errors.push(`${prefix}permissions.invalid`);
       }
 
-      // 下载地址唯一硬约束：必须落在受控前缀内，且 https（localhost 例外）
+      // 下载地址硬约束：https + host 在允许白名单内 + 位于 Release 资产路径下。
+      // 注意：不再要求以目录 baseUrl 为前缀——插件包可托管在开发者自己的仓库
+      // （见 plugins/sources.json 的准入名单），Rust 侧下载时按 host 再判一次。
       const downloadUrl = asString(e.downloadUrl);
       if (!downloadUrl) {
         errors.push(`${prefix}downloadUrl.missing`);
-      } else {
-        if (baseUrl && !downloadUrl.startsWith(baseUrl + "/")) errors.push(`${prefix}downloadUrl.outOfBase`);
-        if (!isWebUrl(downloadUrl)) errors.push(`${prefix}downloadUrl.insecure`);
+      } else if (!isAllowedDownloadUrl(downloadUrl)) {
+        errors.push(`${prefix}downloadUrl.notAllowed`);
       }
 
       const sha256 = asString(e.sha256);
@@ -207,6 +300,7 @@ export function parseCatalog(raw: unknown): CatalogParseResult {
       const verified = e.verified;
       if (official != null && typeof official !== "boolean") errors.push(`${prefix}official.invalid`);
       if (verified != null && typeof verified !== "boolean") errors.push(`${prefix}verified.invalid`);
+      if (e.deprecated != null && typeof e.deprecated !== "boolean") errors.push(`${prefix}deprecated.invalid`);
 
       const publishedAt = asString(e.publishedAt);
       if (!publishedAt) errors.push(`${prefix}publishedAt.missing`);
@@ -243,6 +337,8 @@ export function parseCatalog(raw: unknown): CatalogParseResult {
       official: typeof e.official === "boolean" ? e.official : undefined,
       verified: typeof e.verified === "boolean" ? e.verified : undefined,
       downloads: typeof e.downloads === "number" ? e.downloads : undefined,
+      deprecated: e.deprecated === true ? true : undefined,
+      deprecatedReason: asString(e.deprecatedReason),
       publishedAt: e.publishedAt as string,
       updatedAt: e.updatedAt as string,
     };
@@ -335,6 +431,8 @@ function describeEntryError(code: string): string {
       return "权限声明必须是字符串数组";
     case "downloadUrl.missing":
       return "缺少下载地址";
+    case "downloadUrl.notAllowed":
+      return "下载地址必须是 https 且位于 github.com 的 Release 资产路径下";
     case "downloadUrl.outOfBase":
       return "下载地址超出目录受控前缀";
     case "downloadUrl.insecure":
@@ -347,6 +445,8 @@ function describeEntryError(code: string): string {
       return "official 必须是布尔值";
     case "verified.invalid":
       return "verified 必须是布尔值";
+    case "deprecated.invalid":
+      return "deprecated 必须是布尔值";
     case "publishedAt.missing":
       return "缺少发布时间";
     case "updatedAt.missing":
