@@ -27,10 +27,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 必须是 Node 22.6+（本项目用原生 TS 支持直接 import src 下的 .ts，
+      # 与 test/pack-plugin.mjs 等工具同一机制；Node 20 会报
+      # "Unknown file extension .ts"）
       - name: 安装 Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
 
       # 用默认的 GITHUB_TOKEN 即可：本流程只读本仓库、写回本仓库，
       # 不再需要跨仓库发布 Release（索引已改为仓库文件）。
