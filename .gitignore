@@ -41,3 +41,8 @@ test/_fix-*.mjs
 
 # AI 助手会话产物（计划草稿等，非项目内容）
 .zcode/
+
+# 插件市场索引产物（由 CI 生成并提交到市场仓库，不应留在本仓库）
+/index.dist.json
+/index.error.json
+/error-item.txt

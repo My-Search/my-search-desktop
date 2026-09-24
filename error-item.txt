@@ -1,9 +1,0 @@
-# 插件索引构建：被排除的项
-# 构建时间：2026-09-24T10:29:39.107Z
-# 以下条目未能进入 index.dist.json，请按原因修正后等待下次构建。
-
-[排除] official-repo:official-plugins/com.mysearch.file-search
-       原因：清单校验失败：声明了未知权限：file.read
-
-[排除] official-repo:official-plugins/com.zhuangjie.github-upload
-       原因：清单校验失败：声明了未知权限：file.read

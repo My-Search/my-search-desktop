@@ -21,13 +21,13 @@
 - **点击加权 + 历史记录**：点击过的条目会提升排序权重
 - **脚本项**：`[脚本]` 数据项渲染其自定义视图（`view:html/css/js`）、外部打开能力（**脚本应用点到窗口外面会先隐藏，再用快捷键唤醒即可回到原样**）
 - **脚本应用的子关键词转发**：像「问AI」这类脚本应用，进入后可在搜索框用「父关键词 : 问题」提问——**挂载完成时与每次回车**都会把分隔符后的文字推给应用的 `MS_SCRIPT_ENV.event.sendListener`，输入框保留「父关键词 : 」以便连续追问（完全还原油猴版 `tryRunTextViewHandler`）
-- **设置窗口**：左侧分类菜单 + 右侧内容的常规设置布局——**订阅管理**（订阅总览条块管理：逐条查看/添加/编辑/删除，可切换到源码视图直接编辑 `tis::` 原文）、**关注标签**（勾选过滤）、**公共仓库**（提交订阅到 TisHub、TisHub 订阅市场 搜索/安装/移除、清理 Token）、**数据缓存**（统计本地缓存占用与条数，一键清理可重建缓存）、**快捷键**、**常规**（开机自启动开关）、**关于软件**；支持保存并应用
+- **设置窗口**：左侧分类菜单 + 右侧内容的常规设置布局——**订阅管理**（订阅总览条块管理：逐条查看/添加/编辑/删除，可切换到源码视图直接编辑 `tis::` 原文）、**关注标签**（勾选过滤）、**公共仓库**（提交订阅到 TisHub、TisHub 订阅市场 搜索/安装/移除、清理 Token）、**数据缓存**（统计本地缓存占用与条数，一键清理可重建缓存）、**快捷键**、**插件**（安装/权限/后台进程管理）、**环境变量**（集中维护一份供所有插件共用的变量表，插件只能使用你逐项授权的那些）、**基础配置**（开机自启动 / 主题）、**备份与同步**、**关于软件**；支持保存并应用
 - **开机自启动（默认开启）**：安装后随系统登录自动启动并常驻托盘，呼出快捷键随时可用；可在**「设置 → 常规」**或**托盘菜单**里一键关闭（两处状态实时同步）。关闭后仍可从开始菜单手动启动
 - **系统托盘**：左键点击呼出/隐藏搜索窗；右键菜单提供「显示/隐藏」「设置」「开机自启动」「清理缓存」「退出」（清理缓存等价于设置窗口的「清理可重建缓存」，主窗口下次唤出时自动重新加载订阅数据）
 - **数据缓存**：加载结果带有效期（12 小时）写入本地，未过期时启动直接复用、不再联网；过期或订阅变化才重新加载
 - **网络容错**：`raw.githubusercontent.com` 优先走 jsDelivr CDN（国内可达、加载快），失败时回退直连（2.5s 短超时快速失败）→ GitHub API
 - **并发加载**：订阅按队列 20 路并发拉取（纯 I/O 请求），配置文件解析出的子订阅直接回队继续并发，整库加载压到 1~2 轮完成，不再出现「数据几十条几十条地蹦」的阶梯式加载
-- **插件系统**：像装软件一样装插件——`设置 → 插件` 里「从文件安装」（`.msplugin` / `.zip`，自动剥离「右键压缩整个文件夹」包出来的外层目录）或「从目录挂载」（开发模式，免打包）。插件可贡献搜索项、内嵌界面与后台进程；所有原生能力都要过**运行时权限网关**（Android 式：安装时声明、首次使用弹窗、设置里随时撤销）；插件可声明**关闭界面时的行为**（最小化保活 / 退出卸载）与**是否开机自启**作为默认值，用户在面板上随时可改且不被升级覆盖（详见下方「插件系统」）
+- **插件系统**：像装软件一样装插件——`设置 → 插件` 里「从文件安装」（`.mspp` / `.zip`，自动剥离「右键压缩整个文件夹」包出来的外层目录）或「从目录挂载」（开发模式，免打包）。插件可贡献搜索项、内嵌界面与后台进程；所有原生能力都要过**运行时权限网关**（Android 式：安装时声明、首次使用弹窗、设置里随时撤销）；插件可声明**关闭界面时的行为**（最小化保活 / 退出卸载）与**是否开机自启**作为默认值，用户在面板上随时可改且不被升级覆盖（详见下方「插件系统」）
 
 ---
 
@@ -73,6 +73,8 @@ sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file \
 |------|------|
 | `Ctrl+Alt+S`（默认，可在设置中自定义） | 全局呼出 / 隐藏搜索窗 |
 | 自定义（设置 → 快捷键 → 作用类型「打开插件」） | 全局直接打开指定插件（无需先搜关键词） |
+| 自定义（设置 → 快捷键 → 作用类型「快速过滤」） | 全局填入常用头并立即进入子搜索（如填入 `百度翻译 : ` 并聚焦行尾） |
+| 自定义（设置 → 快捷键 → 作用类型「快捷打开项」） | 全局按文本精确匹配数据项并直接打开（等同点击该项） |
 | `↑` / `↓` | 在结果中上下移动 |
 | `Enter` | 打开当前选中项（URL 跳转 / 查看简述内容） |
 | `Ctrl+Enter` | 查看当前项的「附加内容」并定位关键词 |
@@ -89,11 +91,15 @@ sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file \
 | 组成 | 说明 |
 |------|------|
 | **快捷键** | 点「点击修改快捷键」后按下组合键（必须含 Ctrl / Alt / Shift / Win 至少一个修饰键；Esc 取消、Backspace 清空） |
-| **作用类型** | `呼出 / 隐藏搜索框`（默认，必需且全局只有一条，只能改键）或 `打开插件` |
-| **作用对象** | 作用类型为「打开插件」时，下拉选择某个**已安装且已启用**的插件 |
+| **作用类型** | `呼出 / 隐藏搜索框`（默认，必需且全局只有一条，只能改键）、`打开插件`、`快速过滤` 或 `快捷打开项` |
+| **作用对象** | `打开插件` 时下拉选择某个**已安装且已启用**的插件；`快速过滤` 时填写**常用头**文本（如 `百度翻译`）；`快捷打开项` 时填写**匹配文本**（如 `百度翻译`） |
 
-- 「+ 添加快捷键」默认新增一条「打开插件」，自动挑一个未被占用的组合键（`Ctrl+Alt+1~9`，用满后 `Ctrl+Alt+F1~12`）
+> 作用类型旁的 **?** 图标可查看四类作用的逐条说明。
+
+- 「+ 添加快捷键」默认新增一条「打开插件」，自动挑一个未被占用的组合键（`Ctrl+Alt+1~9`，用满后 `Ctrl+Alt+F1~12`）；若还没有可打开的插件，则新增一条「快速过滤」
 - 「打开插件」的键在**任意位置**按下即直接打开该插件的界面（窗口隐藏时会先按呼出逻辑显示窗口）；插件未启用或未授予「内嵌界面」权限时，行为与点搜索结果项完全一致（该弹授权弹授权）
+- 「快速过滤」的键在**任意位置**按下即呼出搜索框，填入「常用头 + 二次搜索分隔符 ` : `」并**立即搜索**（如常用头 `百度翻译` → 输入框变为 `百度翻译 : `），光标停在末尾，直接接着输入子关键词即可；常用头里若手打了结尾的 ` : ` 会自动去掉，不会出现重复分隔符
+- 「快捷打开项」的键在**任意位置**按下即呼出搜索框，用填写的文本**精确匹配**数据项（标题 / 描述 / 内容三级，多个词用空格分隔、都要命中；**不使用模糊/重叠度搜索**）：唯一匹配 → 直接打开该项（与点击结果项完全一致，含加分与历史记录）；多项匹配 → 把文本填入搜索框并列出结果，由你自己选；无匹配 → 仅提示「未找到匹配项」，不改动输入框/窗口。匹配文本只做首尾去空白，冒号等符号原样保留
 - 插件被卸载/禁用时，对应条目在下拉里标注 `已卸载` / `已禁用`，删掉即可
 - 所有改动立即生效并写入应用数据目录的 `settings.json`（键 `shortcut_bindings`）；旧版本的单键 `toggle_shortcut` 会自动迁移为一条「呼出 / 隐藏搜索框」绑定
 
@@ -113,14 +119,14 @@ my-search-desktop/
 │   ├── env.d.ts                # Vite / __APP_VERSION__ 类型声明
 │   ├── types/index.ts          # 共享类型（订阅/数据项/更新信息…）
 │   ├── css/style.css           # 全局样式（还原原版视觉）
-│   ├── components/             # 两窗口共享组件（MessageDialog / ToastHost）
-│   ├── composables/            # 两窗口共享逻辑（useMessageDialog / useToast）
+│   ├── components/             # 两窗口共享组件（MessageDialog / ToastHost / EnvPicker）
+│   ├── composables/            # 两窗口共享逻辑（useMessageDialog / useToast / useEnvPicker）
 │   ├── windows/
 │   │   ├── search/             # 搜索主窗口：App.vue + SearchBox / ResultList /
 │   │   │                       #   ResultItem / DetailView / UpdateBadge + composables
 │   │   │                       #   usePluginHost（注册表+网关）/ usePluginViewHost（插件视图挂载
 │   │   │                       #   与会话保活）/ plugin-channels（会话通道 + DOM 载体）
-│   │   └── config/             # 设置窗口：App.vue + panels/（订阅/标签/仓库/缓存/快捷键/常规/插件/关于/TisHub）
+│   │   └── config/             # 设置窗口：App.vue + panels/（订阅/标签/仓库/缓存/快捷键/常规/插件/环境变量/关于/TisHub）
 │   └── lib/                    # 纯逻辑层（无框架依赖，可直接单测）
 │       ├── search-engine.ts    # 搜索核心：递归订阅加载、索引、三级搜索、权重/历史/新数据
 │       ├── subscribe-parser.ts # 订阅解析：tis / fetchFun 双标签 / mLine·sLineFetchFun / 脚本项解析
@@ -134,10 +140,11 @@ my-search-desktop/
 │       ├── tauri-bridge.ts     # Tauri 桥接：HTTP 代理、窗口控制、外链打开
 │       └── plugins/            # 插件系统（纯逻辑，可单测）
 │           ├── manifest.ts     # 清单类型 + 校验 + 错误码中文文案
-│           ├── package.ts      # .msplugin（ZIP）读写：手写 EOCD/中央目录解析、包裹目录剥离
+│           ├── package.ts      # .mspp（ZIP）读写：手写 EOCD/中央目录解析、包裹目录剥离
 │           ├── install.ts      # 安装包预处理：解包 → 校验 → 落盘文件表（含摘要）
 │           ├── registry.ts     # 插件注册表：安装/升级/启停/授权/私有数据
 │           ├── permissions.ts  # 权限目录：分组、风险、scope 覆盖规则
+│           ├── env-store.ts    # 环境变量集中配置：存储、逐项授权、注入过滤（buildPluginEnv 是唯一出口）
 │           ├── host.ts         # 宿主 API 网关（前端侧 `ms.*` + 审计）
 │           ├── ipc.ts          # 插件命令桥（Tauri / 浏览器调试降级）
 │           ├── gateway.ts      # 注册表 → Rust 网关配置的唯一映射
@@ -157,7 +164,7 @@ my-search-desktop/
 
 ## 🔧 技术说明
 
-- **全局快捷键**：`tauri-plugin-global-shortcut` 注册。支持多条绑定，每条 = **快捷键 / 作用类型 / 作用对象**（`settings.json` 的 `shortcut_bindings` 数组）：`toggle-window` = 呼出 / 隐藏搜索窗（默认 `Ctrl+Alt+S`，只能一条）；`open-plugin` = 直接打开指定插件（Rust 端广播 `my-search://shortcut-open-plugin` 事件 + 插件 id，前端把窗口带到前台后由插件视图宿主打开，因此「插件是否存在 / 已启用 / 权限是否足够」的判断仍在前端注册表侧）。设置时**整体重新注册**，任一条被占用则回滚到改动前的整套绑定（不会出现「改了一半」）；旧版单键 `toggle_shortcut` 自动迁移为一条 toggle-window 绑定
+- **全局快捷键**：`tauri-plugin-global-shortcut` 注册。支持多条绑定，每条 = **快捷键 / 作用类型 / 作用对象**（`settings.json` 的 `shortcut_bindings` 数组）：`toggle-window` = 呼出 / 隐藏搜索窗（默认 `Ctrl+Alt+S`，只能一条）；`open-plugin` = 直接打开指定插件（Rust 端广播 `my-search://shortcut-open-plugin` 事件 + 插件 id，前端把窗口带到前台后由插件视图宿主打开，因此「插件是否存在 / 已启用 / 权限是否足够」的判断仍在前端注册表侧）；`quick-filter` = 快速过滤（Rust 端广播 `my-search://shortcut-quick-filter` 事件 + 常用头，前端把「常用头 + 二次搜索分隔符 ` : `」填入搜索框并立即搜索、光标置末尾）；`quick-open` = 快捷打开项（Rust 端广播 `my-search://shortcut-quick-open` 事件 + 匹配文本，前端用精确搜索匹配数据项：唯一则与点击项同路径直接打开、多项则列出结果、无匹配则提示）。设置时**整体重新注册**，任一条被占用则回滚到改动前的整套绑定（不会出现「改了一半」）；旧版单键 `toggle_shortcut` 自动迁移为一条 toggle-window 绑定
 - **开机自启动**：`tauri-plugin-autostart` 注册（**默认开启**，首次运行即写入系统启动项；用户偏好存于同一份 `settings.json` 的 `autostart_enabled`）。Windows 上写 `HKCU\...\CurrentVersion\Run`，读取时同时识别「任务管理器 → 启动」的启用/禁用覆盖，因此开关始终反映系统真实状态
 - **自启动静默（不弹任何窗口）**：exe 在 Windows 上**无条件**使用 GUI 子系统（`main.rs` 的 `#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]`，debug 构建也一样）。登录时进程由 explorer.exe 拉起、没有父控制台，若 exe 是 console 子系统，Windows 会为它新建一个控制台黑窗口并一直挂着（本应用常驻托盘不退出）；主窗口本身是 `visible: false`，启动阶段不会 `show()`，所以修掉控制台后登录完全静默。dev 日志不受影响：从终端/`npm run tauri dev` 启动时 stdout/stderr 句柄被继承，`eprintln!` 照常显示（已实测）
 - **自启动路径自愈**：登录拉起的是「注册表里记的那个 exe」而非「正在运行的 exe」，所以启动时会比对 Run 值里记录的路径与当前 exe，不一致就重写（仅在**正式构建**且自启动已开启时执行，dev 调试绝不改注册表，避免顶掉已安装版本的启动项）。Windows-only：Linux AppImage 的 `current_exe()` 是临时挂载路径，不能照搬这套比较
@@ -316,7 +323,7 @@ my-search-desktop/
 
 | 方式 | 说明 |
 |---|---|
-| **从文件安装** | 选择 `.msplugin`（本质是 ZIP，也可直接用 `.zip`）。解包 → 剥离外层包裹目录 → 校验清单 → **展示权限清单让用户确认** → 原子落盘到 `plugins/<id>/`（写暂存目录再 rename，失败不破坏已装版本） |
+| **从文件安装** | 选择 `.mspp`（本质是 ZIP，也可直接用 `.zip`）。解包 → 剥离外层包裹目录 → 校验清单 → **展示权限清单让用户确认** → 原子落盘到 `plugins/<id>/`（写暂存目录再 rename，失败不破坏已装版本） |
 | **从目录挂载** | 选择含 `plugin.json` 的开发目录，宿主只写一个 `.dev-source` 标记，读取时直接走源目录——**改完即自动重载**（见下），免打包 |
 
 #### 目录挂载的热重载
@@ -337,11 +344,79 @@ my-search-desktop/
 打包发布用同一套 zip 实现，避免「打包器与解包器互相不认」：
 
 ```bash
-node test/pack-plugin.mjs plugins/baidu-translate              # → dist/baidu-translate.msplugin
-node test/pack-plugin.mjs plugins/baidu-translate -o out/x.msplugin
+node test/pack-plugin.mjs plugins/baidu-translate              # → dist/baidu-translate.mspp
+node test/pack-plugin.mjs plugins/baidu-translate -o out/x.mspp
 ```
 
 打包前会先跑清单校验，并检查 `detailView.entry` / `backend.entry` 等声明文件确实存在于包内（否则用户装上会打不开界面）。
+
+### 开发并发布插件（从 0 到上架）
+
+> 完整版：[插件开发与上架指南](docs/plugin-market-publish.md) ·
+> [English](docs/plugin-market-publish.en.md)
+
+**第一步：写插件。** 建一个目录，至少含 `plugin.json`（清单）与界面文件：
+
+```
+my-plugin/
+├── plugin.json      # 清单（必需，必须在根目录）
+├── meta.json        # 市场展示元数据（上架需要：categories 必填）
+├── icon.svg         # 图标（可选）
+└── ui/
+    ├── detail.html  # 界面入口
+    └── index.js     # 界面脚本
+```
+
+清单最小示例（完整字段见下节「清单」）：
+
+```jsonc
+{
+  "id": "com.yourname.hello",   // 反向域名，第三方请用自己的域名
+  "name": "你好插件", "version": "1.0.0", "apiVersion": 1,
+  "author": "你的名字", "description": "一句话说明",
+  "permissions": ["ui.inlay"],
+  "contributes": {
+    "searchItem": { "title": "你好插件", "desc": "说明", "keyword": "你好" },
+    "detailView": { "entry": "ui/detail.html", "script": "ui/index.js" }
+  }
+}
+```
+
+**第二步：本地调试。** 用「从目录挂载」（见上节）指向插件目录，改完即自动重载，无需打包。
+
+**第三步：打包。**
+
+```bash
+node test/pack-plugin.mjs my-plugin -o dist/com.yourname.hello.mspp
+```
+
+**第四步：发 Release。** 一个仓库只放一个插件，规则必须严格遵守：
+
+| 规则 | 要求 |
+|---|---|
+| Release tag | **必须等于插件 id**（如 `com.yourname.hello`），且**稳定不变** |
+| 资产名 | **必须是 `<插件id>.mspp`** |
+| 包内 id | `plugin.json` 的 `id` 必须与 tag 一致（构建时会下载核对） |
+| 版本 | 取自包内 `version`；发新版**递增**即可 |
+
+```bash
+gh release create com.yourname.hello --title "你好插件 v1.0.0" dist/com.yourname.hello.mspp
+# 发新版（tag 不变，覆盖资产）：
+gh release upload com.yourname.hello dist/com.yourname.hello.mspp --clobber
+```
+
+**第五步：提 issue 申请上架。** 只写**仓库地址**（`用户名/仓库名`）即可。审核通过后我们会把它加入市场源清单，**此后你只需在自己仓库发版**——市场索引每小时自动重建，无需再联系我们。
+
+#### 上架失败怎么排查
+
+构建时不符合规范的插件不会进入市场，原因写在公开文件里：
+
+```
+https://github.com/My-Search/my-search-plugin-market/blob/main/index.error.json
+```
+
+该文件与源清单同构，官方错误在 `official-repo`、第三方在 `three-parties`，每项含 `reason`。
+仓库被删除或转私有时会**自动从源清单移除**，不再重复处理。
 
 ### 清单（`plugin.json`）
 
@@ -354,12 +429,18 @@ node test/pack-plugin.mjs plugins/baidu-translate -o out/x.msplugin
   "minAppVersion": "7.9.15",         // 可选：最低宿主版本
   "permissions": ["ui.inlay", "net.fetch:https://api.example.com/*"],
   "contributes": {
-    "searchItem": { "title": "[推荐][脚本]我的插件", "desc": "…", "keyword": "我的插件" },
+    "searchItem": {
+      "title": "[推荐][脚本]我的插件",
+      "desc": "…",
+      "keyword": "我的插件",          // 命中即打开的关键词
+      "subSearch": true              // 可选（默认 false）：是否参与「关键词 : 子词」二次搜索候选
+    },
     "detailView": {
       "entry": "ui/detail.html",     // 界面入口（相对插件根目录）
       "script": "ui/index.js",       // 可选：不写则按 detail.js → index.js 探测
       "compat": "ms-script-env",     // 可选：注入局部老脚本环境（老 view:js 可零改动迁移）
-      "closeBehavior": "minimize"    // 可选：minimize | exit（纯前端插件的建议值来源）
+      "closeBehavior": "minimize",   // 可选：minimize | exit（纯前端插件的建议值来源）
+      "theme": "dark"                // 可选：dark | light | inherit（默认）——见「主题兼容」一节
     }
   },
   "backend": {                       // 可选：后台进程
@@ -381,6 +462,7 @@ node test/pack-plugin.mjs plugins/baidu-translate -o out/x.msplugin
 | 配置 | 清单字段 | 取值 | 含义 |
 |---|---|---|---|
 | **关闭界面时** | `backend.closeBehavior` 或 `contributes.detailView.closeBehavior` | `minimize`（默认）/ `exit` | `minimize`＝**界面保留在后台**（DOM / 输入草稿 / 滚动位置 / 脚本内存态全部保留，再打开是「恢复」而不是重新加载），且后台进程继续跑（交给 `idleExitSec` 空闲回收）；`exit`＝**界面卸载**（下次打开重新读入口文件并重新执行脚本），且后台进程立即停止（`deactivate` 优雅退出 → `graceSec` 超时强杀） |
+| **界面主题** | `contributes.detailView.theme` | `dark` / `light` / `inherit`（默认） | `dark` / `light`＝插件界面按该主题设计：打开本插件视图期间，宿主把**整个呼出窗口**临时切到该主题（搜索框 / 结果列表 / 插件面板同色），关闭插件后恢复软件原主题；`inherit`＝跟随宿主主题 |
 | **开机自启** | `backend.autostart` | `always` / `on-demand`（默认）/ `prompt` / `never` | `always`＝随应用启动即拉起后台进程并常驻（不做空闲回收）；`prompt`＝作者不表态，由用户决定 |
 
 > 「关闭界面时」是**一个开关、两处生效**（界面 + 后台进程），用户只需理解一个概念：**最小化 = 一切留在后台，退出 = 全部收掉**。纯前端插件（没有 `backend`）同样显示这一行，它只体现界面那一半。两处清单字段的关系：**有效值只有一个**（注册表里的 `PluginRecord.closeBehavior`），带后台进程的插件写 `backend.closeBehavior` 即可，纯前端插件用 `contributes.detailView.closeBehavior` 表达诉求；两处都写且不一致时安装会给告警（`contributes.detailView.closeBehavior.conflictsWithBackend`），**生效时以 detailView 的声明为准**（「关闭界面时保留/卸载界面」首先说的是界面）。
@@ -390,6 +472,8 @@ node test/pack-plugin.mjs plugins/baidu-translate -o out/x.msplugin
 1. **首次安装**落在插件建议值上（`prompt` 按 `on-demand` 处理）；
 2. **升级只更新建议**——`upsertPlugin` 保留 `autoStart` / `closeBehavior` 的用户选择，否则插件能靠发版把自己设回「开机自启」或「常驻」，用户会失去控制感；
 3. 面板上每项都显示「插件建议：…」，与当前值不同时出现**「恢复」**按钮，一键把该项写回插件建议值。
+
+> **「界面主题」与其他两项的差别**：它只影响**界面观感**，不涉及后台进程；`inherit`（跟随插件声明）时看清单的 `detailView.theme`，插件也可以在运行时用 `ms.ui.registerThemeProvider()` 上报用户在自己界面里的选择（如 pi-agent 的「设置 → 外观」页）——**运行时值优先于面板设置**。详见下方「主题兼容（深/浅）」。
 
 **开机自启与「关闭界面时」的关系**：`autostart=always` 意味着**进程**常驻，与「关闭界面即停进程」互相矛盾，此时**进程侧以开机自启为准**（清单同时声明会得到安装警告 `backend.closeBehavior.conflictsWithAlways`，面板上显示一行说明）。但**界面侧不受影响**：「退出」的插件即使进程常驻，界面照样卸载——界面要不要保留与进程是否常驻是两件事。进程判定集中在纯函数 `shouldStopBackendOnClose()`，界面保活判定集中在 `shouldKeepFrontendOnClose()`，关闭动作由搜索窗在 `usePluginViewHost.clear()` 这个唯一收口发出。
 
@@ -405,7 +489,20 @@ node test/pack-plugin.mjs plugins/baidu-translate -o out/x.msplugin
 - 只有插件被**禁用 / 卸载**、**开发热重载**、**应用退出**时，保活会话才被真正销毁（这几种场景保活是错的）；
 - 对插件作者的契约：**关闭界面 ≠ 卸载**，不要假设「再次打开会重新执行脚本」；需要跨会话持久化的状态仍应写 `ms.store` / `ms.backend`。
 
-相关测试：`node test/plugin-keepalive.test.mjs`（纯逻辑：`decideViewClose` / `decideViewRestore` / `shouldKeepFrontendOnClose` / 清单校验与冲突告警）；`node test/plugin-keepalive-ui.test.mjs`（真实浏览器端到端：最小化插件关闭再打开不重跑脚本、草稿与滚动保留、exit 插件重新执行、多插件并存、禁用后清理、开发热重载重挂保活会话；需本机装有 Chrome / Edge，否则跳过）。
+相关测试：`node test/plugin-keepalive.test.mjs`（纯逻辑：`decideViewClose` / `decideViewRestore` / `shouldKeepFrontendOnClose` / 清单校验与冲突告警）；`node test/plugin-keepalive-ui.test.mjs`（真实浏览器端到端：最小化插件关闭再打开不重跑脚本、草稿与滚动保留、exit 插件重新执行、多插件并存、禁用后清理、开发热重载重挂保活会话；需本机装有 Chrome / Edge，否则跳过）；`node test/plugin-view-height-ui.test.mjs`（真实浏览器端到端：插件视图的窗口高度按 `#my_search_box` **实测原样下发**，不套文本视图的 140 下限——插件内容比 140 矮时窗口不得比盒子高，否则盒子下边框之下会露出一条空带（浅色主题下是 body 白底）；需本机装有 Chrome / Edge，否则跳过）。
+
+### 内置插件的内容刷新（升级后界面不生效的修复）
+
+内置插件（`src-tauri/resources/plugins/*.mspp`）由启动引导装到 `plugins/<id>/`。早期引导只判「**是否已安装**」，装过就永远跳过——于是随应用升级更新的内置插件（改了界面 CSS / JS）在**已装用户**身上永不生效：落盘副本还是旧的，用户看到的界面纹丝不动（本次「插件市场 / pi-agent 主题适配不生效」就是这个原因）。
+
+现在安装时记录一份**内容指纹**（`packageContentFingerprint`，对「排序后的 (路径, 可执行位, 内容)」取 SHA-256——与 zip 时间戳、打包实现无关），启动时对比「随版本分发的内容」与「上次装的内容」：
+
+- 不一致 → 静默重装（Rust 侧 staging → 校验 → 原子替换，失败不破坏旧版本）；
+- 一致 → 什么都不做（幂等，绝大多数启动的情况）；
+- 重装只覆盖文件与清单派生字段，**用户态一律保留**：`enabled` / `autoStart` / `closeBehavior` / 已授权权限（走 `upsertPlugin` 的默认保留路径）；用户卸载过的仍不复活（`removed` 标记优先）；
+- **来源不是内置**（用户从市场 / 从文件装过同名插件）时一律不碰，尊重用户装的那个版本。
+
+相关测试：`node test/plugin-builtin-refresh.test.mjs`（纯逻辑：指纹只随内容变化 / 顺序与时间戳无关、指纹保留语义、重装不覆盖用户态）；`node test/plugin-theme-e2e.test.mjs`（真实浏览器 + 真实安装管线：模拟「已装副本是旧 CSS」，跑一次真实启动引导，断言副本被刷成新版并写入指纹）。
 
 ### 插件 API（`ms.*`）
 
@@ -417,13 +514,120 @@ ms.search.query("关键词").then(rows => { /* … */ });
 ms.store.set("key", value);               // 插件私有命名空间
 ms.net.fetch("https://api.example.com/x"); // 经宿主 Rust 代理（绕 CORS，但受 scope 约束）
 ms.system.writeClipboard("已复制");
+ms.ui.theme;                              // 当前生效主题 "light" / "dark"（「跟随系统」时返回按系统偏好解析后的结果）
+ms.ui.onThemeChanged(theme => { … });     // 订阅主题切换（返回退订函数；保活会话继续收到，卸载时自动清理）
+ms.ui.registerThemeProvider(() => pref);  // 上报「本插件界面想用哪套主题」（inherit | dark | light）；宿主在打开/恢复视图时询问
+ms.ui.applyTheme();                       // provider 值变化后，让宿主立即重算并应用（如插件界面内切换主题）
+
+// 环境变量（宿主集中配置；只能看到用户逐项授权的那些）
+ms.env.granted();                         // → ["OPENAI_API_KEY", …]（只含已授权，且不含值）
+ms.env.has("OPENAI_API_KEY");             // → true / false
+ms.env.list();                            // → [{ name, description, secret }]（不含值）
+ms.env.pick({ title: "选择 API Key 来源", purpose: "该提供商将引用此变量" });
+                                          // → { kind:"ref", name, ref:"$OPENAI_API_KEY" } | { kind:"literal", value } | null
+                                          //   打开宿主绘制的居中授权面板：可搜索、键盘 ↑↓/Enter、未授权项当场授权
 
 onSubKeyword(msg => { /* 搜索框输入「我的插件 : 内容」时收到 */ });
 ```
 
+**注册了 `onSubKeyword` 不等于就能出现在二次搜索候选里**：候选由清单的
+`contributes.searchItem.subSearch`（默认 `false`）决定，宿主只给声明了 `true`
+的项补 `[可搜索]` 标记。如果插件消费子关键词，请在清单里显式声明——否则用户按
+`Tab` 进入「`关键词 : `」后看不到你的条目，`onSubKeyword` 永远不会被触发。
+普通搜索（直接输入关键词）不受影响，附件模式（`contributes.handlers`）也不受影响。
+
+### 环境变量（一份集中配置，多插件共用）
+
+密钥不该在每个插件里各存一份，也不该散落在插件的配置文件里。宿主提供**一份全局环境变量表**：`设置 → 环境变量` 里维护「名字 → 值 / 用途说明 / 是否密钥」，所有插件共用。
+
+**插件怎么用**（两种，都要用户授权）：
+
+| 方式 | 插件侧要做的 | 值到哪去 |
+|---|---|---|
+| **后台进程环境变量**（推荐） | 插件配置里直接引用变量名，宿主在启动它的后台进程时把**已授权**的变量注入进程 env | 进程环境（`process.env.NAME`）——插件代码自己读 |
+| **`ms.env.pick()` 让用户选** | 在配置输入框旁放个按钮调它；用户选中后把返回的 `ref`（形如 `$NAME`）填进自己的配置 | 由插件自己写进它的配置文件（如 pi 的 `models.json`），**值不入库**，运行时由插件从 env 解析 |
+
+官方插件 `plugins/pi-agent` 是参考实现：模型配置里的 **API Key 输入框**右侧有一个「变量」按钮，点开就是宿主的授权选择器；选中后输入框变成 `$MY_KEY`，密钥不写进 `models.json`，由 pi 从后台进程环境解析（列表里会标出「环境变量 MY_KEY」）。
+
+**授权模型（Android 式，与权限同源）**：
+
+- 权限目录新增 **`env.read:<变量名>`**（`src/lib/plugins/permissions.ts`，`data` 组，风险 `high`，带 scope）；
+- **未授权的变量对插件完全不可见**：`ms.env.granted()` / `list()` 列不出它，`ms.env.has()` 为 false，**也不会注入它的后台进程**——唯一的注入出口是 `src/lib/plugins/env-store.ts` 的 `buildPluginEnv()`，它只认注册表里的 `env.read:<NAME>` 授予记录；
+- 授权入口有三处：插件配置界面里 `ms.env.pick()` 弹出的选择器（当场授权）、`设置 → 插件` 展开某插件的「环境变量」行（选择/撤销）、插件清单用 `backend.env` 声明 `$NAME` 引用时面板会列出**待授权**项；
+- 授权/撤销后，若该插件后台**正在运行**会被自动重启——env 只在进程 `spawn` 时进入进程环境，不重启的话用户会以为「授权了却没生效」。
+
+**清单里声明需求**（`plugin.json` 的 `backend.env`，可选）：
+
+```jsonc
+"backend": {
+  "entry": "backend/run.cmd",
+  "env": {
+    "LOG_LEVEL": "debug",        // 字面量：作者自带、非敏感，原样注入
+    "MY_API_KEY": "$MY_API_KEY"  // 引用：指向「设置 → 环境变量」，需用户授权后才注入
+  }
+}
+```
+
+引用写法支持 `$NAME` / `${NAME}` / `$env:NAME`（`$secret:NAME` 为等价别名）。**未授权或已删除的变量会整键丢弃**（不注入空串）——注入空串会让插件把「未配置」误判成「配了个空值」。
+
+变量名必须是 POSIX 风格（`^[A-Za-z_][A-Za-z0-9_]*$`），且**不能以 `MS_PLUGIN_` 开头**：那是宿主标识插件进程身份（协议 / id / 数据目录 / 宿主版本）的保留前缀，且宿主取值优先——允许创建只会得到「建了却不生效」的静默失效，所以面板与清单校验都会直接拒绝并说明原因。
+
+**值怎么存（诚实说明）**：
+
+- 值与 GitHub Token、WebDAV 密码同一存储级别——**明文存在本地**，并且**随「备份与同步」一起走**（跨机统一配置；这是「统一配置」的必然代价）；
+- 授权是**使用授权 / 知情同意层，不是沙箱边界**：内嵌插件与宿主同 window、同 localStorage（见下方「已知边界」），恶意插件仍可直接读走变量。好处是**值的暴露面被收敛到 `src/lib/plugins/env-store.ts` 一个文件**，将来换成 Rust 侧钥匙串只需改这一处；
+- **选择器绝不渲染变量的值**：插件界面里弹的选择器只显示「名字 + 用途说明 + 授权状态」，值一律以固定掩码代替——这样即使插件脚本去翻 DOM 也读不到明文（值只在 Rust `spawn` 时被读给进程环境）；
+- 网关镜像 `plugin-gateway.json` 会**明文包含注入的 env**：这是「开机自启的插件也能拿到变量」的必要代价（启动时前端还没加载，只能读回快照）。所以不要在这里放你无法接受落盘的东西。
+
+### 主题兼容（深/浅）
+
+宿主在**搜索窗口根**（`<html>` / `html.theme-dark`）上暴露一份共享主题变量（`src/css/style.css`「插件共享主题变量」节）：`--text` / `--muted` / `--surface` / `--card` / `--field` / `--line` / `--hover-bg` / `--hover-border` / `--code-bg` / `--seg-bg` / `--accent` / `--accent-soft-*` / `--ok` / `--err` / `--btn-shadow` / `--dialog-shadow` 等，取值随用户主题设置（浅 / 深 / 跟随系统）实时切换。内嵌插件界面（`#text_show .plugin-view`）里引用它们即自动跟随：
+
+```css
+/* 插件 CSS：「宿主 token + 兜底值」写法（宿主作用域重写后选择器不变，var() 沿 DOM 向上解析到 html） */
+.panel {
+  background: var(--card, #fff);
+  color: var(--text, #333);
+  border: 1px solid var(--line, #e6e8ec);
+}
+```
+
+- 兜底值（`var()` 第二参数）保持插件自身默认外观——独立开发（无宿主变量）时不变样；
+- 语义色（品牌蓝、状态红绿等）可保持字面量，但要保证在浅色底与深色底上都读得出来；
+- 需要**逻辑级**主题决策（选图标、重绘动态内容）时：`ms.ui.theme` 读当前值，`ms.ui.onThemeChanged(fn)` 订阅切换；
+- 原生表单控件不用特殊处理：宿主已按主题同步设置 `color-scheme`（`html.theme-light/dark`），复选框、下拉、光标等原生渲染自动跟随。
+
+**插件声明默认主题（呼出窗口联动）**：如果插件界面是**按某一种主题设计**的（如 pi-agent 的设计稿是深色），用共享变量也做不到「界面本身就想要深色」——软件是浅色时会出现「上方搜索框浅、下方插件深」的割裂观感。此时在清单里声明：
+
+```jsonc
+"contributes": {
+  "detailView": {
+    "entry": "ui/detail.html",
+    "theme": "dark"            // dark | light | inherit（默认）
+  }
+}
+```
+
+- **打开**该插件视图期间，宿主把**整个呼出窗口**临时切到该主题（搜索框 / 结果列表 / 详情区 / 插件面板 / 原生 `color-scheme` 全部同色）；**关闭**插件（Esc / 开始新搜索 / 点开别的结果 / 打开别的插件 / 插件被禁用）后**恢复软件原主题**。临时覆盖**不写 localStorage**，因此软件的「浅色 / 深色 / 跟随系统」设置不受影响；
+- 用户在 `设置 → 插件 → 界面主题` 可以为某个插件改成别的主题（覆盖清单声明，升级不覆盖用户选择）；
+- 插件还可以在**界面内**让用户切换主题（宿主提供 `ms.ui.registerThemeProvider` / `ms.ui.applyTheme`，无需额外权限）：
+
+```js
+let pref = (await ms.store.get("theme", null)) || "inherit";  // inherit | dark | light
+ms.ui.registerThemeProvider(() => pref);                      // 宿主每次打开/恢复视图时询问
+// 用户点了「浅色」：
+pref = "light";
+await ms.store.set("theme", pref);
+ms.ui.applyTheme();                                           // 让宿主立即重算并应用
+```
+
+优先级：**运行时 provider（插件界面内的选择）→ 面板设置 → 清单声明 → inherit（跟随宿主）**。
+
+参考实现：官方插件 `plugins/pi-agent/ui/detail.css`（中性色全部映射宿主 token，深色设计稿值作兜底）与 `plugins/market/ui/detail.css`；pi-agent 同时在**设置面板的「外观」页**（左下角齿轮 → 左菜单「外观」）提供了「深色 / 浅色 / 跟随系统」三选，**默认深色**（`ms.ui.registerThemeProvider` + `ms.store` 持久化），是「声明默认主题 + 界面内可切换」的完整范例。
+
 ### 权限（Android 式）
 
-权限目录见 `src/lib/plugins/permissions.ts`（`search.read` / `search.write` / `ui.inlay` / `ui.window` / `ui.command` / `ui.notify` / `store` / `clipboard.read|write` / `selection.read` / `net.fetch:<scope>` / `system.openExternal` / `backend.spawn` / `secret.read:<name>`）。
+权限目录见 `src/lib/plugins/permissions.ts`（`search.read` / `search.write` / `ui.inlay` / `ui.window` / `ui.command` / `ui.notify` / `store` / `env.read:<变量名>` / `clipboard.read|write` / `selection.read` / `net.fetch:<scope>` / `system.openExternal` / `backend.spawn` / `secret.read:<name>`）。
 
 - 清单里写的只是**请求**，只有用户确认后的 `grants` 才生效；
 - 极高风险权限（`backend.spawn`、`secret.read`、`scope: "*"`）在安装时**逐条强提示**「该插件可在你的电脑上运行程序」；
@@ -443,14 +647,14 @@ onSubKeyword(msg => { /* 搜索框输入「我的插件 : 内容」时收到 */ 
 - **inlay 不是沙箱**：插件界面与宿主运行在同一个 `window` / 同一份 `localStorage` 里，和现有 `[脚本]` 项是同一信任级别。CSS 会被限到 `#text_show .plugin-view` 作用域内，但脚本本身能碰宿主 DOM——真正的边界在 `ms.*`（插件拿不到裸 Tauri IPC）。需要强隔离请等独立窗口形态（`ui.window`，v1 未实现）。
 - 宿主挂载点刻意用 `#ms-app` 而不是最通用的 `#app`：同文档下插件脚本一个 `getElementById("app")` 就会命中宿主根节点并覆盖整个界面（这个坑在开发中真实踩到过）。
 - 插件贡献的搜索项**不写入 `SEARCH_DATA_KEY` 缓存**（缓存带订阅指纹、且是网络数据的落盘副本），改由挂载时重新合成；加载完成→挂载→索引在引擎里是一条链（`_attachExtraItems`）。
-- 插件声明了 `keyword` 的条目会被自动补上 `[可搜索]` 标记，否则按 `Tab` 进入子搜索模式后插件项会从结果里消失、`onSubKeyword` 永远收不到消息。
+- 插件项要进「二次搜索候选」（输入 `父关键词 : 子词` 后出现在结果里）必须显式声明 `contributes.searchItem.subSearch: true`；不声明的项不进该候选，普通搜索与附件模式照常可搜、可打开。宿主只给声明了 `subSearch` 的项补 `[可搜索]` 标记——这就是候选的判定依据。判定必须是声明式的：插件脚本要等视图打开才执行，晚于结果列表渲染，无法在搜索时探测它是否真的消费子关键词。
 - **保活会话不是「后台运行」**：`minimize` 只是让插件的 DOM 与脚本上下文留在内存里（定时器、未完成的请求会继续跑，因为 JS 语义如此）。要真正停下来，请把插件设为「退出」，或让插件自己提供停止入口。保活数量不设上限——插件很多时内存会随打开过的插件数增长。
 - **宿主的插件节点是「会话载体」而不是容器内容**：`.plugin-view` 里由宿主 append/remove 一个 `.ms-plugin-session` 子节点（每个插件一个，形如 `<div class="ms-plugin-session" data-ms-plugin-session="<id>">`），它是停靠/恢复的最小搬运单位。宿主的 CSS 作用域前缀按 `#text_show .plugin-view` 生成（与老行为一致），因此插件样式在停靠期间不生效、恢复后立即生效。
 - **设置窗口的加载预算**：`config.html` 带一个「页面加载失败，请重启应用」的兜底提示。它原本是固定 8 秒触发，而设置窗口同时被要求「不加载搜索引擎等重型依赖」——插件面板早期**静态**引入了 `search-engine` 的键常量，把 `pinyin-pro` 一起拖进首屏模块图，冷启动挂载从 ~1.7s 涨到 ~6.9s，慢机器上直接撞上兜底变成误报。
   两条修复：① 存储键拆到零依赖的 `src/lib/search-keys.ts`，插件面板改为 `defineAsyncComponent` 延迟加载（只在点「插件」时才取）；② 兜底改为「页面仍在加载就续期、连续静默才放弃」，不再把「加载慢」误判成「加载失败」。
   **改动设置窗口的 import 时请留意首屏模块图**：`npm run build` 后看 `config-*.js` 的静态 `import` 是否引入了大 chunk，是则说明又漏了东西进首屏。
 
-相关测试：`node test/plugin-package.test.mjs`（ZIP 读写与安全边界：EOCD 越界回归、包裹目录剥离、写读往返、路径穿越 / 加密包 / 截断包拒绝）；`node test/plugin-install.test.mjs`（安装链路：真实包端到端、清单校验与可读文案、权限与 backend 一致性、数值夹紧）；`node test/plugin-icon.test.mjs`（插件图标解析：MIME 映射、三种引用形态判定、预读集合与列表取用顺序）；`node test/plugin-behavior.test.mjs`（行为默认值：`closeBehavior` 校验与默认值、冲突告警、安装落建议值、**升级不覆盖用户选择**、老注册表读时迁移、`shouldStopBackendOnClose` 判定矩阵）；`node test/plugin-keepalive.test.mjs`（界面保活纯逻辑：`contributes.detailView.closeBehavior` 校验与「与 backend 声明冲突」告警、建议值口径、`shouldKeepFrontendOnClose` 判定矩阵、`decideViewClose` / `decideViewRestore`、保活会话也参与开发热重载重挂）；`node test/plugin-keepalive-ui.test.mjs`（真实浏览器端到端保活：最小化关闭再打开**不重跑脚本**且草稿/滚动保留、exit 关闭即卸载且重开重跑、多插件并存保活、禁用后清理、热重载重挂）；`node test/plugin-ui.test.mjs`（真实浏览器：从文件安装 → 面板出现插件 → 插件项参与检索 → 打开插件视图 → `ms.store` 生效 → 子关键词转发 → 最小化后的会话停靠与快捷键恢复）；`node test/plugin-panel-ui.test.mjs`（真实浏览器：插件面板**只列插件**（订阅里的 `[脚本]` 项不出现、历史遗留记录被清理）、左侧 logo 的三种形态（相对路径读成 data URL / 网络地址直出 / 无图标与读失败退回默认图标）、行为设置三行与「插件建议 / 恢复 / 开机自启时的说明」）；`node test/plugin-close-behavior-ui.test.mjs`（真实浏览器端到端：`exit` 关界面即发 `plugin_backend_stop`、`minimize` 不发、`always` 优先不停、用户改值后立刻按新值执行、无后端插件不误停；均需本机装有 Chrome / Edge，否则跳过）。Rust 侧：`cd src-tauri && cargo test --lib`。
+相关测试：`node test/plugin-package.test.mjs`（ZIP 读写与安全边界：EOCD 越界回归、包裹目录剥离、写读往返、路径穿越 / 加密包 / 截断包拒绝）；`node test/plugin-install.test.mjs`（安装链路：真实包端到端、清单校验与可读文案、权限与 backend 一致性、数值夹紧）；`node test/plugin-subsearch.test.mjs`（二次搜索候选契约：`contributes.searchItem.subSearch` 默认 false、校验、`_pluginSubSearch` 标记、`[可搜索]` 只在声明 true 时补、PRO 模式排除不参与的插件项而附件模式主路径不受影响）；`node test/plugin-icon.test.mjs`（插件图标解析：MIME 映射、三种引用形态判定、预读集合与列表取用顺序）；`node test/plugin-behavior.test.mjs`（行为默认值：`closeBehavior` 校验与默认值、冲突告警、安装落建议值、**升级不覆盖用户选择**、老注册表读时迁移、`shouldStopBackendOnClose` 判定矩阵）；`node test/plugin-keepalive.test.mjs`（界面保活纯逻辑：`contributes.detailView.closeBehavior` 校验与「与 backend 声明冲突」告警、建议值口径、`shouldKeepFrontendOnClose` 判定矩阵、`decideViewClose` / `decideViewRestore`、保活会话也参与开发热重载重挂）；`node test/plugin-keepalive-ui.test.mjs`（真实浏览器端到端保活：最小化关闭再打开**不重跑脚本**且草稿/滚动保留、exit 关闭即卸载且重开重跑、多插件并存保活、禁用后清理、热重载重挂）；`node test/plugin-ui.test.mjs`（真实浏览器：从文件安装 → 面板出现插件 → 插件项参与检索 → 打开插件视图 → `ms.store` 生效 → 子关键词转发 → 最小化后的会话停靠与快捷键恢复）；`node test/plugin-panel-ui.test.mjs`（真实浏览器：插件面板**只列插件**（订阅里的 `[脚本]` 项不出现、历史遗留记录被清理）、左侧 logo 的三种形态（相对路径读成 data URL / 网络地址直出 / 无图标与读失败退回默认图标）、行为设置三行与「插件建议 / 恢复 / 开机自启时的说明」）；`node test/plugin-close-behavior-ui.test.mjs`（真实浏览器端到端：`exit` 关界面即发 `plugin_backend_stop`、`minimize` 不发、`always` 优先不停、用户改值后立刻按新值执行、无后端插件不误停；均需本机装有 Chrome / Edge，否则跳过）。Rust 侧：`cd src-tauri && cargo test --lib`。
 
 ---
 
@@ -506,11 +710,13 @@ onSubKeyword(msg => { /* 搜索框输入「我的插件 : 内容」时收到 */ 
 
 ### 测试
 
-Rust 侧单测覆盖路径安全、时间解析、归档往返、拒绝非备份包：
+Rust 侧单测覆盖路径安全、时间解析、归档往返、拒绝非备份包，以及**网关 env 往返**（`env` 字段可缺省、含特殊字符不被破坏、快照序列化后可原样读回）：
 
 ```bash
 cd src-tauri && cargo test --lib
 ```
+
+环境变量集中配置的纯逻辑契约（`node test/env-store.test.mjs`）：变量名校验、**掩码不泄漏真实长度**、`$NAME`/`${NAME}`/`$env:`/`$secret:` 引用语法、`env.read:<NAME>` 授权解析（非 URL scope 只认全等），以及**注入过滤的核心安全断言**——未授权/未定义的变量绝不出现、清单引用未授权时整键丢弃而非注入空串。
 
 前端：`node test/sync-panel-ui.test.mjs`（真实浏览器验证设置窗口「备份与同步」面板的布局：
 导出/导入按钮必须并排一行（600px 最小窗口宽度下也不换行）、「保存到…」按钮不带多余图标、
