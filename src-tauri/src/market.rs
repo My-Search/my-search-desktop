@@ -107,6 +107,16 @@ const ALLOWED_DOWNLOAD_HOSTS: [&str; 4] = [
     "raw.githubusercontent.com",
 ];
 
+/// 市场索引在 raw 域的受控位置：`<owner>/<repo>/<ref>/index.dist.json`。
+///
+/// 索引**不是**普通插件包（4 段 vs 包的 7 段），因此单独一条规则；
+/// 且必须钉死到我们自己的仓库与分支——否则任意第三方仓库都能放一个
+/// index.dist.json 顶替市场索引（那是比包更严重的信任问题）。
+const MARKET_CATALOG_OWNER: &str = "my-search";
+const MARKET_CATALOG_REPO: &str = "my-search-plugin-market";
+const MARKET_CATALOG_REF: &str = "main";
+const MARKET_CATALOG_FILE: &str = "index.dist.json";
+
 /// 解析 URL 的 (host, path)。返回 None 表示格式非法或含 userinfo。
 ///
 /// 刻意**不做**字符串前缀比对：`https://github.com@evil.com/x` 的 `starts_with`
@@ -153,9 +163,10 @@ fn is_allowed_release_url(url: &str) -> bool {
     if !ALLOWED_DOWNLOAD_HOSTS.contains(&host.as_str()) {
         return false;
     }
-    // raw 域只允许官方插件目录下的 .mspp（严格路径形态，见函数注释）
+    // raw 域有两种受控形态：官方插件包目录（7 段）、市场索引本身（4 段）。
+    // 除此之外的 raw 地址一律拒绝。
     if host == "raw.githubusercontent.com" {
-        return is_allowed_official_raw_url(&host, &path);
+        return is_allowed_official_raw_url(&host, &path) || is_market_catalog_raw_url(&host, &path);
     }
     // 资产终点域：GitHub 把 Release 资产 302 到这里，路径形如
     // /github-production-release-asset/<id>/<id>?<签名参数>。
@@ -194,6 +205,9 @@ fn is_asset_cdn_host(host: &str) -> bool {
 ///   - 之后恰为 `<id>/<版本>/<资产名>` 三段，且资产名以 `.mspp` 结尾。
 /// 这样即使放宽到 raw 域，也只能取到官方插件目录下的 `.mspp`，
 /// 而不是任意 raw 文件。
+///
+/// 注意：**图标不走这里**。市场 UI 用 `<img src>` 直接加载图标，
+/// 不经过本命令，因此这里只放行 `.mspp`，不因图标而放宽下载面。
 fn is_allowed_official_raw_url(host: &str, path: &str) -> bool {
     if !host.eq_ignore_ascii_case("raw.githubusercontent.com") {
         return false;
@@ -207,6 +221,31 @@ fn is_allowed_official_raw_url(host: &str, path: &str) -> bool {
         return false;
     }
     segs[6].ends_with(".mspp")
+}
+
+/// 市场索引本身的直链：`/<owner>/<repo>/<ref>/index.dist.json`（恰 4 段）。
+///
+/// 索引与插件包同域名但形态不同（4 段 vs 7 段），`is_allowed_official_raw_url`
+/// 的严格 7 段判定**收不进索引**——这正是「索引从 Release 迁到仓库文件后、
+/// 客户端拉不到索引」的原因。这里为索引单列一条规则。
+///
+/// 与包规则的区别在于**是否钉死仓库**：包可以来自任何第三方仓库（准入由
+/// index.json 审核控制），但索引只能来自我们自己的仓库与分支，否则任何人都能
+/// 用自己仓库里的 index.dist.json 顶替市场索引。因此这里 owner/repo/ref/文件名
+/// 四项全部精确比对（大小写不敏感），不做通配。
+fn is_market_catalog_raw_url(host: &str, path: &str) -> bool {
+    if !host.eq_ignore_ascii_case("raw.githubusercontent.com") {
+        return false;
+    }
+    let segs: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    // owner / repo / ref / index.dist.json
+    if segs.len() != 4 || segs.iter().any(|s| s.is_empty()) {
+        return false;
+    }
+    segs[0].eq_ignore_ascii_case(MARKET_CATALOG_OWNER)
+        && segs[1].eq_ignore_ascii_case(MARKET_CATALOG_REPO)
+        && segs[2].eq_ignore_ascii_case(MARKET_CATALOG_REF)
+        && segs[3].eq_ignore_ascii_case(MARKET_CATALOG_FILE)
 }
 
 // ===================== 准入（权限门） =====================
@@ -555,6 +594,50 @@ mod tests {
         // 子域名伪造
         assert!(!is_allowed_release_url(
             "https://raw.githubusercontent.com.evil.com/a/b/main/official-plugins/x/1.0.0/x.mspp"
+        ));
+    }
+
+    // ---------- 市场索引本身（raw，4 段） ----------
+
+    #[test]
+    fn market_catalog_raw_url_is_allowed() {
+        // 回归：索引从 Release 迁到仓库文件后，客户端必须拉得到它。
+        // 索引是 4 段而插件包是 7 段，曾因只认 7 段而整条拉取失败。
+        assert!(is_allowed_release_url(
+            "https://raw.githubusercontent.com/My-Search/my-search-plugin-market/main/index.dist.json"
+        ));
+        // 大小写不敏感（GitHub 域与路径段都不区分大小写）
+        assert!(is_allowed_release_url(
+            "https://raw.githubusercontent.com/my-search/MY-SEARCH-PLUGIN-MARKET/main/index.dist.json"
+        ));
+    }
+
+    #[test]
+    fn market_catalog_raw_url_rejects_other_repos_and_files() {
+        // 别人的仓库放一份同名文件不得顶替我们的索引
+        assert!(!is_allowed_release_url(
+            "https://raw.githubusercontent.com/attacker/my-search-plugin-market/main/index.dist.json"
+        ));
+        assert!(!is_allowed_release_url(
+            "https://raw.githubusercontent.com/My-Search/my-search-plugin-market/main/evil.json"
+        ));
+        // 我们仓库里的其它文件同样不放行（raw 域只开放这两类形态）
+        assert!(!is_allowed_release_url(
+            "https://raw.githubusercontent.com/My-Search/my-search-plugin-market/main/index.json"
+        ));
+        assert!(!is_allowed_release_url(
+            "https://raw.githubusercontent.com/My-Search/my-search-plugin-market/main/index.error.json"
+        ));
+        // 段数不对
+        assert!(!is_allowed_release_url(
+            "https://raw.githubusercontent.com/My-Search/my-search-plugin-market/main/sub/index.dist.json"
+        ));
+        assert!(!is_allowed_release_url(
+            "https://raw.githubusercontent.com/My-Search/index.dist.json"
+        ));
+        // 非 main 分支不认（与客户端常量 MARKET_CATALOG_REF 一致）
+        assert!(!is_allowed_release_url(
+            "https://raw.githubusercontent.com/My-Search/my-search-plugin-market/dev/index.dist.json"
         ));
     }
 

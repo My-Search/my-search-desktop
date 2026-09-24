@@ -134,6 +134,20 @@ const ALLOWED_DOWNLOAD_HOSTS = [
   "raw.githubusercontent.com",
 ];
 
+/**
+ * 市场索引在 raw 域的受控位置：`<owner>/<repo>/<ref>/index.dist.json`。
+ *
+ * 索引不是普通插件包（4 段 vs 包的 7 段），单独一条规则；且必须钉死到我们
+ * 自己的仓库与分支——否则任意第三方仓库放一个 index.dist.json 就能顶替市场索引
+ * （那比顶替单个包更严重）。
+ *
+ * 与 Rust 侧 `is_market_catalog_raw_url`（market.rs）逐字对应，**两侧必须一起改**。
+ */
+const CATALOG_RAW_OWNER = "my-search";
+const CATALOG_RAW_REPO = "my-search-plugin-market";
+const CATALOG_RAW_REF = "main";
+const CATALOG_RAW_FILE = "index.dist.json";
+
 /** 解析 URL 的 host（小写，去端口与 userinfo）；无法解析/含 userinfo/非标端口返回 null */
 function urlHostOf(v: string): string | null {
   // 拒绝 userinfo：https://github.com@evil.com 的真实 host 是 evil.com，
@@ -180,10 +194,22 @@ export function isAllowedDownloadUrl(v: unknown): boolean {
   const slash = v.indexOf("/", schemeEnd);
   const path = slash < 0 ? "" : v.slice(slash);
 
-  // 官方插件目录：owner/repo/ref/official-plugins/<id>/<版本>/<资产>.mspp（严格 7 段）
+  // raw 域有两种受控形态：
+  //   ① 官方插件包：owner/repo/ref/official-plugins/<id>/<版本>/<资产>.mspp（严格 7 段）
+  //   ② 市场索引本身：<owner>/<repo>/<ref>/index.dist.json（严格 4 段，且钉死到我们的仓库）
+  // 除此之外的 raw 地址一律拒绝。
   if (host === "raw.githubusercontent.com") {
     const segs = path.replace(/^\//, "").split("/");
-    if (segs.length !== 7 || segs.some((s) => s === "")) return false;
+    if (segs.some((s) => s === "")) return false;
+    if (segs.length === 4) {
+      return (
+        segs[0].toLowerCase() === CATALOG_RAW_OWNER &&
+        segs[1].toLowerCase() === CATALOG_RAW_REPO &&
+        segs[2].toLowerCase() === CATALOG_RAW_REF &&
+        segs[3].toLowerCase() === CATALOG_RAW_FILE
+      );
+    }
+    if (segs.length !== 7) return false;
     if (segs[3] !== "official-plugins") return false;
     return segs[6].endsWith(".mspp");
   }

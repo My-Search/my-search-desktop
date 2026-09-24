@@ -12,6 +12,21 @@
  *   node scripts/build-index.mjs --local <dir>       # 用本地目录当作市场仓库（离线测试）
  *   node scripts/build-index.mjs --assets <dir>      # 用本地资产目录（离线测试）
  *
+ * ## 上架时间 / 更新时间（存于 index.json）
+ *
+ * 源清单条目形如：
+ *   { "plugin": "official-plugins/com.x.y", "createTime": "...", "latestVersionUpdateTime": "...", "lastVersion": "1.0.0" }
+ *
+ * 人工**只填 `plugin`**，其余三个字段由本工具维护并回写：
+ *   - `createTime`：首次成功解析时写入 now，此后永不改变；
+ *   - `latestVersionUpdateTime`：首次写入 now；之后与 `lastVersion` 比对，
+ *     **版本变了**才刷新；
+ *   - `lastVersion`：本次解析到的版本，供下次比对（不写进 dist）。
+ *
+ * 写成 `index.dist.json` 的 `publishedAt` / `updatedAt`。
+ * 兼容旧的字符串写法（`"official-plugins/com.x.y"`）与 `{path, official}` 写法，
+ * 构建后会统一改写成上面的对象形式。
+ *
  * ## 两种源
  *
  * - `official-repo`：官方插件，包在**市场仓库**里按版本归档：
@@ -62,8 +77,64 @@ if (!existsSync(indexPath)) {
   process.exit(1);
 }
 const indexDoc = JSON.parse(readFileSync(indexPath, "utf8"));
-const officialRepos = indexDoc["official-repo"] ?? [];
-const threeParties = indexDoc["three-parties"] ?? [];
+/** 原始文本快照：构建过程会就地改 indexDoc 里的条目（补时间字段），
+ *  结束时拿它比对，决定是否需要回写。必须在这里先存，晚了就被改掉了。 */
+const indexTextBefore = readFileSync(indexPath, "utf8");
+
+/* ============================================================
+ * 源清单条目：统一为对象形式
+ *
+ * 历史上有三种写法，都要能读：
+ *   1. 官方（字符串）：  "official-plugins/com.x.y"
+ *   2. 官方（对象）：    { path: "official-plugins/com.x.y", official: false }
+ *   3. 带时间戳（对象）：{ plugin: "official-plugins/com.x.y", createTime, latestVersionUpdateTime }
+ *
+ * 输出**一律**写成第 3 种（三方则是 { plugin: "user/repo", ... }），
+ * 时间字段由本工具回写，人工只填 plugin。
+ * ============================================================ */
+
+/** 时间字段名（存于 index.json，回写到 index.dist.json 的同名字段） */
+const F_CREATE = "createTime";
+const F_UPDATE = "latestVersionUpdateTime";
+
+/**
+ * 把一个源清单条目解析成规范形式。
+ * 返回 { key, kind, path, official?, item }，其中 `item` 是原对象（用于就地回写时间）。
+ */
+function normalizeSource(raw, kind) {
+  // 字符串：官方是目录路径，三方是 user/repo
+  if (typeof raw === "string") {
+    return { key: raw, kind, path: raw, item: { plugin: raw } };
+  }
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(`源清单条目格式错误：${JSON.stringify(raw)}`);
+  }
+  // 对象：plugin 是新写法；path 是官方旧写法（等价于 plugin）
+  const pluginPath = typeof raw.plugin === "string" ? raw.plugin : undefined;
+  const oldPath = typeof raw.path === "string" ? raw.path : undefined;
+  const p = pluginPath ?? oldPath;
+  if (!p) throw new Error(`源清单条目缺少 plugin 字段：${JSON.stringify(raw)}`);
+  const out = { key: p, kind, path: p, item: raw };
+  if (kind === "official" && raw.official !== undefined) out.official = raw.official;
+  return out;
+}
+
+/** 按类型解析出统一的源数组（同时把原 index.json 的数组就地规范化） */
+function readSources(arr, kind) {
+  const list = Array.isArray(arr) ? arr : [];
+  const out = [];
+  for (let i = 0; i < list.length; i++) {
+    try {
+      out.push(normalizeSource(list[i], kind));
+    } catch (e) {
+      console.error(`⚠ index.json 的 ${kind}[${i}] 无法解析，已跳过：${e.message}`);
+    }
+  }
+  return out;
+}
+
+const officialSources = readSources(indexDoc["official-repo"], "official");
+const threePartySources = readSources(indexDoc["three-parties"], "three-party");
 
 function sha256(buf) {
   return createHash("sha256").update(buf).digest("hex");
@@ -76,16 +147,13 @@ function sha256(buf) {
  */
 const errors = { official: [], threeParties: [] };
 /** 记录一条排除项。kind: 'official' | 'three-party' */
-function recordError(kind, item, reason) {
+function recordError(kind, pathOrRepo, reason, official) {
   if (kind === "official") {
-    // 官方条目可能是字符串或 {path, official} 对象，统一记录为 {path, reason}（保留 official）
-    const entry = { path: typeof item === "string" ? item : item.path, reason };
-    if (typeof item === "object" && item !== null && item.official !== undefined) {
-      entry.official = item.official;
-    }
+    const entry = { path: pathOrRepo, reason };
+    if (official !== undefined) entry.official = official;
     errors.official.push(entry);
   } else {
-    errors.threeParties.push({ repo: item, reason });
+    errors.threeParties.push({ repo: pathOrRepo, reason });
   }
 }
 
@@ -214,8 +282,38 @@ function resolveIconUrl(icon, { kind, repo, ref, pluginDir, version }) {
   return `https://raw.githubusercontent.com/${repo}/${ref}/${name}`;
 }
 
+/**
+ * 取（必要时初始化）某源条目上的时间字段。
+ *
+ * - `createTime`：**首次成功解析**时写入 now，此后永不改变。
+ * - `latestVersionUpdateTime`：首次写入 now；之后只有**版本变化**时才刷新。
+ *
+ * 就地写回 `item`（即 index.json 里那个对象），构建结束统一落盘。
+ * 返回 { createTime, latestVersionUpdateTime }。
+ */
+function stampTimes(item, version) {
+  const now = new Date().toISOString();
+  const prevVersion = typeof item.lastVersion === "string" ? item.lastVersion : undefined;
+
+  if (typeof item[F_CREATE] !== "string" || !item[F_CREATE]) item[F_CREATE] = now;
+  if (typeof item[F_UPDATE] !== "string" || !item[F_UPDATE]) {
+    item[F_UPDATE] = now;
+  } else if (prevVersion !== undefined && prevVersion !== version) {
+    // 版本变了 → 刷新更新时间
+    item[F_UPDATE] = now;
+  } else if (prevVersion === undefined && item.lastVersion !== version) {
+    // 老清单没有 lastVersion（本次是首次记录）：不改已经存在的更新时间，
+    // 避免把历史时间误判成「刚更新」。
+  }
+
+  // lastVersion 只用于下次比对，不对外输出（dist 里不需要）
+  item.lastVersion = version;
+
+  return { [F_CREATE]: item[F_CREATE], [F_UPDATE]: item[F_UPDATE] };
+}
+
 /** 组装一条索引条目（官方与三方共用） */
-function buildEntry({ manifest, bytes, digest, downloadUrl, iconUrl, categories, tags, official, verified }) {
+function buildEntry({ manifest, bytes, digest, downloadUrl, iconUrl, categories, tags, official, verified, source }) {
   const entry = {
     id: manifest.id,
     name: manifest.name,
@@ -228,8 +326,6 @@ function buildEntry({ manifest, bytes, digest, downloadUrl, iconUrl, categories,
     sha256: digest,
     size: bytes.length,
     permissions: [...(manifest.permissions ?? []), ...(manifest.optionalPermissions ?? [])],
-    publishedAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
   };
   if (manifest.minAppVersion) entry.minAppVersion = manifest.minAppVersion;
   if (manifest.homepage) entry.homepage = manifest.homepage;
@@ -237,6 +333,13 @@ function buildEntry({ manifest, bytes, digest, downloadUrl, iconUrl, categories,
   if (tags) entry.tags = tags;
   if (official !== undefined) entry.official = official;
   if (verified !== undefined) entry.verified = verified;
+
+  // 上架/更新时间：由源清单条目承载（首次写入、版本变化刷新）
+  const times = source ? stampTimes(source.item, manifest.version) : null;
+  const now = new Date().toISOString();
+  entry.publishedAt = times?.[F_CREATE] ?? now;
+  entry.updatedAt = times?.[F_UPDATE] ?? now;
+
   return entry;
 }
 
@@ -255,11 +358,11 @@ const autoRemoved = [];
  * 这样「包托管在我们仓库」与「是否是官方插件」就解耦了——
  * 例如 com.zhuangjie.* 由我们代管包，但仍是第三方。
  */
-async function resolveOfficial(item) {
-  const relPath = typeof item === "string" ? item : item.path;
-  const officialOverride = typeof item === "object" && item !== null ? item.official : undefined;
+async function resolveOfficial(src) {
+  const relPath = src.path;
+  const officialOverride = src.official;
   if (typeof relPath !== "string") {
-    throw new Error(`official-repo 条目格式错误：${JSON.stringify(item)}`);
+    throw new Error(`official-repo 条目格式错误：${JSON.stringify(src.item)}`);
   }
   // relPath 形如 official-plugins/<插件id>
   const segs = relPath.split("/").filter(Boolean);
@@ -322,12 +425,14 @@ async function resolveOfficial(item) {
     iconUrl,
     categories, tags,
     official,
+    source: src,
   });
 }
 
 // ===================== 解析：第三方插件（仓库 Release） =====================
 
-async function resolveThreeParty(repo) {
+async function resolveThreeParty(src) {
+  const repo = src.path;
   if (!/^[^/]+\/[^/]+$/.test(repo)) {
     throw new Error(`第三方源格式必须是 用户名/仓库名，实际为 ${repo}`);
   }
@@ -396,6 +501,7 @@ async function resolveThreeParty(repo) {
         downloadUrl,
         iconUrl,
         official: false,
+        source: src,
       });
     } catch (e) {
       lastErr = e;
@@ -411,9 +517,9 @@ const seen = new Set();
 
 /**
  * 处理一个源：成功则收集条目，失败则记入 index.error.json。
- * kind: 'official' | 'three-party'；item 为原条目（字符串或对象）
+ * kind: 'official' | 'three-party'；src 为 normalizeSource 的产物
  */
-async function processOne(kind, item, label, fn) {
+async function processOne(kind, src, label, fn) {
   process.stdout.write(`🔄 ${label} … `);
   try {
     const entry = await fn();
@@ -425,15 +531,16 @@ async function processOne(kind, item, label, fn) {
   } catch (e) {
     console.log("排除");
     console.error(`   ✗ ${e.message}`);
-    recordError(kind, item, e.message);
+    recordError(kind, src.path, e.message, src.official);
   }
 }
 
-for (const p of officialRepos) {
-  const label = typeof p === "string" ? p : p.path;
-  await processOne("official", p, `official-repo:${label}`, () => resolveOfficial(p));
+for (const src of officialSources) {
+  await processOne("official", src, `official-repo:${src.path}`, () => resolveOfficial(src));
 }
-for (const r of threeParties) await processOne("three-party", r, `three-parties:${r}`, () => resolveThreeParty(r));
+for (const src of threePartySources) {
+  await processOne("three-party", src, `three-parties:${src.path}`, () => resolveThreeParty(src));
+}
 
 if (entries.length === 0) {
   console.error("✗ 没有任何插件解析成功");
@@ -482,13 +589,39 @@ if (errCount > 0) {
   console.log(`✅ index.error.json：无排除项`);
 }
 
-// ---- 404 仓库自动移除：重写 index.json ----
-if (autoRemoved.length > 0) {
-  console.log("");
-  console.log("⚠ 以下仓库不存在，将从 index.json 自动移除：");
-  for (const a of autoRemoved) console.log(`   · ${a.repo}（${a.reason}）`);
+// ---- 回写 index.json：统一成对象形式 + 补齐时间字段 ----
+// 这是源清单的**唯一权威副本**：时间字段由本工具维护，人工只填 plugin。
+{
   const removedSet = new Set(autoRemoved.map((a) => a.repo));
-  indexDoc["three-parties"] = threeParties.filter((r) => !removedSet.has(r));
-  writeFileSync(indexPath, JSON.stringify(indexDoc, null, 2) + "\n");
-  console.log("   已更新 plugins/index.json");
+  if (autoRemoved.length > 0) {
+    console.log("");
+    console.log("⚠ 以下仓库不存在，将从 index.json 自动移除：");
+    for (const a of autoRemoved) console.log(`   · ${a.repo}（${a.reason}）`);
+  }
+
+  // 输出对象：保持字段顺序 plugin → official(仅官方) → createTime → latestVersionUpdateTime → lastVersion
+  const serialize = (sources, { keepOfficial }) =>
+    sources
+      .filter((s) => !removedSet.has(s.path))
+      .map((s) => {
+        const it = s.item;
+        const out = { plugin: s.path };
+        if (keepOfficial && it.official !== undefined) out.official = it.official;
+        out[F_CREATE] = it[F_CREATE];
+        out[F_UPDATE] = it[F_UPDATE];
+        out.lastVersion = it.lastVersion;
+        return out;
+      });
+
+  const nextOfficial = serialize(officialSources, { keepOfficial: true });
+  const nextThreeParty = serialize(threePartySources, { keepOfficial: false });
+
+  indexDoc["official-repo"] = nextOfficial;
+  indexDoc["three-parties"] = nextThreeParty;
+
+  const nextText = JSON.stringify(indexDoc, null, 2) + "\n";
+  if (nextText !== indexTextBefore) {
+    writeFileSync(indexPath, nextText);
+    console.log(`✍ 已回写 plugins/index.json（统一为对象形式并补齐时间字段）`);
+  }
 }

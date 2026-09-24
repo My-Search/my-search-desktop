@@ -52,6 +52,7 @@ import {
   MARKET_CATALOG_SCHEMA_VERSION,
   compatibleEntries,
   describeCatalogErrors,
+  isAllowedDownloadUrl,
   parseCatalog,
 } from "../src/lib/plugins/market-types.ts";
 import { compareVersion } from "../src/lib/plugins/manifest.ts";
@@ -135,6 +136,30 @@ const catalogOf = (plugins, over = {}) => ({
   for (const [name, url] of bad) {
     const r = parseCatalog(catalogOf([entryOf({ downloadUrl: url })]));
     ok(r.ok === false, `raw 地址拒绝：${name}`);
+  }
+}
+{
+  // 市场索引本身的 raw 直链（4 段，与插件包的 7 段不同形态）。
+  // 回归：索引从 Release 迁到仓库文件后曾因 raw 只认 7 段而拉不到索引。
+  // 注意：索引不是 downloadUrl，而是客户端内置常量，这里直接测谓词。
+  const good = [
+    "https://raw.githubusercontent.com/My-Search/my-search-plugin-market/main/index.dist.json",
+    // 大小写不敏感
+    "https://raw.githubusercontent.com/my-search/MY-SEARCH-PLUGIN-MARKET/main/index.dist.json",
+  ];
+  for (const url of good) {
+    ok(isAllowedDownloadUrl(url) === true, `市场索引地址被接受：${url}`);
+  }
+  const bad = [
+    ["他人仓库顶替", "https://raw.githubusercontent.com/attacker/my-search-plugin-market/main/index.dist.json"],
+    ["我们仓库换文件名", "https://raw.githubusercontent.com/My-Search/my-search-plugin-market/main/evil.json"],
+    ["我们仓库的源清单", "https://raw.githubusercontent.com/My-Search/my-search-plugin-market/main/index.json"],
+    ["多一层目录", "https://raw.githubusercontent.com/My-Search/my-search-plugin-market/main/sub/index.dist.json"],
+    ["段数不足", "https://raw.githubusercontent.com/My-Search/index.dist.json"],
+    ["非 main 分支", "https://raw.githubusercontent.com/My-Search/my-search-plugin-market/dev/index.dist.json"],
+  ];
+  for (const [name, url] of bad) {
+    ok(isAllowedDownloadUrl(url) === false, `市场索引地址拒绝：${name}`);
   }
 }
 {

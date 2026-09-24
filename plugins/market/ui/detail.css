@@ -1,4 +1,228 @@
-/* 主题兼容：中性色引用宿主共享主题变量（style.css「插件共享主题变量」节），
-   随宿主浅/深自动换色；兜底值取原浅色外观（独立开发环境不变样）。
-   蓝色 accent 与官方/更新徽章是语义色，深浅下都可读，保持字面量。 */
-body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--surface,#fff);color:var(--text,#333)}.market-header{padding:16px 20px 0}.market-header h2{margin:0 0 4px;font-size:18px}.market-subtitle{margin:0;font-size:13px;color:var(--muted,#888)}.market-tabs{display:flex;gap:0;padding:12px 20px 0;border-bottom:1px solid var(--line,#eee)}.tab{padding:8px 16px;border:none;background:none;cursor:pointer;font-size:13px;color:var(--muted,#888);border-bottom:2px solid transparent}.tab.active{color:#4F8EF7;border-bottom-color:#4F8EF7}.market-state{padding:40px 20px;text-align:center;color:var(--muted,#888)}.market-state.error{color:var(--err,#d32f2f)}.market-plugins{padding:12px 20px}.plugin-card{display:flex;gap:12px;padding:12px;border-bottom:1px solid var(--line,#eee);align-items:flex-start}.plugin-icon{width:36px;height:36px;border-radius:6px;flex-shrink:0;display:flex;align-items:center;justify-content:center;background:var(--accent-soft-bg,#f0f4ff);font-size:20px}.plugin-meta{flex:1;min-width:0}.plugin-name{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.plugin-name .badge{display:inline-block;font-size:10px;padding:1px 5px;border-radius:3px;margin-left:6px;vertical-align:middle}.badge-official{background:#e3f2fd;color:#1565c0}.badge-update{background:#fff3e0;color:#e65100}.badge-deprecated{background:#f5f5f5;color:#757575;border:1px solid #e0e0e0}.plugin-card-deprecated{opacity:.72}.plugin-deprecated-hint{font-size:11px;color:#b0863a;margin-top:3px;line-height:1.4}.plugin-desc{font-size:12px;color:var(--muted,#888);margin-top:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.plugin-footer{font-size:11px;color:var(--muted,#888);margin-top:4px;display:flex;gap:8px;flex-wrap:wrap}.plugin-action{flex-shrink:0}.btn-market{padding:4px 12px;border:none;border-radius:4px;cursor:pointer;font-size:12px;background:#4F8EF7;color:#fff;white-space:nowrap}.btn-market:disabled{opacity:.5;cursor:default}.btn-market.btn-outline{background:none;border:1px solid #4F8EF7;color:#4F8EF7}.btn-market.btn-danger{background:var(--err,#d32f2f)}.market-search{padding:12px 20px 0}.market-search input{width:100%;box-sizing:border-box;padding:7px 10px;border:1px solid var(--line,#eee);border-radius:6px;font-size:13px;background:var(--surface,#fff);color:var(--text,#333);outline:none}.market-search input:focus{border-color:#4F8EF7}.market-search input::placeholder{color:var(--muted,#888)}.market-pager{display:flex;align-items:center;justify-content:center;gap:6px;padding:12px 20px 16px;flex-wrap:wrap}.pager-info{font-size:12px;color:var(--muted,#888);margin-right:4px}.pager-btn{min-width:28px;padding:4px 8px;border:1px solid var(--line,#eee);border-radius:4px;background:var(--surface,#fff);color:var(--text,#333);font-size:12px;cursor:pointer}.pager-btn:disabled{opacity:.4;cursor:default}.pager-btn.active{background:#4F8EF7;border-color:#4F8EF7;color:#fff}.pager-ellipsis{font-size:12px;color:var(--muted,#888);padding:0 2px}
+/* 插件市场 UI。
+ *
+ * 主题契约（与宿主 style.css「插件共享主题变量」节）：
+ *   中性色走 var(宿主 token, 兜底值)，随宿主浅/深自动换色；
+ *   兜底值取本文件的浅色外观，保证独立开发环境（无宿主变量）不变样。
+ *   品牌蓝（--market-accent）与官方/更新/废弃徽章是语义色，深浅各自取值，
+ *
+ * 选择器契约（被 test/plugin-theme-e2e、plugin-theme-ui 断言，勿改名）：
+ *   .market-header h2  .market-state  .plugin-desc  .tab  .plugin-card
+ */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+/* 品牌蓝：市场自己的语义色，**不**跟随宿主的 --accent（那是设置窗口的紫色）。
+   与官方/更新徽章同类——品牌语义色不参与主题中性色替换，深色下提亮一档。 */
+:root {
+  --market-accent: #2868f5;
+  --market-accent-soft: #eef4ff;
+  --market-accent-soft-border: #dce8ff;
+}
+html.theme-dark {
+  --market-accent: #7aa9ff;
+  --market-accent-soft: #1f2733;
+  --market-accent-soft-border: #2c3a4f;
+}
+
+body {
+  margin: 0;
+  /* 页面底用 --surface、卡片用 --card：两者在浅/深下都有差值，
+     卡片才浮得起来（同色只剩描边，层次会塌）。被
+     test/plugin-theme-ui 的「面板底 = --surface / 白岛回归」两项断言钉住。 */
+  background: var(--surface, #f5f6f8);
+  color: var(--text, #172b4d);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei",
+    "PingFang SC", "Noto Sans CJK SC", Arial, sans-serif;
+  font-size: 15px;
+  -webkit-font-smoothing: antialiased;
+}
+
+button, input { font: inherit; }
+button { cursor: pointer; }
+
+.page { width: 100%; padding: 22px 26px 30px; }
+
+/* ---------- 顶栏 ---------- */
+.topbar { margin-bottom: 20px; }
+.brand { display: flex; align-items: flex-start; gap: 16px; }
+.brand-icon {
+  width: 46px; height: 46px; flex: 0 0 46px; display: grid; place-items: center;
+  border-radius: 12px; background: var(--market-accent-soft, #eef4ff);
+  color: var(--market-accent, #2868f5);
+}
+.brand-copy h2 {
+  margin: 0 0 4px; font-size: 24px; line-height: 1.3;
+  font-weight: 700; letter-spacing: -.4px;
+}
+.brand-copy p { margin: 0; color: var(--muted, #687b9b); font-size: 15px; line-height: 1.6; }
+
+/* ---------- hero 横幅 ----------
+   渐变与装饰块是品牌视觉，浅/深各一套（深色下压暗，否则白底突兀）；
+   标题/副标题用主题文字色，随 --text / --muted 走。 */
+.hero {
+  position: relative; overflow: hidden; display: flex; align-items: center;
+  min-height: 118px; padding: 22px 34px;
+  border: 1px solid var(--market-accent-soft-border, #dce8ff);
+  border-radius: 13px;
+  background: linear-gradient(105deg, #f7f9ff 0%, #f3f7ff 55%, #eaf3ff 100%);
+}
+.hero-copy { position: relative; z-index: 1; }
+.hero-copy h2 {
+  margin: 0 0 8px; font-size: 26px; line-height: 1.3;
+  font-weight: 700; letter-spacing: -.5px; color: var(--text, #172b4d);
+}
+.hero-copy p { margin: 0; font-size: 16px; color: var(--muted, #52627e); letter-spacing: .2px; }
+.hero-shape { position: absolute; transform: rotate(45deg); border-radius: 13px; opacity: .6; }
+.shape-a { width: 108px; height: 108px; right: -26px; top: 26px; background: #bfe1ff; }
+.shape-b { width: 64px; height: 64px; right: 72px; bottom: -40px; background: #d9d5ff; }
+.shape-c { width: 56px; height: 56px; right: 142px; bottom: -32px; background: #d9eaff; }
+
+html.theme-dark .hero {
+  background: linear-gradient(105deg, #1a1d24 0%, #1b2029 55%, #1c2531 100%);
+}
+html.theme-dark .shape-a { background: #24344d; }
+html.theme-dark .shape-b { background: #2b2745; }
+html.theme-dark .shape-c { background: #223044; }
+
+/* ---------- 标签页 ---------- */
+.tabs {
+  display: flex; align-items: stretch; gap: 6px;
+  height: 56px; margin-top: 20px;
+  border-bottom: 1px solid var(--line, #e7edf6);
+}
+.tab {
+  min-width: 112px; padding: 0 18px; border: 0; border-bottom: 3px solid transparent;
+  background: transparent; color: var(--chip-text, #5d6d87);
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  font-size: 15px; transition: color .15s, background .15s;
+}
+.tab:hover { color: var(--market-accent, #2868f5); background: var(--hover-bg, #f8faff); }
+.tab.active {
+  color: var(--market-accent, #2868f5); border-bottom-color: var(--market-accent, #2868f5);
+  font-weight: 600;
+}
+
+/* ---------- 搜索框 ---------- */
+.search-wrap { position: relative; margin: 18px 0 16px; }
+.search-icon {
+  position: absolute; left: 16px; top: 50%; transform: translateY(-50%);
+  color: var(--muted, #8592a8); pointer-events: none;
+}
+.search {
+  width: 100%; height: 46px; padding: 0 16px 0 44px;
+  border: 1px solid var(--line, #dfe6f0); border-radius: 14px; outline: none;
+  color: var(--text, #172b4d); background: var(--field, #fff);
+  font-size: 15px; transition: border-color .15s, box-shadow .15s;
+}
+.search::placeholder { color: var(--muted, #929db0); }
+.search:focus { border-color: #8bb3ff; box-shadow: 0 0 0 3px #2868f514; }
+
+/* ---------- 状态区 ---------- */
+.market-state {
+  padding: 44px 20px; text-align: center;
+  color: var(--muted, #8a96a9);
+  border: 1px dashed var(--line, #e7edf6); border-radius: 12px;
+}
+.market-state.error { color: var(--err, #d32f2f); border-style: solid; }
+.market-loading { border: 0; }
+
+/* ---------- 插件卡片列表 ---------- */
+.market-plugins { display: flex; flex-direction: column; gap: 14px; }
+
+.plugin-card {
+  display: grid; grid-template-columns: 64px minmax(0, 1fr) auto;
+  align-items: center; gap: 18px;
+  padding: 16px 20px;
+  border: 1px solid var(--line, #e4ebf5); border-radius: 13px;
+  background: var(--card, #fff);
+  transition: border-color .15s, box-shadow .15s;
+}
+.plugin-card:hover { border-color: var(--hover-border, #d5e3fa); box-shadow: 0 5px 18px #193b6b08; }
+.plugin-card-deprecated { opacity: .78; }
+
+.plugin-icon {
+  width: 64px; height: 64px; display: grid; place-items: center;
+  border-radius: 15px; background: var(--market-accent-soft, #eef4ff);
+  font-size: 28px; overflow: hidden;
+}
+.plugin-icon img { width: 42px; height: 42px; object-fit: contain; }
+
+.plugin-meta { min-width: 0; }
+.plugin-name {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  margin-bottom: 6px;
+  font-size: 17px; font-weight: 650; color: var(--text, #152846);
+}
+.plugin-name .badge {
+  display: inline-flex; align-items: center; height: 22px; padding: 0 8px;
+  border-radius: 5px; font-size: 12px; font-weight: 600;
+}
+.badge-official { background: #e3f3ff; color: #0874c9; }
+.badge-update { background: #fff3e0; color: #e65100; }
+.badge-deprecated { background: #f5f5f5; color: #757575; border: 1px solid #e0e0e0; }
+
+.plugin-desc {
+  margin: 0 0 8px; color: var(--muted, #8390a7); font-size: 14px; line-height: 1.55;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.plugin-deprecated-hint {
+  margin: -4px 0 8px; font-size: 12px; line-height: 1.45; color: #b0863a;
+}
+.plugin-footer {
+  display: flex; gap: 8px; flex-wrap: wrap;
+  color: var(--muted, #8592a8); font-size: 13px;
+}
+
+.plugin-action { justify-self: end; display: flex; align-items: center; gap: 8px; }
+.btn-market {
+  height: 38px; min-width: 88px; padding: 0 16px;
+  border: 1px solid var(--market-accent, #2868f5); border-radius: 10px;
+  background: var(--market-accent, #2868f5); color: #fff;
+  font-size: 14px; white-space: nowrap;
+  transition: background .15s, opacity .15s;
+}
+.btn-market:hover:not(:disabled) { filter: brightness(.94); }
+.btn-market:disabled { opacity: .5; cursor: default; }
+.btn-market.btn-outline { background: none; color: var(--market-accent, #2868f5); }
+.btn-market.btn-danger { background: var(--err, #d32f2f); border-color: var(--err, #d32f2f); }
+
+/* ---------- 分页条 ---------- */
+.market-pager {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 18px 0 4px; flex-wrap: wrap;
+}
+.pager-info { font-size: 13px; color: var(--muted, #8592a8); margin-right: 6px; }
+.pager-btn {
+  min-width: 32px; height: 32px; padding: 0 10px;
+  border: 1px solid var(--line, #e7edf6); border-radius: 8px;
+  background: var(--card, #fff); color: var(--text, #333); font-size: 13px;
+  transition: border-color .15s, background .15s;
+}
+.pager-btn:hover:not(:disabled) { border-color: var(--market-accent, #2868f5); color: var(--market-accent, #2868f5); }
+.pager-btn:disabled { opacity: .4; cursor: default; }
+.pager-btn.active { background: var(--market-accent, #2868f5); border-color: var(--market-accent, #2868f5); color: #fff; }
+.pager-ellipsis { font-size: 13px; color: var(--muted, #8592a8); padding: 0 2px; }
+
+/* ---------- 窄屏 ---------- */
+@media (max-width: 760px) {
+  .page { padding: 16px 14px 24px; }
+  .brand { gap: 12px; }
+  .brand-icon { width: 40px; height: 40px; flex-basis: 40px; }
+  .brand-copy h2 { font-size: 20px; }
+  .brand-copy p { font-size: 13px; }
+  .hero { min-height: 92px; padding: 16px 18px; }
+  .hero-copy h2 { font-size: 20px; }
+  .hero-copy p { font-size: 13px; }
+  .tabs { height: 48px; gap: 0; }
+  .tab { min-width: 0; flex: 1; padding: 0 6px; font-size: 14px; gap: 5px; }
+  .search { height: 42px; font-size: 14px; border-radius: 12px; }
+  .plugin-card { grid-template-columns: 52px minmax(0, 1fr); gap: 12px; padding: 14px; }
+  .plugin-icon { width: 52px; height: 52px; border-radius: 12px; font-size: 22px; }
+  .plugin-icon img { width: 34px; height: 34px; }
+  .plugin-name { font-size: 15px; }
+  .plugin-desc { font-size: 13px; }
+  .plugin-footer { font-size: 12px; }
+  .plugin-action { grid-column: 2; justify-self: start; }
+}
+
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; } }

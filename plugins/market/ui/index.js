@@ -40,13 +40,23 @@
     if (tab === "installed") {
       return view.entries.filter((e) => view.installedMap[e.id]);
     }
-    if (tab === "updates") {
-      return view.updates.map((u) => view.entries.find((e) => e.id === u.id)).filter(Boolean);
+    if (tab === "latest") {
+      // 最新：默认按「最近上架」排序（publishedAt 降序），
+      // 同一时间/缺失时退回 updatedAt，再退回名称，保证顺序稳定可复现。
+      return view.entries.slice().sort(compareByPublishedAt);
     }
     // 精选：已安装优先
     const featured = view.entries.filter((e) => view.installedMap[e.id]);
     const others = view.entries.filter((e) => !view.installedMap[e.id]);
     return [...featured, ...others];
+  }
+
+  /** 上架时间降序（缺失/非法时间排最后） */
+  function compareByPublishedAt(a, b) {
+    const ta = Date.parse(a.publishedAt || a.updatedAt || "") || 0;
+    const tb = Date.parse(b.publishedAt || b.updatedAt || "") || 0;
+    if (tb !== ta) return tb - ta;
+    return String(a.name || a.id).localeCompare(String(b.name || b.id), "zh-Hans-CN");
   }
 
   /** 关键字过滤：匹配名称/描述/ID/作者/标签/分类 */
@@ -80,29 +90,30 @@
       if (isBlocked) {
         actionHtml = '<button class="btn-market" disabled>已屏蔽</button>';
       } else if (hasUpdate) {
+        // 有新版就只显示「更新」，不并排放卸载——一张卡片主推一个动作
         actionHtml = '<button class="btn-market" data-action="update" data-id="' + escapeHtml(e.id) + '">更新 v' + escapeHtml(view.updates.find((u) => u.id === e.id).availableVersion) + "</button>";
       } else if (installed) {
-        actionHtml = '<button class="btn-market btn-outline" data-action="uninstall" data-id="' + escapeHtml(e.id) + '">卸载</button><span class="plugin-footer" style="margin-top:0;margin-left:8px">v' + escapeHtml(installed) + "</span>";
+        actionHtml = '<button class="btn-market btn-outline" data-action="uninstall" data-id="' + escapeHtml(e.id) + '">卸载</button>';
       } else {
         // 已废弃不禁止安装：用户可能仍在依赖它，或需要装上做数据迁移
         actionHtml = '<button class="btn-market" data-action="install" data-id="' + escapeHtml(e.id) + '">安装</button>';
       }
 
-      html += '<div class="plugin-card' + (e.deprecated ? " plugin-card-deprecated" : "") + '">';
-      html += '<div class="plugin-icon">' + (e.icon ? '<img src="' + escapeHtml(e.icon) + '" style="width:24px;height:24px">' : "🧩") + "</div>";
+      html += '<article class="plugin-card' + (e.deprecated ? " plugin-card-deprecated" : "") + '">';
+      html += '<div class="plugin-icon">' + (e.icon ? '<img src="' + escapeHtml(e.icon) + '" alt="">' : "🧩") + "</div>";
       html += '<div class="plugin-meta">';
       html += '<div class="plugin-name">' + escapeHtml(e.name) + badgeHtml + "</div>";
-      if (e.description) html += '<div class="plugin-desc">' + escapeHtml(e.description) + "</div>";
+      if (e.description) html += '<p class="plugin-desc">' + escapeHtml(e.description) + "</p>";
       if (e.deprecated) {
         html += '<div class="plugin-deprecated-hint">⚠ ' + escapeHtml(e.deprecatedReason || "该插件已停止维护，可能不再可用") + "</div>";
       }
       html += '<div class="plugin-footer">';
-      html += "v" + escapeHtml(e.version);
-      if (e.author) html += " · " + escapeHtml(e.author);
-      if (e.downloads != null) html += " · " + e.downloads + " 次下载";
+      html += "<span>v" + escapeHtml(e.version) + "</span>";
+      if (e.author) html += "<span>·</span><span>" + escapeHtml(e.author) + "</span>";
+      if (e.downloads != null) html += "<span>·</span><span>" + e.downloads + " 次下载</span>";
       html += "</div></div>";
       html += '<div class="plugin-action">' + actionHtml + "</div>";
-      html += "</div>";
+      html += "</article>";
     }
     $list.innerHTML = html;
     showState($list, true); // 顺带隐藏分页条，由 renderPager 决定是否重新显示
@@ -235,8 +246,11 @@
   // Tab切换（切换后回到第 1 页，保留搜索词）
   document.querySelectorAll(".tab").forEach(function (tab) {
     tab.addEventListener("click", function () {
-      document.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
-      tab.classList.add("active");
+      document.querySelectorAll(".tab").forEach(function (t) {
+        const on = t === tab;
+        t.classList.toggle("active", on);
+        t.setAttribute("aria-selected", String(on));
+      });
       page = 1;
       render();
     });
