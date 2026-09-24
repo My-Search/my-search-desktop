@@ -128,6 +128,8 @@ const validPluginId = (v: unknown): boolean => isValidPluginId(v);
  */
 const ALLOWED_DOWNLOAD_HOSTS = [
   "github.com",
+  // Release 资产 302 的真实终点（实测当前域名，history: objects.githubusercontent.com）
+  "release-assets.githubusercontent.com",
   "objects.githubusercontent.com",
   "raw.githubusercontent.com",
 ];
@@ -186,8 +188,10 @@ export function isAllowedDownloadUrl(v: unknown): boolean {
     return segs[6].endsWith(".mspp");
   }
 
-  // GitHub 资产 302 的真实终点，路径不含 release 段，host 本身即受控
-  if (host === "objects.githubusercontent.com") return path.startsWith("/") && path.length > 1;
+  // GitHub 资产 302 的真实终点，路径必须是资产形态（不能当任意跳板）
+  if (host === "release-assets.githubusercontent.com" || host === "objects.githubusercontent.com") {
+    return path.startsWith("/github-production-release-asset/");
+  }
   const MARKER = "/releases/download/";
   const idx = path.indexOf(MARKER);
   if (idx < 0) return false;

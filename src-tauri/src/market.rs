@@ -94,12 +94,15 @@ fn is_url_under_base(url: &str, base: &str) -> bool {
 /// 插件包可以托管在**开发者自己的仓库**里（准入由 `plugins/sources.json` 审核控制），
 /// 因此下载地址不再要求落在我们自己的 base 前缀内。收紧点改为 host + 路径：
 ///   - `github.com`：开发者仓库的 Release 资产；
-///   - `objects.githubusercontent.com`：GitHub Release 资产下载的真实 302 终点，
-///     github.com 会把资产请求重定向到这里（必须放行，否则正常下载也失败）；
+///   - `release-assets.githubusercontent.com`：**Release 资产 302 的真实终点**。
+///     GitHub 会把 `github.com/<o>/<r>/releases/download/...` 重定向到这里，
+///     不放行则任何 Release 包（含 catalog.json）都下载失败；
+///   - `objects.githubusercontent.com`：早期/部分场景的资产终点域名，一并保留；
 ///   - `raw.githubusercontent.com`：官方插件的仓库文件直链
 ///     （`official-plugins/<id>/<版本>/<id>.mspp`，便于按版本归档而无需逐个建 Release）。
-const ALLOWED_DOWNLOAD_HOSTS: [&str; 3] = [
+const ALLOWED_DOWNLOAD_HOSTS: [&str; 4] = [
     "github.com",
+    "release-assets.githubusercontent.com",
     "objects.githubusercontent.com",
     "raw.githubusercontent.com",
 ];
@@ -154,11 +157,11 @@ fn is_allowed_release_url(url: &str) -> bool {
     if host == "raw.githubusercontent.com" {
         return is_allowed_official_raw_url(&host, &path);
     }
-    // objects.githubusercontent.com 是 GitHub 资产 302 的真实终点，其路径形如
-    // /github-production-release-asset/<id>/<id>，不含 /releases/download/ 段；
-    // 该 host 本身已是受控终点，因此只要求路径非空。
-    if host == "objects.githubusercontent.com" {
-        return path.starts_with('/') && path.len() > 1;
+    // 资产终点域：GitHub 把 Release 资产 302 到这里，路径形如
+    // /github-production-release-asset/<id>/<id>?<签名参数>。
+    // 该 host 本身即受控终点，但路径仍要求是资产形态，避免被当作任意跳板。
+    if is_asset_cdn_host(&host) {
+        return path.starts_with("/github-production-release-asset/");
     }
     // github.com：必须是 <owner>/<repo>/releases/download/<tag>/<asset> 形态
     const MARKER: &str = "/releases/download/";
@@ -171,6 +174,15 @@ fn is_allowed_release_url(url: &str) -> bool {
     }
     let tag_asset: Vec<&str> = path[idx + MARKER.len()..].split('/').collect();
     tag_asset.len() == 2 && tag_asset.iter().all(|s| !s.is_empty())
+}
+
+/// 是否为 GitHub 的 Release 资产 CDN 终点域。
+///
+/// 注意：真实域名随 GitHub 调整而变——实测当前是
+/// `release-assets.githubusercontent.com`，早期为 `objects.githubusercontent.com`。
+/// 两者都保留，避免某天 GitHub 切回旧域时又断。
+fn is_asset_cdn_host(host: &str) -> bool {
+    host == "release-assets.githubusercontent.com" || host == "objects.githubusercontent.com"
 }
 
 /// 官方插件的仓库文件直链：`/<owner>/<repo>/<ref>/official-plugins/<id>/<版本>/<id>.mspp`
@@ -555,6 +567,40 @@ mod tests {
         // raw 域的 releases 式路径也不通过
         assert!(!is_allowed_release_url(
             "https://raw.githubusercontent.com/a/b/releases/download/v1/x.mspp"
+        ));
+    }
+
+    // ---------- Release 资产 302 终点（线上故障回归） ----------
+
+    #[test]
+    fn release_asset_cdn_host_is_allowed() {
+        // 回归：GitHub 实测会把 Release 资产 302 到 release-assets.githubusercontent.com。
+        // 曾因白名单只写了 objects.githubusercontent.com 导致线上全部下载失败。
+        assert!(is_allowed_release_url(
+            "https://release-assets.githubusercontent.com/github-production-release-asset/1379090128/f8dbbf96-a3cb-4302-8db7-0982eb9d258e?sp=r&sig=abc"
+        ));
+        // 早期域名一并保留
+        assert!(is_allowed_release_url(
+            "https://objects.githubusercontent.com/github-production-release-asset/123/456"
+        ));
+        // 子域名伪造仍要挡住
+        assert!(!is_allowed_release_url(
+            "https://release-assets.githubusercontent.com.evil.com/github-production-release-asset/1/2"
+        ));
+        assert!(!is_allowed_release_url(
+            "https://evil.com/github-production-release-asset/1/2"
+        ));
+    }
+
+    #[test]
+    fn release_asset_cdn_path_must_be_asset_shaped() {
+        // 资产域不能当任意跳板：路径必须是资产形态
+        assert!(!is_allowed_release_url("https://release-assets.githubusercontent.com/"));
+        assert!(!is_allowed_release_url(
+            "https://release-assets.githubusercontent.com/anything/else"
+        ));
+        assert!(!is_allowed_release_url(
+            "https://objects.githubusercontent.com/some/other/path"
         ));
     }
 
