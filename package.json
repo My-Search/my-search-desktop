@@ -8,12 +8,11 @@
   "scripts": {
     "dev": "vite",
     "pack:builtin": "node scripts/pack-builtin-plugins.mjs",
-    "pack:market": "node scripts/gen-catalog.mjs",
-    "sync:market": "node scripts/sync-sources.mjs",
     "build": "vite build",
     "tauri": "tauri",
     "icons": "node test/gen-icons.mjs && tauri icon test/_icons/icon-master.png -o src-tauri/icons && tauri icon test/_icons/icon-master-win.png -o src-tauri/icons/windows && node test/prune-win-icons.mjs",
-    "typecheck": "vue-tsc --noEmit"
+    "typecheck": "vue-tsc --noEmit",
+    "build:index": "node scripts/build-index.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

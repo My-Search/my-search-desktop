@@ -1,122 +1,92 @@
 # 我的搜索 · 插件市场
 
-本仓库是「我的搜索」桌面应用的**市场索引源**。
+本仓库是「我的搜索」桌面应用的**插件市场**：既存放官方插件包，也存放市场索引。
 
-## 架构：索引在这里，插件包在开发者自己的仓库
+## 架构：两层索引
 
-客户端只读一个入口——本仓库的 `catalog` Release 资产：
+仓库根目录有两个索引文件，职责不同：
+
+| 文件 | 谁写 | 内容 | 谁读 |
+| --- | --- | --- | --- |
+| `index.json` | **人工维护** | 源清单：官方插件路径 + 第三方仓库 | 我们的构建工具 |
+| `index.dist.json` | **工具自动生成** | 完整索引：版本、sha256、下载地址… | **客户端** |
+| `error-item.txt` | 工具自动生成 | 被排除的项与原因 | 开发者自查 |
+
+客户端读的是：
 
 ```
-https://github.com/My-Search/my-search-plugin-market/releases/download/catalog/catalog.json
+https://raw.githubusercontent.com/My-Search/my-search-plugin-market/main/index.dist.json
 ```
 
-索引里每条记录的 `downloadUrl` 指向**该插件自己的仓库**的 Release 资产，例如：
-
-```
-https://github.com/<开发者>/<仓库>/releases/download/<插件id>/<插件id>.mspp
-```
-
-也就是说，插件包**不集中存放在本仓库**。本仓库只保存"有哪些插件、当前版本、哈希是多少"。
-
-## 如何上架一个新插件
-
-1. 开发者按 [插件上架指南](../docs/plugin-market-publish.md) 规范自己的仓库并发 Release；
-2. 开发者提 issue 报仓库地址；
-3. 我们审核后，在主仓库的 `plugins/sources.json` 里加一条准入记录；
-4. 跑同步工具：`npm run sync:market` —— 它会拉取各仓库的包、校验、算 sha256、生成索引；
-5. `bash dist/market/publish.sh` 发布索引。
-
-**之后开发者自己发版即可**，我们只需（或由 CI 定时）重跑第 4、5 步。
-
-### 三种指定包地址的方式
-
-`sources.json` 的条目支持三种写法：
-
-```jsonc
-// 方式一：仓库 + 资产（第三方推荐；能自动检测仓库归档）
-{ "id": "com.example.a", "repo": "example/plugins", "asset": "com.example.a.mspp" }
-
-// 方式二：直接指定完整包地址
-{ "id": "com.example.b",
-  "url": "https://github.com/My-Search/my-search-plugin-market/releases/download/com.example.b/com.example.b.mspp" }
-
-// 方式三：按版本归档（官方插件推荐）
-// 包放在 <repo>/official-plugins/<id>/<版本>/<id>.mspp，自动取最大版本
-{ "id": "com.example.c", "repo": "My-Search/my-search-plugin-market", "path": true }
-```
-
-方式三是官方插件的省事做法：**不用为每个插件建 Release**，把包按
-`official-plugins/<插件id>/<版本>/<插件id>.mspp` 放进仓库即可，
-同步时自动列出所有版本、取版本号最大者作为默认安装版本。
-
-三种方式的地址都必须是 **github.com 的 Release 资产**或
-**raw.githubusercontent.com 的 `official-plugins` 目录下的 `.mspp`**（客户端会校验）。
-
-### 废弃标记
-
-`deprecated: true`（+ `deprecatedReason`）会在市场里给插件打上「已废弃」徽标并展示原因，
-但**不禁止安装**。此外同步工具还会**自动检测仓库归档**（GitHub archived）并标记，
-无需手动维护。
-
-## 同步工具做了什么
-
-`scripts/sync-sources.mjs`（在主仓库 `My-Search/my-search-desktop`）：
-
-```bash
-npm run sync:market                # 同步全部源
-npm run sync:market -- --only <id> # 只同步指定插件
-```
-
-对每个源：
-
-1. 按准入名单从对应仓库拉取 Release 资产
-2. **解包并校验包内 `plugin.json`**，要求包内 id 与准入名单一致
-3. 对**真实包字节**计算 sha256（不采信任何自报值）
-4. 生成 `catalog.json`，并用客户端自己的 `parseCatalog` 回验，不通过则拒绝产出
-
-## 目录结构（catalog.json）
+### `index.json` 格式
 
 ```jsonc
 {
-  "schemaVersion": 1,
-  "generatedAt": "…",           // 生成时间
-  "baseUrl": "https://github.com/My-Search/my-search-plugin-market/releases/download",
-  "plugins": [
-    {
-      "id": "com.example.plugin",
-      "name": "…", "version": "1.0.0", "apiVersion": 1,
-      "minAppVersion": "7.9.15",  // 低于宿主版本时对用户隐藏
-      "author": "…", "description": "…",
-      "categories": ["tools"],     // 必填，不能为空
-      "tags": ["…"],               // 用于市场内搜索
-      "downloadUrl": "…",          // 指向插件自己仓库的 Release 资产
-      "sha256": "…",               // 64 位小写 hex，安装前校验
-      "size": 1234,
-      "permissions": ["ui.inlay"],
-      "official": false, "verified": false,
-      "deprecated": false,            // true = 已废弃（仅提醒，不禁止安装）
-      "deprecatedReason": "…",         // 废弃原因（展示给用户）
-      "publishedAt": "…", "updatedAt": "…"
-    }
+  "official-repo": [
+    // 官方插件：包在本仓库里按版本归档
+    "official-plugins/com.mysearch.pi-agent"
+  ],
+  "three-parties": [
+    // 第三方插件：用户名/仓库名，一个仓库一个插件
+    "zhuangjie/github-file-upload"
   ]
 }
 ```
 
-### `downloadUrl` 的约束
+**新增插件**：审核后在此加一行即可，之后开发者发版无需改动本文件。
+**仓库 404**：构建工具会自动把失效的仓库从 `three-parties` 移除。
 
-客户端会校验每条下载地址，必须是：
+## 插件包存放位置
 
-- https；
-- host 为 `github.com`（或 GitHub 资产重定向终点 `objects.githubusercontent.com`）；
-- 端口缺省或 `443`；
-- 路径形如 `/<owner>/<repo>/releases/download/<tag>/<asset>`；
-- 不含 userinfo（拒绝 `github.com@evil.com` 这类伪造）。
+### 官方插件：按版本归档（仓库文件）
 
-因此请把包托管在 **GitHub Release**，不要用网盘或自建站中转。
+```
+official-plugins/
+  com.mysearch.pi-agent/
+    2.5.2/com.mysearch.pi-agent.mspp
+    2.6.0/com.mysearch.pi-agent.mspp    ← 发新版加一层版本目录
+```
 
-## 版本约定
+构建时自动列出所有版本目录、**取版本号最大者**。无需为官方插件建 Release。
 
-- **tag = 插件 id**，固定不变；发新版时用 `--clobber` 覆盖同名资产；
-- 索引只保留每个插件的**最新版本**（客户端暂不支持安装旧版本/回滚）；
-- 更新请在 `plugin.json` 里递增 `version`（不要降版本号）；
-- 已发布、正在使用的资产请勿删除，否则已装用户重装会 404。
+### 第三方插件：自己的仓库 + Release
+
+一个仓库一个插件，规范见
+[插件上架指南](../docs/plugin-market-publish.md)：
+
+- **tag = 插件 id**（如 `com.yourname.my-plugin`），稳定不变
+- **资产名 = `<插件id>.mspp`**
+- 包内 `plugin.json` 的 `id` 必须与 tag 一致（构建时核对）
+
+## 索引如何更新
+
+`.github/workflows/build-market-index.yml` **每小时**自动构建一次：
+
+1. 读 `index.json`
+2. 逐个解析（官方列版本目录 / 三方下载 Release 包）
+3. 计算 sha256、校验包内清单、取最大版本
+4. 生成 `index.dist.json` 与 `error-item.txt`，**提交回仓库**
+5. 客户端下次读取即拿到最新索引
+
+整个过程只需本仓库的 `GITHUB_TOKEN`，**不依赖任何额外 secret**——
+因为索引是仓库文件，不是 Release 资产。
+
+## 构建异常
+
+不符合规范的项不会进入 `index.dist.json`，原因写入
+[`error-item.txt`](./error-item.txt)，开发者可自行查看。常见原因：
+
+- 仓库不存在（404，会同时从 `index.json` 自动移除）
+- tag 不符合「插件 id」格式
+- 包内 id 与 tag 不一致
+- 包内清单校验失败、版本与目录名不一致
+
+## 客户端下载地址约束
+
+索引里每条 `downloadUrl` 会被客户端校验，必须满足：
+
+- https
+- host 为 `github.com`（Release 资产）或 `raw.githubusercontent.com`（官方插件目录）
+- 路径为 Release 资产形态，或 `.../official-plugins/<id>/<版本>/<id>.mspp`
+- 不含 userinfo、端口为缺省或 443
+- 下载过程不自动跟随重定向（逐跳校验，防 SSRF）

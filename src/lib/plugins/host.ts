@@ -244,12 +244,16 @@ function clearThemeHandlers(pluginId: string): void {
 const themeProviders = new Map<string, () => "light" | "dark" | "inherit">();
 
 /**
- * 市场目录地址（客户端唯一切入口）。
- * 目录里每条 `downloadUrl` 指向插件包的实际位置（可能在各开发者仓库的 Release），
- * 由 `plugins/sources.json` 的准入名单经同步工具生成。
+ * 市场索引地址（客户端唯一切入口）。
+ *
+ * 索引是市场仓库根目录下的 `index.dist.json`（仓库文件，走 raw 读取）：
+ * 由 `plugins/index.json`（人工维护的源清单）经 tools 定时解析生成，
+ * 内含每个插件的版本、sha256 与实际下载地址。
+ *
+ * 走仓库文件而非 Release 的原因：发布只需 git push，不需要额外的跨仓库 token。
  */
 const MARKET_CATALOG_URL =
-  "https://github.com/My-Search/my-search-plugin-market/releases/download/catalog/catalog.json";
+  "https://raw.githubusercontent.com/My-Search/my-search-plugin-market/main/index.dist.json";
 
 /**
  * 取某插件自报的主题偏好（无 provider / provider 抛错 → null，由调用方回落到

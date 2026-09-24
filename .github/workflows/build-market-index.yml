@@ -1,0 +1,65 @@
+name: 构建插件市场索引
+
+# 读取 plugins/index.json（人工维护的源清单），解析出每个插件的
+# 版本/哈希/下载地址，生成 index.dist.json（客户端读）与 error-item.txt（开发者自查），
+# 提交回仓库。客户端通过 raw 地址读取，因此发布只需 git push，不需要额外 token。
+#
+# 开发者在自己的仓库发版后，最长一小时内市场自动跟进——无需联系我们。
+on:
+  # 每小时自动构建一次
+  schedule:
+    - cron: "0 * * * *"
+  # 也支持手动触发
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "仅构建产物、不提交（演练）"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # 用默认的 GITHUB_TOKEN 即可：本流程只读本仓库、写回本仓库，
+      # 不再需要跨仓库发布 Release（索引已改为仓库文件）。
+      - name: 构建索引
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/build-index.mjs
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: market-index
+          path: |
+            dist/market/index.dist.json
+            dist/market/error-item.txt
+
+      # 索引文件提交回仓库根目录，客户端从 raw 读取
+      - name: 提交索引
+        if: ${{ github.event_name == 'schedule' || inputs.dry_run == false }}
+        run: |
+          set -euo pipefail
+          cp dist/market/index.dist.json index.dist.json
+          cp dist/market/error-item.txt error-item.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add index.dist.json error-item.txt plugins/index.json
+          if git diff --cached --quiet; then
+            echo "索引无变化，跳过提交"
+          else
+            git commit -m "chore(market): 自动更新插件索引 [skip ci]"
+            git push
+          fi

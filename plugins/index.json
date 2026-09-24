@@ -1,0 +1,19 @@
+{
+  "$comment": "插件市场源清单（人工维护）。官方插件写仓库内路径，第三方写 用户名/仓库名。新增插件：提 issue 审核后在此加一条。开发者发新版无需改动本文件，定时任务会自动解析出最新版本。",
+  "$format": {
+    "official-repo": "托管在本仓库的插件：数组项为仓库内的插件目录路径（相对仓库根），形如 official-plugins/<插件id>。该目录下按 <版本>/<插件id>.mspp 分版本归档，解析时自动取版本号最大者。可写成 {path, official} 对象来显式指定是否官方（默认取插件目录下 meta.json 的 official 字段）。",
+    "three-parties": "第三方插件：数组项为 用户名/仓库名，一个仓库一个插件。仓库需按规范发 Release（tag = 插件 id，资产 = <插件id>.mspp）。"
+  },
+  "official-repo": [
+    "official-plugins/com.mysearch.pi-agent",
+    "official-plugins/com.mysearch.file-search",
+    "official-plugins/com.mysearch.market",
+    "official-plugins/com.mysearch.baidu-translate",
+    {
+      "path": "official-plugins/com.zhuangjie.github-upload",
+      "official": false
+    }
+  ],
+  "three-parties": []
+}
+
