@@ -15,7 +15,7 @@
     {
       "plugin": "official-plugins/com.mysearch.file-search",
       "createTime": "2026-09-24T12:41:33.656Z",
-      "latestVersionUpdateTime": "2026-09-25T06:52:05.330Z",
+      "latestVersionUpdateTime": "2026-09-27T01:37:32.974Z",
       "lastVersion": "1.1.0"
     },
     {
@@ -36,7 +36,42 @@
       "createTime": "2026-09-24T12:41:43.131Z",
       "latestVersionUpdateTime": "2026-09-24T12:41:43.131Z",
       "lastVersion": "1.0.0"
+    },
+    {
+      "plugin": "official-plugins/com.mysearch.clipboard",
+      "official": false,
+      "createTime": "2026-09-27T01:37:42.029Z",
+      "latestVersionUpdateTime": "2026-09-27T01:37:42.029Z",
+      "lastVersion": "1.0.0"
+    },
+    {
+      "plugin": "official-plugins/com.mysearch.recorder",
+      "official": false,
+      "createTime": "2026-09-27T01:37:44.089Z",
+      "latestVersionUpdateTime": "2026-09-27T01:37:44.089Z",
+      "lastVersion": "1.0.0"
+    },
+    {
+      "plugin": "official-plugins/com.zhuangjie.screenshot",
+      "official": false,
+      "createTime": "2026-09-27T01:37:46.031Z",
+      "latestVersionUpdateTime": "2026-09-27T01:37:46.031Z",
+      "lastVersion": "1.0.0"
+    },
+    {
+      "plugin": "official-plugins/com.zhuangjie.todo-list",
+      "official": false,
+      "createTime": "2026-09-27T01:37:47.876Z",
+      "latestVersionUpdateTime": "2026-09-27T01:37:47.876Z",
+      "lastVersion": "1.0.0"
     }
   ],
-  "three-parties": []
+  "three-parties": [
+    {
+      "plugin": "My-Search/my-search-plugin-MayeLite",
+      "createTime": "2026-09-27T01:41:31.148Z",
+      "latestVersionUpdateTime": "2026-09-27T01:41:31.148Z",
+      "lastVersion": "1.0.0"
+    }
+  ]
 }
