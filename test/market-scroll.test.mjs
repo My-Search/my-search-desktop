@@ -1,30 +1,27 @@
 /**
- * 回归测试：插件市场在「插件自定义尺寸」下能向下滚动。
+ * 回归测试：插件市场在「插件自定义尺寸」下整页仍可滚动。
  *
  * 用户反馈：在插件市场里拖右下角改大窗口后，页面滚不动了——「下面还有卡片，
- * 但滚不下去」。
+ * 但滚不下去」；要求**调整尺寸后整页仍可整体滚动**。
  *
  * 根因（宿主与插件的滚动责任分工被破坏）：
  *   - 宿主的 `.plugin-sized` 模式（style.css）把 `#text_show` 设成
- *     `overflow: hidden`，并给插件根节点 `flex: 1 1 auto; min-height: 0`，
- *     即**把滚动责任整个下放给插件内部**（file-search 的 `.fs-list`、
- *     pi-agent 的会话区都遵守这个契约）；
- *   - 插件市场此前是普通 block、内部没有任何滚动容器。于是内容被
+ *     `overflow: hidden`，即**把滚动责任整个下放给插件自身**；
+ *   - 插件市场此前根容器没开 overflow、内部也没有滚动区。于是内容被
  *     `#text_show` 裁掉，而页面上**没有任何元素可滚动**：`scrollers = []`，
  *     滚动条不出现、滚轮无反应。
  *
  * 契约（本测试钉死）：
- *   1. 拉伸态下 `.market-plugins` 是滚动区：`scrollHeight > clientHeight`、
+ *   1. 拉伸态下 `.page` 是滚动容器：`scrollHeight > clientHeight`、
  *      `overflow-y: auto`，且能滚到 `scrollHeight - clientHeight` 处；
- *   2. 滚动只发生在列表内部——标签页 / 搜索行的位置在滚动前后不变，
- *      分页条始终完整落在 `#text_show` 可视区内（不被裁）；
+ *   2. **整体滚动**：滚到底后能看见分页条（内容末端可达），hero 会随之上移；
  *   3. 全程没有任何元素内容被静默裁掉；
- *   4. **非拉伸态（默认尺寸）不回归**：此时 `.page` 无确定高度，列表退回内容
- *      高度、不产生内部滚动，滚动仍由 `#text_show` 承担（`overflow-y: auto`）。
+ *   4. **非拉伸态（默认尺寸）不回归**：`.page` 无确定高度、不产生自身滚动，
+ *      滚动仍由 `#text_show` 承担（`overflow-y: auto`）。
  *
- * 为什么用真实浏览器：`min-height: auto` 这个 flex 默认值、以及
- * `overflow: hidden` 下「元素仍保留 scrollTop 但不响应滚轮」的行为，都是
- * 计算样式/布局层面的，纯源码断言测不出来——本 bug 正是漏在网上。
+ * 为什么用真实浏览器：`overflow: hidden` 下「元素仍保留 scrollTop 但不响应
+ * 滚轮」的行为、以及各容器最终谁在滚，都是计算样式/布局层面的，纯源码断言
+ * 测不出来——本 bug 正是漏在网上。
  *
  * 用法: node test/market-scroll.test.mjs
  * 需要本机装有 Chrome / Edge；找不到浏览器时跳过（退出码 0）。
@@ -248,11 +245,11 @@ const FILL = `(() => {
 })()`;
 
 /**
- * 测量 + 「被裁」检测。
+ * 测量。
  *
- * 被裁的判定：元素底边超出 `#text_show` 可视区底边，且该元素不在一个可滚动的
- * 祖先里——在拉伸态下 `#text_show` 是 `overflow:hidden`，超出即永久不可达。
- * 为简化，这里对「固定控件」逐个判 bottom 是否越界（它们本就不该移动）。
+ * `page` 是本插件的根容器，也是契约要求的滚动容器；`list` 必须**不是**滚动
+ * 容器（滚动归整页，列表不自己滚）。`clipped` 检查固定区是否越出可视区——
+ * 在拉伸态下 `#text_show` 是 `overflow:hidden`，越界即被裁。
  */
 const MEASURE = `(() => {
   const ts = document.getElementById("text_show");
@@ -261,6 +258,7 @@ const MEASURE = `(() => {
   const pager = document.getElementById("market-pager");
   const tabs = document.querySelector(".tabs");
   const searchRow = document.querySelector(".search-row");
+  const page = document.querySelector(".page");
   const box = (el) => { const r = el.getBoundingClientRect(); return {
     top: Math.round(r.top), bottom: Math.round(r.bottom), h: Math.round(r.height) }; };
   const clipped = [];
@@ -274,9 +272,12 @@ const MEASURE = `(() => {
     textShow: { top: Math.round(ts.getBoundingClientRect().top), bottom: vpBottom,
                 scrollH: ts.scrollHeight, clientH: ts.clientHeight,
                 overflowY: getComputedStyle(ts).overflowY },
+    page: { ...box(page), scrollH: page.scrollHeight, clientH: page.clientHeight,
+            overflowY: getComputedStyle(page).overflowY, scrollTop: page.scrollTop,
+            scrollable: page.scrollHeight - page.clientHeight > 1 },
     list: { ...box(list), scrollH: list.scrollHeight, clientH: list.clientHeight,
             overflowY: getComputedStyle(list).overflowY,
-            scrollable: list.scrollHeight - list.clientHeight > 1 },
+            selfScrollable: list.scrollHeight - list.clientHeight > 1 },
     tabs: box(tabs), searchRow: box(searchRow), pager: box(pager),
     hero: box(document.querySelector(".hero")),
     clipped,
@@ -302,53 +303,53 @@ await evalJs(FILL);
 const sized = await evalJs(MEASURE);
 
 check(
-  "拉伸态：列表成为滚动区（内容高于可视区）",
-  sized.list.scrollable,
-  `scrollH=${sized.list.scrollH} clientH=${sized.list.clientH}`
+  "拉伸态：整页（.page）成为滚动容器（内容高于可视区）",
+  sized.page.scrollable,
+  `scrollH=${sized.page.scrollH} clientH=${sized.page.clientH}`
 );
-check("拉伸态：列表 overflow-y = auto", sized.list.overflowY === "auto", sized.list.overflowY);
+check("拉伸态：.page overflow-y = auto", sized.page.overflowY === "auto", sized.page.overflowY);
 check(
-  "拉伸态：列表确实是本页唯一滚动区（#text_show 已禁滚）",
+  "拉伸态：滚动确实下放给插件（#text_show 已禁滚）",
   sized.textShow.overflowY === "hidden",
   `#text_show overflowY=${sized.textShow.overflowY}`
 );
+check(
+  "拉伸态：列表自身不是滚动容器（滚动归整页，不出现嵌套滚动条）",
+  !sized.list.selfScrollable,
+  `list scrollH=${sized.list.scrollH} clientH=${sized.list.clientH}`
+);
 
-/* ============ 2. 能真的滚到底 ============ */
+/* ============ 2. 能真的滚到底（整页滚）============ */
 const scroll = await evalJs(`(() => {
-  const list = document.getElementById("market-list");
-  list.scrollTop = list.scrollHeight;
-  const max = list.scrollHeight - list.clientHeight;
-  return { scrollTop: list.scrollTop, max };
+  const page = document.querySelector(".page");
+  page.scrollTop = page.scrollHeight;
+  const max = page.scrollHeight - page.clientHeight;
+  return { scrollTop: page.scrollTop, max };
 })()`);
 check(
-  "拉伸态：能滚到列表底部（内容全部可达）",
+  "拉伸态：能滚到页面底部（内容全部可达）",
   Math.abs(scroll.scrollTop - scroll.max) < 2,
   `scrollTop=${scroll.scrollTop} / max=${scroll.max}`
 );
 
-/* ============ 3. 固定控件不跟着滚、分页条不被裁 ============ */
+/* ============ 3. 整体滚动：末端可达、头部随之上移 ============ */
 const afterScroll = await evalJs(MEASURE);
 check(
-  "拉伸态：滚动后标签页未被顶走（scrollTop 不落在 #text_show 上）",
-  afterScroll.tabs.top === sized.tabs.top,
-  `tabs.top ${sized.tabs.top} → ${afterScroll.tabs.top}`
+  "拉伸态：滚到底后分页条进入可视区（末端可达）",
+  afterScroll.pager.bottom <= afterScroll.textShow.bottom + 1,
+  `pager.bottom=${afterScroll.pager.bottom} 可视区底=${afterScroll.textShow.bottom}`
 );
 check(
-  "拉伸态：滚动后搜索行位置不变",
-  afterScroll.searchRow.top === sized.searchRow.top,
-  `searchRow.top ${sized.searchRow.top} → ${afterScroll.searchRow.top}`
+  "拉伸态：整体滚动——hero 随之上移（不是头部固定）",
+  afterScroll.hero.top < sized.hero.top,
+  `hero.top ${sized.hero.top} → ${afterScroll.hero.top}`
 );
-check("拉伸态：分页条未被裁（完整落在可视区内）", sized.clipped.length === 0,
-  sized.clipped.join("; ") || "无裁剪");
-
-/* ============ 3.5 固定区不被压缩（只有列表该动）============ */
-/* flex 子项默认 flex-shrink: 1，窗口比内容矮时会把所有子项一起压扁——实测
-   标签页会被从 42px 压到 26px。这里钉死「控件保持设计高度」，因为用户期望的
-   是「控件原样、列表自己出滚动条」。 */
-check("拉伸态：hero 未被压缩（保持 88px）", Math.abs(sized.hero.h - 88) < 1, `h=${sized.hero.h}`);
-check("拉伸态：标签页未被压缩（保持 42px）", Math.abs(sized.tabs.h - 42) < 1, `h=${sized.tabs.h}`);
-check("拉伸态：搜索行未被压缩（保持 34px）", Math.abs(sized.searchRow.h - 34) < 1, `h=${sized.searchRow.h}`);
-check("拉伸态：分页条未被压缩（保持 43px）", Math.abs(sized.pager.h - 43) < 1, `h=${sized.pager.h}`);
+/* 固定区高度不随滚动/窗口矮而变形：整页滚动下控件按内容自然排布，
+   不应被 flex 压缩（此前引入 flex 列时实测标签页被从 42px 压到 26px）。 */
+check("拉伸态：hero 保持设计高度 88px", Math.abs(sized.hero.h - 88) < 1, `h=${sized.hero.h}`);
+check("拉伸态：标签页保持设计高度 42px", Math.abs(sized.tabs.h - 42) < 1, `h=${sized.tabs.h}`);
+check("拉伸态：搜索行保持设计高度 34px", Math.abs(sized.searchRow.h - 34) < 1, `h=${sized.searchRow.h}`);
+check("拉伸态：分页条保持设计高度 43px", Math.abs(sized.pager.h - 43) < 1, `h=${sized.pager.h}`);
 
 /* ============ 4. 非拉伸态不回归（滚动仍归 #text_show）============ */
 currentPage = buildPage(false);
@@ -362,9 +363,14 @@ check(
   `#text_show overflowY=${plain.textShow.overflowY}`
 );
 check(
-  "非拉伸态：列表退回内容高度、不产生内部滚动",
-  !plain.list.scrollable,
-  `scrollH=${plain.list.scrollH} clientH=${plain.list.clientH}`
+  "非拉伸态：.page 无确定高度、不产生自身滚动（外观不回归）",
+  !plain.page.scrollable,
+  `page scrollH=${plain.page.scrollH} clientH=${plain.page.clientH}`
+);
+check(
+  "非拉伸态：列表不产生内部滚动",
+  !plain.list.selfScrollable,
+  `list scrollH=${plain.list.scrollH} clientH=${plain.list.clientH}`
 );
 
 check("全程无未捕获异常", pageErrors.length === 0, pageErrors.join(" | ") || "无");
