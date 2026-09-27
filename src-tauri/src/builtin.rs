@@ -1,6 +1,6 @@
 //! 内置插件：随应用资源分发、可卸载且升级不复活。
 //!
-//! 交付形态（P1）：三个官方插件打包为 `.msplugin` 放进 `resources/plugins/`，
+//! 交付形态（P1）：三个内置插件打包为 `.mspp` 放进 `resources/plugins/`,
 //! 由本模块在启动时把「可用但未安装」的 id 广播给前端，前端复用既有
 //! 「从文件安装」管线（`install.ts` 解包 → 校验清单 → 权限确认 → `plugin_install`
 //! 原子落盘）完成安装。
@@ -19,9 +19,10 @@ use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
 /// 允许随资源引导的内置插件 id（防资源被篡改成任意插件走免确认通道）。
-pub(crate) const BUILTIN_ALLOWLIST: [&str; 2] = [
+pub(crate) const BUILTIN_ALLOWLIST: [&str; 3] = [
     "com.mysearch.pi-agent",
     "com.mysearch.market",
+    "com.mysearch.file-search",
 ];
 
 /// `internal/builtins.json` 的 schema 版本
@@ -37,7 +38,7 @@ const BUILTINS_FILE: &str = "builtins.json";
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BundledPlugin {
-    /// 插件 id（= 资源文件名去掉 .msplugin）
+    /// 插件 id（= 资源文件名去掉 .mspp）
     pub id: String,
     /// 资源文件的绝对路径（前端拿它走「从文件安装」管线）
     pub resource_path: String,
@@ -109,7 +110,7 @@ pub(crate) fn is_builtin(id: &str) -> bool {
 
 /// 扫描资源目录，返回「资源实际存在」的内置插件清单。
 ///
-/// 文件名即 id（`com.mysearch.pi-agent.msplugin` → `com.mysearch.pi-agent`）；
+/// 文件名即 id（`com.mysearch.pi-agent.mspp` → `com.mysearch.pi-agent`）；
 /// 不在白名单内的文件一律忽略（记录日志，不参与引导）。
 pub(crate) fn bundle_manifest(app: &tauri::AppHandle) -> Vec<BundledPlugin> {
     let Ok(resource_dir) = app.path().resource_dir() else {
@@ -122,7 +123,7 @@ pub(crate) fn bundle_manifest(app: &tauri::AppHandle) -> Vec<BundledPlugin> {
     let mut out: Vec<BundledPlugin> = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        let Some(id) = name.strip_suffix(".msplugin") else {
+        let Some(id) = name.strip_suffix(".mspp") else {
             continue;
         };
         if !is_builtin(id) {
@@ -289,11 +290,15 @@ mod tests {
 
     #[test]
     fn allowlist_matches_official_ids() {
-        assert!(is_builtin("com.mysearch.baidu-translate"));
         assert!(is_builtin("com.mysearch.pi-agent"));
         assert!(is_builtin("com.mysearch.market"));
+        assert!(is_builtin("com.mysearch.file-search"));
         assert!(!is_builtin("com.example.evil"));
         assert!(!is_builtin("com.mysearch.other"));
+        // baidu-translate 已随 365c5c4 移出内置清单：资源即使残留也不引导
+        assert!(!is_builtin("com.mysearch.baidu-translate"));
+        // clipboard 已移出内置清单，改为官方非内置插件经市场安装
+        assert!(!is_builtin("com.mysearch.clipboard"));
     }
 
     #[test]

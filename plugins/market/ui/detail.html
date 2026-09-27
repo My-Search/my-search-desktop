@@ -3,25 +3,25 @@
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>插件市场</title><link rel="stylesheet" href="detail.css"></head>
 <body>
 <div id="app" class="page">
-  <header class="topbar market-header">
-    <div class="brand">
-      <div class="brand-icon" aria-hidden="true">
-        <svg width="34" height="34" viewBox="0 0 36 36" fill="none">
-          <path d="M15 4.5a4.5 4.5 0 0 1 9 0V8h6a2 2 0 0 1 2 2v6h3.5a4.5 4.5 0 0 1 0 9H32v6a2 2 0 0 1-2 2h-8v-4a4 4 0 0 0-8 0v4H6a2 2 0 0 1-2-2v-8h4a4 4 0 0 0 0-8H4v-5a2 2 0 0 1 2-2h9V4.5Z" fill="currentColor"/>
-        </svg>
-      </div>
-      <div class="brand-copy">
-        <h2>插件市场</h2>
-        <p>浏览、安装、管理与更新插件，扩展你的工具能力</p>
-      </div>
-    </div>
-  </header>
-
-  <section class="hero" aria-label="插件市场介绍">
+  <!-- 无顶部品牌栏：直接从 hero 起（竖向空间留给列表）。
+       .market-header 契约挂在 hero 上，供主题测试取 h2。 -->
+  <section class="hero market-header" aria-label="插件市场介绍">
     <div class="hero-copy">
       <h2>插件市场</h2>
       <p>丰富的插件资源，助你扩展功能、提升效率</p>
     </div>
+    <!-- 仓库入口：开新窗打开插件市场源码仓库。用 <a> 保证可键盘聚焦 +
+         中键/右键「复制链接」等原生行为；点击由 index.js 拦截转交
+         ms.system.openExternal（需要 system.openExternal 权限）。 -->
+    <a class="hero-repo" id="market-repo-link"
+       href="https://github.com/My-Search/my-search-plugin-market"
+       target="_blank" rel="noopener noreferrer"
+       title="在浏览器中打开插件市场仓库"
+       aria-label="打开插件市场 GitHub 仓库">
+      <svg viewBox="0 0 16 16" width="18" height="18" fill="currentColor" aria-hidden="true">
+        <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/>
+      </svg>
+    </a>
     <span class="hero-shape shape-a" aria-hidden="true"></span>
     <span class="hero-shape shape-b" aria-hidden="true"></span>
     <span class="hero-shape shape-c" aria-hidden="true"></span>
@@ -39,13 +39,33 @@
     </button>
   </nav>
 
-  <div class="search-wrap">
-    <svg class="search-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="10.8" cy="10.8" r="7.2"/><path d="m16.2 16.2 4.5 4.5"/></svg>
-    <input class="search" id="market-search" type="search" placeholder="搜索插件：名称、描述、标签、作者..." aria-label="搜索插件" autocomplete="off">
+  <!-- 搜索行：搜索框占满剩余宽度，右侧挂「最新」的二级排序（默认「最新上架」，
+       可切「最新更新」）。控件仅在「最新」tab 显示（其余 tab 由 index.js 隐藏）。 -->
+  <div class="search-row">
+    <div class="search-wrap">
+      <svg class="search-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="10.8" cy="10.8" r="7.2"/><path d="m16.2 16.2 4.5 4.5"/></svg>
+      <input class="search" id="market-search" type="search" placeholder="搜索插件：名称、描述、标签、作者..." aria-label="搜索插件" autocomplete="off">
+    </div>
+    <div class="latest-sort" id="market-latest-sort" role="group" aria-label="最新排序方式" style="display:none">
+      <button class="sort-opt active" type="button" data-sort="published" aria-pressed="true">最新上架</button>
+      <button class="sort-opt" type="button" data-sort="updated" aria-pressed="false">最新更新</button>
+    </div>
   </div>
 
-  <div id="market-loading" class="market-state market-loading">加载目录中…</div>
-  <div id="market-error" class="market-state error" style="display:none"></div>
+  <div id="market-loading" class="market-state market-loading" role="status" aria-live="polite">
+    <svg class="spinner" viewBox="0 0 50 50" aria-hidden="true">
+      <circle class="spinner-track" cx="25" cy="25" r="20"></circle>
+      <circle class="spinner-arc" cx="25" cy="25" r="20"></circle>
+    </svg>
+    <span class="loading-text">正在加载插件列表…</span>
+  </div>
+  <div id="market-error" class="market-state error" style="display:none" role="alert">
+    <svg class="error-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5M12 16.5h.01"/>
+    </svg>
+    <p class="error-text">网络异常</p>
+    <button class="btn-market error-retry" type="button" id="market-retry">重新加载</button>
+  </div>
   <section id="market-list" class="market-plugins" style="display:none" aria-label="插件列表"></section>
   <div id="market-pager" class="market-pager" style="display:none"></div>
 </div>

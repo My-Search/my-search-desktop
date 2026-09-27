@@ -7,6 +7,7 @@
   const $error = document.getElementById("market-error");
   const $search = document.getElementById("market-search");
   const $pager = document.getElementById("market-pager");
+  const $latestSort = document.getElementById("market-latest-sort");
 
   const PAGE_SIZE = 10; // 每页卡片数
 
@@ -14,6 +15,9 @@
   let query = ""; // 搜索关键字（作用于当前 tab）
   let page = 1; // 当前页码（1 起）
   let totalPages = 1;
+  // 「最新」tab 的排序口径：published = 最新上架（默认），updated = 最新更新。
+  // 只影响「最新」tab，切到别的 tab 再切回来仍保留用户的选择。
+  let latestSort = "published";
 
   function escapeHtml(s) {
     const d = document.createElement("div");
@@ -21,12 +25,20 @@
     return d.innerHTML;
   }
 
+  /**
+   * 切换四个状态区的显隐。
+   *
+   * 注意：**显示时清空 inline display，而不是写死 `block`**。
+   * 这些元素各自的布局由样式表决定（如 `.market-loading` 是 flex 列），
+   * 写死 inline `block` 会覆盖掉它，把 SVG 与文字挤成一行。
+   * 隐藏用 inline `none`（要能压过样式表里任何 display 值）。
+   */
   function showState(el, show) {
     $loading.style.display = "none";
     $error.style.display = "none";
     $list.style.display = "none";
     $pager.style.display = "none";
-    if (el) el.style.display = show ? "block" : "none";
+    if (el) el.style.display = show ? "" : "none";
   }
 
   function activeTab() {
@@ -41,9 +53,13 @@
       return view.entries.filter((e) => view.installedMap[e.id]);
     }
     if (tab === "latest") {
-      // 最新：默认按「最近上架」排序（publishedAt 降序），
-      // 同一时间/缺失时退回 updatedAt，再退回名称，保证顺序稳定可复现。
-      return view.entries.slice().sort(compareByPublishedAt);
+      // 最新：由二级排序决定口径——
+      //   published：最近上架（publishedAt 降序，缺失退回 updatedAt）
+      //   updated  ：最近更新（updatedAt 降序，缺失退回 publishedAt）
+      // 同一时间/都缺失时退回名称，保证顺序稳定可复现。
+      const key = latestSort === "updated" ? "updatedAt" : "publishedAt";
+      const fallback = latestSort === "updated" ? "publishedAt" : "updatedAt";
+      return view.entries.slice().sort((a, b) => compareByTime(a, b, key, fallback));
     }
     // 精选：已安装优先
     const featured = view.entries.filter((e) => view.installedMap[e.id]);
@@ -51,12 +67,25 @@
     return [...featured, ...others];
   }
 
-  /** 上架时间降序（缺失/非法时间排最后） */
-  function compareByPublishedAt(a, b) {
-    const ta = Date.parse(a.publishedAt || a.updatedAt || "") || 0;
-    const tb = Date.parse(b.publishedAt || b.updatedAt || "") || 0;
+  /** 时间降序（主字段缺失/非法时退回 backup 字段，都缺则排最后，再按名称） */
+  function compareByTime(a, b, key, backup) {
+    const ta = Date.parse(a[key] || a[backup] || "") || 0;
+    const tb = Date.parse(b[key] || b[backup] || "") || 0;
     if (tb !== ta) return tb - ta;
     return String(a.name || a.id).localeCompare(String(b.name || b.id), "zh-Hans-CN");
+  }
+
+  /** 距今天数的粗粒度文案：今天 / 昨天 / N 天前 / YYYY-MM-DD（跨年或更久） */
+  function formatSince(iso) {
+    const t = Date.parse(iso || "");
+    if (!t) return "";
+    const days = Math.floor((Date.now() - t) / 86400000);
+    if (days <= 0) return "今天";
+    if (days === 1) return "昨天";
+    if (days < 30) return days + " 天前";
+    const d = new Date(t);
+    const p = (n) => String(n).padStart(2, "0");
+    return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate());
   }
 
   /** 关键字过滤：匹配名称/描述/ID/作者/标签/分类 */
@@ -100,7 +129,17 @@
       }
 
       html += '<article class="plugin-card' + (e.deprecated ? " plugin-card-deprecated" : "") + '">';
-      html += '<div class="plugin-icon">' + (e.icon ? '<img src="' + escapeHtml(e.icon) + '" alt="">' : "🧩") + "</div>";
+      // 图标：网络图（raw / github 直链）加载完成前显示骨架占位，
+      // 加载失败退回 🧩 —— 三态由 .icon-loading / .icon-ready / .icon-failed 控制。
+      // 用 <img class="icon-img"> 承载，事件在容器上委托（卡片是 innerHTML 重建的）。
+      if (e.icon) {
+        html += '<div class="plugin-icon icon-loading">';
+        html += '<span class="icon-fallback" aria-hidden="true">🧩</span>';
+        html += '<img class="icon-img" src="' + escapeHtml(e.icon) + '" alt="" loading="lazy" decoding="async">';
+        html += "</div>";
+      } else {
+        html += '<div class="plugin-icon"><span class="icon-fallback" aria-hidden="true">🧩</span></div>';
+      }
       html += '<div class="plugin-meta">';
       html += '<div class="plugin-name">' + escapeHtml(e.name) + badgeHtml + "</div>";
       if (e.description) html += '<p class="plugin-desc">' + escapeHtml(e.description) + "</p>";
@@ -111,6 +150,15 @@
       html += "<span>v" + escapeHtml(e.version) + "</span>";
       if (e.author) html += "<span>·</span><span>" + escapeHtml(e.author) + "</span>";
       if (e.downloads != null) html += "<span>·</span><span>" + e.downloads + " 次下载</span>";
+      // 只在「最新」tab 标出排序依据的时间，让「为什么排在这」可见；
+      // 其它 tab 的排序口径不同，显示这个时间会误导。
+      if (activeTab() === "latest") {
+        const iso = latestSort === "updated" ? e.updatedAt : e.publishedAt;
+        const since = formatSince(iso);
+        if (since) {
+          html += "<span>·</span><span>" + (latestSort === "updated" ? "更新于 " : "上架于 ") + escapeHtml(since) + "</span>";
+        }
+      }
       html += "</div></div>";
       html += '<div class="plugin-action">' + actionHtml + "</div>";
       html += "</article>";
@@ -136,13 +184,13 @@
     return items;
   }
 
+  /**
+   * 渲染分页条。**始终显示**，即使总数不足一页（totalPages === 1）：
+   * 位置稳定，不因插件多少而在「有/无分页条」之间跳动；
+   * 单页时只有第 1 页可点，上/下一页均为禁用态。
+   */
   function renderPager(total) {
     totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-    if (totalPages <= 1) {
-      $pager.innerHTML = "";
-      $pager.style.display = "none";
-      return;
-    }
     let html = '<span class="pager-info">共 ' + total + " 个 · 第 " + page + "/" + totalPages + " 页</span>";
     html += '<button class="pager-btn" data-page="prev"' + (page <= 1 ? " disabled" : "") + ">上一页</button>";
     pageItems(page, totalPages).forEach(function (it) {
@@ -157,15 +205,35 @@
     $pager.style.display = "flex";
   }
 
+  /**
+   * 同步「最新」二级排序控件的显隐与选中态。
+   * 只在「最新」tab 出现——其它 tab 的排序口径由 tabEntries 固定，控件露出来会误导。
+   */
+  function syncLatestSortUI() {
+    if (!$latestSort) return;
+    const on = activeTab() === "latest";
+    $latestSort.style.display = on ? "" : "none";
+    if (!on) return;
+    $latestSort.querySelectorAll(".sort-opt").forEach(function (btn) {
+      const active = btn.dataset.sort === latestSort;
+      btn.classList.toggle("active", active);
+      btn.setAttribute("aria-pressed", String(active));
+    });
+  }
+
   /** 统一渲染入口：tab 过滤 → 搜索过滤 → 分页切片 */
   function render() {
     if (!view) return;
+    syncLatestSortUI();
     const entries = filterEntries(tabEntries(activeTab()));
     if (entries.length === 0) {
       page = 1;
       totalPages = 1;
       $list.innerHTML = '<div class="market-state">' + (query.trim() ? "没有找到匹配「" + escapeHtml(query.trim()) + "」的插件" : "暂无插件") + "</div>";
       showState($list, true);
+      // 空结果也照常显示分页条（共 0 个 · 第 1/1 页），
+      // 避免列表区与分页条在「空/非空」之间布局跳动。
+      renderPager(0);
       return;
     }
     totalPages = Math.max(1, Math.ceil(entries.length / PAGE_SIZE));
@@ -176,26 +244,59 @@
     renderPager(entries.length);
   }
 
+  /** 静默重试次数：首次失败后再试 2 次，都失败才把错误摆到界面上 */
+  const LOAD_RETRIES = 2;
+  /** 重试间隔基数（毫秒），按次数线性退避：600ms、1200ms */
+  const RETRY_DELAY_MS = 600;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  /**
+   * 拉一次目录并做基本校验。**不碰 DOM**，便于重试循环复用。
+   * 成功返回 { ok: true, view }；失败返回 { ok: false, fatal, message }。
+   * `fatal: true` 表示重试也不会好（如缺权限），调用方应立即报错。
+   */
+  async function fetchMarketOnce() {
+    if (typeof ms === "undefined" || !ms.market) {
+      return { ok: false, fatal: true, message: "插件市场 API 不可用（缺少 plugin.install 权限）" };
+    }
+    const v = await ms.market.list();
+    if (v && v.error) return { ok: false, message: String(v.error) };
+    return { ok: true, view: v };
+  }
+
+  /**
+   * 加载目录：失败静默重试 LOAD_RETRIES 次。
+   * 只有「非致命且重试耗尽」才显示错误 —— 显示成「网络异常」+ 重试按钮。
+   */
   async function loadMarket() {
     showState($loading, true);
-    try {
-      if (typeof ms === "undefined" || !ms.market) {
-        showState($error, true);
-        $error.textContent = "插件市场 API 不可用（缺少 plugin.install 权限）";
-        return;
+    let lastMessage = "";
+    for (let attempt = 0; attempt <= LOAD_RETRIES; attempt++) {
+      if (attempt > 0) {
+        await sleep(RETRY_DELAY_MS * attempt);
       }
-      view = await ms.market.list();
-      if (view.error) {
-        showState($error, true);
-        $error.textContent = "加载失败：" + escapeHtml(view.error);
-        return;
+      try {
+        const r = await fetchMarketOnce();
+        if (r.ok) {
+          view = r.view;
+          render(); // 安装/更新/卸载后重载也保留当前 tab 与搜索词
+          return;
+        }
+        lastMessage = r.message;
+        if (r.fatal) break; // 重试无意义，直接报错
+      } catch (e) {
+        lastMessage = String((e && e.message) || e);
       }
-      // 安装/更新/卸载后重载也保留当前 tab 与搜索词
-      render();
-    } catch (e) {
-      showState($error, true);
-      $error.textContent = "加载失败：" + escapeHtml(String(e.message || e));
     }
+    showError(lastMessage);
+  }
+
+  /** 展示错误态。对外文案统一为「网络异常」，具体原因放 title 便于排查 */
+  function showError(detail) {
+    const $text = $error.querySelector(".error-text");
+    if ($text) $text.textContent = "网络异常";
+    $error.title = detail ? "原因：" + detail : "";
+    showState($error, true);
   }
 
   $app.addEventListener("click", async function (ev) {
@@ -210,13 +311,23 @@
     else if (action === "update") btn.textContent = "更新中…";
     else if (action === "uninstall") btn.textContent = "卸载中…";
 
+    // 成功或用户取消都会走 loadMarket 重渲染卡片（按钮随之重建）；
+    // 取消走 restoreBtn 静默复位，不留「安装中…」的僵死态。
+    const restoreBtn = () => {
+      btn.disabled = false;
+      btn.textContent = originalText;
+    };
+
     try {
       if (action === "install") {
         const result = await ms.market.install(id);
+        // 用户在安装确认弹窗里点了「取消」：不是失败，静默恢复按钮
+        if (result.cancelled) return restoreBtn();
         if (!result.ok) throw new Error(result.error);
         await loadMarket();
       } else if (action === "update") {
         const result = await ms.market.update(id);
+        if (result.cancelled) return restoreBtn();
         if (!result.ok) throw new Error(result.error);
         await loadMarket();
       } else if (action === "uninstall") {
@@ -225,8 +336,7 @@
         await loadMarket();
       }
     } catch (e) {
-      btn.disabled = false;
-      btn.textContent = originalText;
+      restoreBtn();
       const msg = "操作失败: " + String(e.message || e);
       // ms.ui.toast 需要 ui.notify 权限；未授予（或被用户撤销）时退回内联错误提示，
       // 避免错误处理器自身再抛一个未捕获的 PluginPermissionError
@@ -263,6 +373,20 @@
     render();
   });
 
+  // 「最新」二级排序：切换口径后回到第 1 页（选中态由 syncLatestSortUI 统一刷新）
+  if ($latestSort) {
+    $latestSort.addEventListener("click", function (ev) {
+      const btn = ev.target.closest("[data-sort]");
+      if (!btn) return;
+      const next = btn.dataset.sort;
+      if (next !== "published" && next !== "updated") return;
+      if (next === latestSort) return; // 已选中，避免无谓重排
+      latestSort = next;
+      page = 1;
+      render();
+    });
+  }
+
   // 分页条点击：上一页/下一页/指定页
   $pager.addEventListener("click", function (ev) {
     const btn = ev.target.closest("[data-page]");
@@ -287,10 +411,68 @@
     });
   }
 
+  // 图标加载结果 → 切三态。委托到列表容器上（卡片经 innerHTML 反复重建，
+  // 逐个绑监听会随重建丢失）。
+  // 用**捕获阶段**：load / error 不冒泡，捕获阶段才能在容器上收到。
+  // 实测 load 事件对网络图、缓存图、data: URI 都是异步投递的，因此
+  // 「innerHTML 赋值时图片已 complete、事件不再补发」不会发生，无需额外兜底扫描。
+  $list.addEventListener(
+    "load",
+    function (ev) {
+      const img = ev.target;
+      if (!img.classList || !img.classList.contains("icon-img")) return;
+      const box = img.closest(".plugin-icon");
+      if (box) box.classList.replace("icon-loading", "icon-ready");
+    },
+    true
+  );
+  $list.addEventListener(
+    "error",
+    function (ev) {
+      const img = ev.target;
+      if (!img.classList || !img.classList.contains("icon-img")) return;
+      const box = img.closest(".plugin-icon");
+      if (box) box.classList.replace("icon-loading", "icon-failed");
+    },
+    true
+  );
+
+  // 仓库入口：点 GitHub 图标 → 系统浏览器打开市场仓库。
+  // 优先走宿主 API（ms.system.openExternal，需 system.openExternal 权限）；
+  // 未授权时退回锚点自身的 target=_blank 行为，保证始终能打开。
+  const $repo = document.getElementById("market-repo-link");
+  if ($repo) {
+    $repo.addEventListener("click", async function (ev) {
+      const url = $repo.getAttribute("href");
+      const canOpen = typeof ms !== "undefined" && ms.system && ms.system.openExternal;
+      if (!canOpen) return; // 交给 <a target="_blank"> 原生行为
+      ev.preventDefault();
+      try {
+        await ms.system.openExternal(url);
+      } catch (e) {
+        const msg = "打开链接失败: " + String((e && e.message) || e);
+        const canNotify =
+          typeof ms !== "undefined" &&
+          ms.ui &&
+          (!ms.plugin || !ms.plugin.has || ms.plugin.has("ui.notify"));
+        if (canNotify) ms.ui.toast(msg, "error");
+        else window.open(url, "_blank", "noopener");
+      }
+    });
+  }
+
   loadMarket();
 
-  // 重试：点击错误区域
-  $error.addEventListener("click", function () {
-    loadMarket();
-  });
+  // 重试：点击「重新加载」按钮（只在静默重试耗尽后才会看到它）
+  const $retry = document.getElementById("market-retry");
+  if ($retry) {
+    $retry.addEventListener("click", function (ev) {
+      // 阻止冒泡，避免将来误触发区域级点击处理
+      ev.stopPropagation();
+      $retry.disabled = true;
+      loadMarket().finally(function () {
+        $retry.disabled = false;
+      });
+    });
+  }
 })();
