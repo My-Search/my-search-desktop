@@ -131,6 +131,18 @@ export const PERMISSION_CATALOG: readonly PermissionSpec[] = [
     runtime: "both",
     revokeImpact: "插件将无法再使用已授权的环境变量（它配置里对这些变量的引用会失效）",
   },
+  // ===== 数据同步（新增）：按「能力」而非「数据源」建权限 =====
+  // 宿主当前原生只支持 WebDAV，但同步能力本身与协议无关：以后接入其它数据源
+  // （自建服务、S3、网盘…）也不需要给插件新增权限、更不用改插件清单。
+  {
+    id: "sync",
+    group: "data",
+    title: "触发数据同步",
+    desc: "发起一次与你云端备份（当前为 WebDAV）的上传或下载。走的是你自己的同步配置与凭据，因此同步范围是**全部**可备份数据（设置、订阅、已装插件及其数据），并不局限于该插件自己的数据；未配置同步时该能力不可用",
+    risk: "high",
+    runtime: "both",
+    revokeImpact: "插件将无法再发起同步（已有的云端数据与配置不受影响）",
+  },
   {
     id: "clipboard.write",
     group: "device",
@@ -173,6 +185,43 @@ export const PERMISSION_CATALOG: readonly PermissionSpec[] = [
     desc: "用系统默认程序打开链接（请确认目标可信）",
     risk: "medium",
     runtime: "both",
+  },
+  // ===== 截图（新增）：框选/标注的遮罩是宿主独立窗口，由这几项能力授权给插件 =====
+  {
+    id: "screenshot.capture",
+    group: "device",
+    title: "屏幕截图",
+    desc: "抓取当前屏幕（整屏）的图像",
+    risk: "high",
+    runtime: "backend",
+    revokeImpact: "插件将无法再截图",
+  },
+  {
+    id: "screenshot.overlay",
+    group: "ui",
+    title: "全屏框选遮罩",
+    desc: "调起宿主的全屏透明遮罩窗口，用于拖拽框选屏幕区域并加标注",
+    risk: "medium",
+    runtime: "frontend",
+    revokeImpact: "插件将无法再使用框选/标注遮罩",
+  },
+  {
+    id: "screenshot.write",
+    group: "data",
+    title: "保存截图",
+    desc: "把截图写入插件自己的私有数据目录（其它插件与宿主都读不到）",
+    risk: "medium",
+    runtime: "backend",
+    revokeImpact: "插件将无法再保存截图",
+  },
+  {
+    id: "screenshot.read",
+    group: "data",
+    title: "读取截图",
+    desc: "读回插件自己私有数据目录里已保存的截图",
+    risk: "medium",
+    runtime: "frontend",
+    revokeImpact: "插件将无法再读取已保存的截图",
   },
   {
     id: "backend.spawn",
@@ -388,9 +437,25 @@ export function summarizePermissions(perms: readonly string[]): string {
   if (perms.some((p) => permissionBaseId(p) === "net.fetch")) parts.push("访问声明的网络地址");
   if (perms.some((p) => permissionBaseId(p) === "clipboard.read")) parts.push("读取剪贴板");
   if (perms.some((p) => permissionBaseId(p) === "secret.read")) parts.push("读取系统钥匙串里的密钥");
+  if (perms.some((p) => permissionBaseId(p) === "sync")) parts.push("触发数据同步（上传/下载你的设置与插件数据）");
   if (perms.some((p) => permissionBaseId(p) === "plugin.install")) parts.push("安装、更新与卸载插件");
   const desc = parts.length > 0 ? parts.join("、") : "在应用内提供功能";
   return `该插件可以${desc}。最高风险等级：${RISK_LABEL[top]}。`;
+}
+
+/**
+ * 清单是否申请了「数据同步」权限（`sync`）。
+ *
+ * 安装弹窗据此给出**额外的数据同步提醒**：同步走的是用户自己的云端备份配置，
+ * 波及范围是全部可备份数据（设置、订阅、已装插件及其数据），而不是插件自己的
+ * 一小块数据——这一点必须在装之前讲清楚，否则用户不会预期到「装个插件给了我
+ * 一个能上传我全部数据的入口」。
+ *
+ * 与风险等级解耦：这里只回答「要不要提醒」，不决定「要不要逐条勾选」
+ * （那是 `requiresExplicitConsent` 的职责）。
+ */
+export function syncPermissionRequested(perms: readonly string[]): boolean {
+  return perms.some((p) => permissionBaseId(p) === "sync");
 }
 
 /**
