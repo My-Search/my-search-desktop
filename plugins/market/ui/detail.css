@@ -51,7 +51,30 @@ body {
 button, input { font: inherit; }
 button { cursor: pointer; }
 
-.page { width: 100%; padding: 16px 18px 22px; }
+/* 插件根容器：竖向 flex 列，让「列表」成为唯一滚动区（见下方 .market-plugins）。
+ *
+ * 为什么必须由插件自己给出滚动容器：宿主在「插件自定义尺寸」下把本元素拉伸到
+ * 窗口高度（style.css 的 `.plugin-sized … > .ms-plugin-session > *`），同时把
+ * `#text_show` 设成 `overflow: hidden`——滚动责任整个下放给插件内部（file-search
+ * 的 .fs-list、pi-agent 的会话区都是这么做的）。本插件此前是普通 block、内部没有
+ * 滚动区，于是拖大窗口后内容只被裁掉：**页面上没有任何元素能滚动**，表现为
+ * 「下面还有卡片，但滚不动」。
+ *
+ * 未启用拉伸时没有确定高度，flex 不产生收缩、列表退回内容高度、滚动仍由
+ * #text_show 承担，外观与从前一致（该模式下 .page 的高度由内容决定，
+ * 它自己不构成滚动容器）。 */
+.page { width: 100%; padding: 16px 18px 22px; display: flex; flex-direction: column; }
+
+/* 固定区（hero / 标签页 / 搜索行 / 分页条）**不参与收缩**：把剩余高度的分配权
+   整个交给列表。
+   为什么必须显式写：flex 子项的 `flex-shrink` 默认为 1，窗口比内容矮时所有子项
+   一起按比例缩水——实测标签页会被从 42px 压到 26px（文字挤在一起），而用户
+   期望的是「控件保持原样、列表自己出滚动条」。file-search 同样对其固定区用了
+   `flex: 0 0 auto`（见其 .fs-head/.fs-toolbar）。 */
+.page > .hero,
+.page > .tabs,
+.page > .search-row,
+.page > .market-pager { flex: 0 0 auto; }
 
 /* ---------- hero 横幅（兼作顶栏，无独立品牌栏）----------
    渐变底与装饰块用「品牌蓝 × 宿主主题底色」混色得到：浅色 → 近白带蓝，
@@ -225,8 +248,26 @@ button { cursor: pointer; }
   .spinner { animation: none; }
 }
 
-/* ---------- 插件卡片列表 ---------- */
-.market-plugins { display: flex; flex-direction: column; gap: 10px; }
+/* ---------- 插件卡片列表（本插件唯一的滚动区）----------
+ *
+ * 与 file-search 的 `.fs-list` 同一契约：头部（hero / 标签页 / 搜索行）固定，
+ * 列表吃掉剩余高度并在内部滚动。窗口拖高 → 同屏看到更多卡片、分页条仍贴底；
+ * 窗口拖矮 → 列表收缩并出滚动条，而不会把上方控件挤扁。
+ *
+ * `min-height: 0` 是必须的：flex 子项默认 `min-height: auto`（= 内容高度），
+ * 不加这一句列表就永远撑到内容高度、`overflow` 失去作用，滚动条不会出现
+ * ——这正是此前「拖大后滚不动」的成因。
+ *
+ * 未启用拉伸时 `.page` 没有确定高度，flex 分配不到剩余空间，列表退回内容高度
+ * （不产生内部滚动），滚动仍由 `#text_show` 承担，与从前一致。 */
+.market-plugins {
+  display: flex; flex-direction: column; gap: 10px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  /* 滚动条不压住卡片描边（卡片有 1px 边框 + 悬停阴影） */
+  padding-right: 2px;
+}
 
 .plugin-card {
   display: grid; grid-template-columns: 48px minmax(0, 1fr) auto;
