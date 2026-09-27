@@ -1,0 +1,50 @@
+{
+  "id": "com.zhuangjie.screenshot",
+  "name": "截图",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "minAppVersion": "7.9.15",
+  "author": "zhuangjie",
+  "description": "全局快捷键截图：框选区域、标注后复制到剪贴板，并在前台查看最近 7 天的截图",
+  "homepage": "https://github.com/zhuangjie/screenshot",
+  "icon": "icon.svg",
+  "permissions": [
+    "ui.inlay",
+    "ui.notify",
+    "store",
+    "clipboard.write",
+    "screenshot.capture",
+    "screenshot.overlay",
+    "screenshot.write",
+    "screenshot.read"
+  ],
+  "optionalPermissions": [
+    "backend.spawn"
+  ],
+  "contributes": {
+    "searchItem": {
+      "title": "截图",
+      "desc": "按快捷键框选截图、标注后复制；查看最近 7 天的截图",
+      "keyword": "截图",
+      "icon": "icon.svg",
+      "subSearch": false
+    },
+    "detailView": {
+      "entry": "ui/detail.html",
+      "script": "ui/index.js",
+      "mode": "inlay",
+      "closeBehavior": "minimize",
+      "theme": "inherit"
+    }
+  },
+  "backend": {
+    "entry": "backend/run.cmd",
+    "protocol": "jsonrpc-stdio",
+    "autostart": "always",
+    "closeBehavior": "minimize",
+    "startupTimeoutMs": 15000,
+    "callTimeoutMs": 20000,
+    "idleExitSec": 300,
+    "maxRestarts": 0
+  }
+}

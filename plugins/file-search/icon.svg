@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="200" height="200">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#FFB347"/>
+      <stop offset="100%" stop-color="#FF8C42"/>
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#bg)"/>
+  <!-- 文件夹 -->
+  <path d="M192 368c0-35.3 28.7-64 64-64h170l74 74h266c35.3 0 64 28.7 64 64v286c0 35.3-28.7 64-64 64H256c-35.3 0-64-28.7-64-64V368z" fill="#fff" opacity="0.95"/>
+  <!-- 放大镜 -->
+  <circle cx="596" cy="576" r="118" fill="none" stroke="#E8590C" stroke-width="44"/>
+  <line x1="686" y1="666" x2="778" y2="758" stroke="#E8590C" stroke-width="48" stroke-linecap="round"/>
+</svg>

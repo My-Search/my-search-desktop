@@ -1,0 +1,47 @@
+{
+  "id": "com.mysearch.recorder",
+  "name": "录屏与水印",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "minAppVersion": "7.9.15",
+  "author": "zhuangjie",
+  "description": "屏幕录制（可选实时叠加水印），并给已有视频批量添加文字/图片水印，支持九宫格定位与水印预设",
+  "homepage": "https://github.com/zhuangjie/recorder",
+  "icon": "icon.svg",
+  "permissions": [
+    "ui.inlay",
+    "ui.notify",
+    "store",
+    "file.read",
+    "backend.spawn"
+  ],
+  "contributes": {
+    "searchItem": {
+      "title": "录屏与水印",
+      "desc": "录屏、实时水印、给已有视频加水印（需本机 ffmpeg）",
+      "keyword": "录屏",
+      "icon": "icon.svg",
+      "subSearch": true
+    },
+    "handlers": {
+      "files": true
+    },
+    "detailView": {
+      "entry": "ui/detail.html",
+      "script": "ui/index.js",
+      "mode": "inlay",
+      "closeBehavior": "minimize",
+      "theme": "inherit"
+    }
+  },
+  "backend": {
+    "entry": "backend/run.cmd",
+    "protocol": "jsonrpc-stdio",
+    "autostart": "on-demand",
+    "closeBehavior": "minimize",
+    "startupTimeoutMs": 15000,
+    "callTimeoutMs": 120000,
+    "idleExitSec": 300,
+    "maxRestarts": 0
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "id": "com.zhuangjie.github-upload",
+  "name": "GitHub 文件上传",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "minAppVersion": "7.9.15",
+  "author": "zhuangjie",
+  "description": "将文件上传到 GitHub 仓库，支持拖拽、粘贴、选择文件与图片压缩",
+  "homepage": "https://github.com/zhuangjie/github-file-upload",
+  "icon": "icon.ico",
+  "permissions": [
+    "ui.inlay",
+    "store",
+    "ui.notify",
+    "net.fetch:https://api.github.com/*",
+    "file.read"
+  ],
+  "optionalPermissions": [
+    "clipboard.write",
+    "backend.spawn"
+  ],
+  "contributes": {
+    "searchItem": {
+      "title": "GitHub 文件上传",
+      "desc": "拖拽/粘贴/选择文件，上传到 GitHub 并获取直链与加速链接",
+      "keyword": "上传"
+    },
+    "handlers": {
+      "files": true
+    },
+    "detailView": {
+      "entry": "ui/detail.html",
+      "script": "ui/index.js",
+      "mode": "inlay",
+      "closeBehavior": "exit"
+    }
+  },
+  "backend": {
+    "entry": "backend/run.cmd",
+    "protocol": "jsonrpc-stdio",
+    "autostart": "on-demand",
+    "closeBehavior": "exit",
+    "startupTimeoutMs": 15000,
+    "callTimeoutMs": 5000,
+    "idleExitSec": 300,
+    "maxRestarts": 0,
+    "env": {
+      "GITHUB_USER_REPO": "$GITHUB_USER_REPO",
+      "GITHUB_BRANCH": "$GITHUB_BRANCH",
+      "GITHUB_PATH": "$GITHUB_PATH",
+      "CDN_DNS": "$CDN_DNS"
+    }
+  }
+}

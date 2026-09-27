@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>待办清单</title>
+</head>
+<body>
+  <!-- 插件界面骨架。所有动态区域由 index.js 用 innerHTML 重建，
+       因此事件一律委托在 #app 上（列表节点会被整体替换）。 -->
+  <div id="app" class="todo">
+
+    <!-- 头部：标题 + 常驻统计 -->
+    <header class="todo-header">
+      <div class="todo-title-row">
+        <h2 class="todo-title">待办清单</h2>
+      </div>
+      <!-- 统计常驻：总数 / 未完成 / 今日到期；0 也照常显示，不留空行 -->
+      <p id="todo-stats" class="todo-stats"></p>
+    </header>
+
+    <!-- 新增区 -->
+    <section class="todo-composer">
+      <div class="todo-composer-main">
+        <!-- 紧急等级选择器：放在最前面，默认「普通」。
+             选择器值作为默认等级；若文本里写了 `!紧急` 等，则以文本为准（文本优先）。 -->
+        <select id="todo-level" class="todo-level" aria-label="紧急等级"
+                title="新增待办的紧急等级（默认普通；文本里写 !紧急 会以文本为准）">
+          <option value="high">紧急</option>
+          <option value="mid" selected>普通</option>
+          <option value="low">低</option>
+        </select>
+        <input id="todo-input" class="todo-input" type="text" autocomplete="off" spellcheck="false"
+               placeholder="添加待办，回车确认（如：写周报 #工作 2026-09-30）">
+        <button id="todo-add" class="todo-btn todo-btn-primary" type="button">添加</button>
+      </div>
+      <!-- 输入提示：只在解析出元信息或出错时出现 -->
+      <p id="todo-hint" class="todo-hint" hidden></p>
+    </section>
+
+    <!-- 筛选页签：数字为当前数据下的条目数 -->
+    <nav class="todo-tabs" id="todo-tabs">
+      <button class="todo-tab active" type="button" data-filter="all">全部 <span class="todo-tab-num" data-num="all">0</span></button>
+      <button class="todo-tab" type="button" data-filter="active">未完成 <span class="todo-tab-num" data-num="active">0</span></button>
+      <button class="todo-tab" type="button" data-filter="today">今天 <span class="todo-tab-num" data-num="today">0</span></button>
+      <button class="todo-tab" type="button" data-filter="done">已完成 <span class="todo-tab-num" data-num="done">0</span></button>
+      <span class="todo-tabs-gap"></span>
+      <button id="todo-clear-done" class="todo-btn todo-btn-ghost todo-btn-danger" type="button" hidden>清除已完成</button>
+    </nav>
+
+    <!-- 排序：默认按创建时间降序；未完成与已完成恒分组，方向只作用于组内 -->
+    <div class="todo-sortbar" id="todo-sort">
+      <span class="todo-sortbar-label">排序</span>
+      <button class="todo-sort-btn active" type="button" data-sort="created">创建时间</button>
+      <button class="todo-sort-btn" type="button" data-sort="urgency">紧急等级</button>
+      <button id="todo-sort-dir" class="todo-sort-dir" type="button">↓</button>
+    </div>
+
+    <!-- 过程/异常消息：正常时清空并整行隐藏 -->
+    <p id="todo-status" class="todo-status" hidden></p>
+
+    <!-- 列表（innerHTML 重建） -->
+    <ul id="todo-list" class="todo-list"></ul>
+
+    <!-- 空状态：数据为空 或 当前筛选无结果，两套文案由 JS 决定 -->
+    <div id="todo-empty" class="todo-empty" hidden>
+      <span class="todo-empty-icon" aria-hidden="true">🗒️</span>
+      <p class="todo-empty-text" id="todo-empty-text">还没有待办，在上方输入后回车即可添加</p>
+    </div>
+
+    <!-- 底部提示 -->
+    <footer class="todo-foot">
+      <span>单击勾选完成 · 双击标题编辑 · 数据仅存本机</span>
+    </footer>
+  </div>
+  <script src="index.js"></script>
+</body>
+</html>

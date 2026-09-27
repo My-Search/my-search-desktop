@@ -1,0 +1,385 @@
+/* 文件搜索 —— 宿主会把本样式 scope 到 `#text_show .plugin-view`，可直接用宿主主题变量。
+   注意：#text_show 同时挂了 ms-markdown-body 类，宿主 markdown 排版（h2/p 的
+   margin、border）会波及本视图——下面的元素显式声明 margin 归零，不给宿主留发挥空间。 */
+
+.fs-app {
+  --fs-line: var(--line, #e6e8ec);
+  --fs-card: var(--card, #ffffff);
+  --fs-hover: var(--hover-bg, #f7f8fa);
+  --fs-chip: var(--chip, #f5f6f8);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text, #1f2329);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  /* 留白由插件自己给：宿主用 #text_show .plugin-view { margin: -10px -16px -16px }
+     抵消了 #text_show 的 padding（让插件铺满容器），插件要边距就自己补回来。
+     取值与 #text_show 原 padding（10px 16px 16px）一致，视觉上跟宿主其它详情内容对齐。 */
+  padding: 10px 16px 16px;
+}
+
+/* hidden 属性是我们的显隐开关；宿主/插件里若有人给这些类设了 display，
+   hidden 会被压过，统一兜住 */
+.fs-app [hidden] {
+  display: none !important;
+}
+
+/* ---------- 头部：标题 + 状态（异常时才出现） + 重新扫描 ---------- */
+.fs-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.fs-heading {
+  min-width: 0;
+}
+
+.fs-heading h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.fs-status {
+  margin: 3px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted, #7a828e);
+}
+
+.fs-status.is-warn {
+  color: #c47f0a;
+}
+
+.fs-status.is-err {
+  color: var(--err, #d32f2f);
+}
+
+.fs-btn {
+  flex: 0 0 auto;
+  border: 1px solid var(--fs-line, #e6e8ec);
+  background: var(--fs-card, #fff);
+  color: var(--text, #1f2329);
+  border-radius: 8px;
+  font-size: 12px;
+  font-family: inherit;
+  padding: 5px 11px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.fs-btn:hover {
+  border-color: var(--brand, #5b5bd6);
+  color: var(--brand, #5b5bd6);
+}
+
+.fs-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* 扫描中按钮变「停止」：红边提示点下去会中断当前扫描 */
+.fs-btn.is-stop {
+  border-color: var(--err, #d32f2f);
+  color: var(--err, #d32f2f);
+}
+
+.fs-btn.is-stop:hover {
+  background: var(--err, #d32f2f);
+  border-color: var(--err, #d32f2f);
+  color: #fff;
+}
+
+/* ---------- 搜索范围：附加的文件夹 chips ---------- */
+.fs-folders {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.fs-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 2px 9px;
+  border: 1px solid var(--fs-line, #e6e8ec);
+  background: var(--fs-chip, #f5f6f8);
+  border-radius: 999px;
+  font-size: 11.5px;
+  color: var(--chip-text, #626a76);
+}
+
+.fs-chip-icon {
+  flex: 0 0 auto;
+}
+
+.fs-chip-name {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 扫描失败的根：红边 + ⚠，配合状态行定位是哪一路挂了（详情看 title 提示） */
+.fs-chip.is-err {
+  border-color: var(--err, #d32f2f);
+  color: var(--err, #d32f2f);
+}
+
+.fs-chip-mark {
+  flex: 0 0 auto;
+  font-size: 10px;
+}
+
+/* ---------- 类型页签：全部文件/图片/…/其它文件（数字 = 当前关键词命中数） ---------- */
+.fs-cats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.fs-cat {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--fs-line, #e6e8ec);
+  background: var(--fs-card, #fff);
+  color: var(--chip-text, #626a76);
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-family: inherit;
+  line-height: 1.5;
+  padding: 2px 9px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+
+.fs-cat:hover {
+  border-color: var(--brand, #5b5bd6);
+  color: var(--brand, #5b5bd6);
+}
+
+/* 选中页签：品牌色实底，白字 */
+.fs-cat.is-on {
+  border-color: var(--brand, #5b5bd6);
+  background: var(--brand, #5b5bd6);
+  color: #fff;
+}
+
+.fs-cat-n {
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.75;
+}
+
+.fs-cat.is-on .fs-cat-n {
+  opacity: 0.9;
+}
+
+/* ---------- 统计行：始终一行、始终有内容（匹配 0 也是信息） ---------- */
+.fs-meta {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted, #7a828e);
+  font-variant-numeric: tabular-nums;
+}
+
+.fs-meta .fs-q {
+  color: var(--text, #1f2329);
+  font-weight: 600;
+}
+
+/* ---------- 结果列表 ---------- */
+.fs-list {
+  border: 1px solid var(--fs-line, #e6e8ec);
+  border-radius: 10px;
+  background: var(--fs-card, #fff);
+  /* 高度交给外层窗口：宿主在「插件自定义尺寸」下把容器拉满，这里用 flex 吃掉
+     剩余空间——窗口拖高，列表跟着变高、显示更多条目（内部滚动）。
+     未启用拉伸（默认尺寸）时没有可用剩余高度，退回内容高度即可。 */
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  overflow: auto;
+  padding: 4px;
+}
+
+.fs-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  cursor: pointer;
+  border-radius: 6px;
+}
+
+.fs-row:hover {
+  background: var(--fs-hover, #f7f8fa);
+}
+
+/* 行首图标：系统图标（资源管理器同款 <img>）或回退 emoji 字形，
+   统一 16px 方框，纵向居中不参与换行 */
+.fs-row .fs-icon-box {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 2px;
+}
+
+/* 系统图标：等比缩放铺满方框（保持宽高比，不裁切、不拉伸） */
+.fs-row .fs-icon-box .fs-icon {
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+  display: block;
+}
+
+/* 回退字形：emoji 是彩色字体字形，尺寸与基线不受控——用固定字号 + 居中兜住 */
+.fs-row .fs-icon-box .fs-glyph-text {
+  font-size: 14px;
+  line-height: 1;
+  text-align: center;
+}
+
+.fs-row .fs-text {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.fs-row .fs-name {
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fs-row .fs-path {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted, #7a828e);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fs-row .fs-size {
+  flex: 0 1 auto;
+  max-width: 42%;
+  font-size: 11px;
+  color: var(--muted, #7a828e);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: right;
+}
+
+/* 定位按钮（始终显示）：点它 → 资源管理器打开所在目录并选中该条目。
+   无边框图标按钮，默认弱化；悬停/聚焦点亮（底色 + 品牌色描边）。图标是
+   内联 SVG（不用 emoji），尺寸由 .fs-locate-svg 固定，靠 currentColor 跟随。 */
+.fs-row .fs-locate {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  border-radius: 6px;
+  line-height: 1;
+  color: var(--muted, #7a828e);
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+}
+
+.fs-row .fs-locate-svg {
+  display: block;
+  width: 15px;
+  height: 15px;
+  /* 默认降饱和 + 半透明，与行的弱化层级一致；悬停/聚焦再提亮 */
+  opacity: 0.62;
+  transition: opacity 0.15s;
+}
+
+.fs-row .fs-locate:hover {
+  background: var(--chip, #f5f6f8);
+}
+
+.fs-row .fs-locate:hover .fs-locate-svg {
+  opacity: 1;
+}
+
+.fs-row .fs-locate:focus-visible {
+  outline: 2px solid var(--brand, #5b5bd6);
+  outline-offset: 1px;
+}
+
+.fs-row .fs-locate:focus-visible .fs-locate-svg {
+  opacity: 1;
+}
+
+/* 命中关键词的字：品牌色加粗 */
+.fs-hit {
+  color: var(--brand, #5b5bd6);
+  font-weight: 600;
+}
+
+/* 截断提示（超过 RENDER_LIMIT 的那行小字） */
+.fs-more {
+  padding: 9px 10px;
+  text-align: center;
+  font-size: 11.5px;
+  color: var(--muted, #7a828e);
+}
+
+/* ---------- 空态：垂直居中的引导，而不是一个空框 ---------- */
+.fs-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 170px;
+  padding: 26px 18px;
+  text-align: center;
+}
+
+.fs-empty-icon {
+  font-size: 26px;
+  line-height: 1;
+  opacity: 0.5;
+}
+
+.fs-empty-title {
+  font-size: 13px;
+  color: var(--text, #1f2329);
+}
+
+.fs-empty-sub {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--muted, #7a828e);
+  max-width: 380px;
+}
+
+.fs-empty-sub .fs-q {
+  color: var(--text, #1f2329);
+}
+
+/* ---------- 底部提示 ---------- */
+.fs-foot {
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--muted, #7a828e);
+}

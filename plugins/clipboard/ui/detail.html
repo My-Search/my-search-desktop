@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>剪贴板历史</title>
+  <link rel="stylesheet" href="detail.css">
+</head>
+<body>
+  <!--
+    剪贴板历史插件前台：列表 + 搜索 + 快捷键设置。
+
+    所有 class 都以 `cb-` 前缀，避免与宿主及其它插件的样式撞车；
+    颜色一律走宿主主题变量 `var(--token, 兜底)`，深/浅色自动适配。
+  -->
+  <div id="app" class="cb-app">
+    <!-- 顶部：快捷键 + 操作 -->
+    <div class="cb-header">
+      <div class="cb-hotkey">
+        <span class="cb-hotkey-label">呼出快捷键</span>
+        <button id="cb-hotkey-btn" class="cb-hotkey-key" data-act="set-hotkey" title="点击后按下新的组合键">未设置</button>
+        <button id="cb-hotkey-clear" class="cb-mini" data-act="clear-hotkey" title="解绑快捷键（关掉全局呼出热键）" hidden>解绑</button>
+      </div>
+      <div class="cb-actions">
+        <input id="cb-search" class="cb-search" type="search" placeholder="搜索历史…" data-act="search" autocomplete="off">
+        <button id="cb-refresh" class="cb-btn" data-act="refresh">刷新</button>
+        <button id="cb-clear" class="cb-btn danger" data-act="clear">清空</button>
+      </div>
+    </div>
+
+    <!-- 标签：全部 / 收藏 -->
+    <div id="cb-tabs" class="cb-tabs">
+      <button class="cb-tab active" data-tab="all" data-act="tab-all">全部</button>
+      <button class="cb-tab" data-tab="fav" data-act="tab-fav">收藏<span id="cb-fav-count" class="cb-tab-badge" hidden></span></button>
+    </div>
+
+    <!-- 状态行：错误 / 过程消息（成功后清空并整行隐藏） -->
+    <div id="cb-status" class="cb-status" hidden></div>
+
+    <!-- 统计 -->
+    <div id="cb-meta" class="cb-meta"></div>
+
+    <!-- 列表 -->
+    <div id="cb-list" class="cb-list"></div>
+
+    <!-- 空态 -->
+    <div id="cb-empty" class="cb-empty" hidden>
+      <p id="cb-empty-text">还没有剪贴板历史。</p>
+      <p class="cb-empty-hint">复制任意文本或图片后会出现在这里；按 <b id="cb-empty-key">快捷键</b> 可随时呼出。</p>
+    </div>
+
+    <!-- 大图预览浮层 -->
+    <div id="cb-viewer" class="cb-viewer" hidden>
+      <img id="cb-viewer-img" alt="图片预览">
+      <div class="cb-viewer-bar">
+        <span id="cb-viewer-name" class="cb-viewer-name"></span>
+        <button id="cb-viewer-copy" class="cb-btn primary" data-act="viewer-copy">复制</button>
+        <button id="cb-viewer-close" class="cb-btn" data-act="viewer-close">关闭</button>
+      </div>
+    </div>
+  </div>
+  <script src="index.js"></script>
+</body>
+</html>

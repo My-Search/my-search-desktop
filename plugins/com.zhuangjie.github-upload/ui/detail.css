@@ -1,0 +1,430 @@
+/* GitHub 文件上传 - 插件样式（宿主主题变量适配） */
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  background: var(--surface, #f5f6f8);
+  color: var(--text, #1f2329);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.gu-container {
+  /* 满高口径（精确版）：宿主 #text_show 是 border-box、max-height:510 且
+     padding: 10px 16px 16px → 内容区恰好 510-26 = 484px，撑满且零溢出，
+     #text_show 正好落在自身 510 上限（盒子 = 4 边框 + 44 搜索行 + 510 = 558）。
+     （pi-agent 的 486px 会溢出 2px、在 #text_show 里产生 2px 内部滚动。）
+     定高让上传区吃满剩余空间（flex:1），界面不再被内容自然高压扁。 */
+  position: relative;
+  height: 484px;
+  box-sizing: border-box;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ====== 配置栏 ====== */
+.gu-config-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.gu-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 12px;
+  border: 1px solid var(--line, #e6e8ec);
+  border-radius: 5px;
+  background: var(--card, #fff);
+  color: var(--text, #1f2329);
+  cursor: pointer;
+  font-size: 13px;
+  white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s;
+}
+.gu-btn:hover {
+  background: var(--hover-bg, #f7f8fa);
+  border-color: var(--hover-border, #c9ccd4);
+}
+.gu-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.gu-btn-primary {
+  background: var(--accent, #4a4ab8);
+  color: #fff;
+  border-color: var(--accent, #4a4ab8);
+}
+.gu-btn-primary:hover {
+  opacity: 0.9;
+}
+.gu-btn-sm { padding: 3px 8px; font-size: 12px; }
+
+.gu-status-text {
+  font-size: 12px;
+  color: var(--muted, #7a828e);
+}
+
+/* ====== 配置面板 ======
+   绝对定位浮层：开合不改变容器总高（否则高度一变，宿主 fit 的窗口高度
+   跟着抖，上传区被顶出可视区）。面板超高时自己内部滚动。 */
+.gu-config-panel {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  top: 44px;
+  z-index: 30;
+  max-height: calc(484px - 52px);
+  overflow-y: auto;
+  background: var(--card, #fff);
+  border: 1px solid var(--line, #e6e8ec);
+  border-radius: 8px;
+  padding: 12px 16px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.14);
+}
+.gu-config-panel table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.gu-config-panel td {
+  padding: 4px 6px;
+  vertical-align: middle;
+}
+.gu-config-panel td:first-child {
+  white-space: nowrap;
+  color: var(--muted, #7a828e);
+  font-size: 13px;
+  width: 80px;
+}
+
+.gu-input-cell {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.gu-input {
+  display: block;
+  box-sizing: border-box;
+  padding: 5px 8px;
+  border: 1px solid var(--line, #e6e8ec);
+  border-radius: 4px;
+  background: var(--field, #fbfbfd);
+  color: var(--text, #1f2329);
+  font-size: 13px;
+  flex: 1;
+  min-width: 0;
+}
+.gu-input:focus {
+  outline: none;
+  border-color: var(--accent, #4a4ab8);
+}
+.gu-input-inline {
+  flex: none;
+  width: auto;
+  min-width: 12em;
+}
+
+.gu-select {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 5px 8px;
+  border: 1px solid var(--line, #e6e8ec);
+  border-radius: 4px;
+  background: var(--field, #fbfbfd);
+  color: var(--text, #1f2329);
+  font-size: 13px;
+}
+.gu-select:focus {
+  outline: none;
+  border-color: var(--accent, #4a4ab8);
+}
+
+/* ====== 仓库：可输入过滤的下拉（combobox） ======
+   面板本身 .gu-config-panel 是 overflow-y:auto 的浮层，会把绝对定位的
+   下拉列表裁掉（且跟着面板一起滚）。所以列表用 position:fixed 浮在最上层，
+   位置每次打开时由 JS 按输入框的 getBoundingClientRect 计算。 */
+.gu-repo-combo {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+.gu-repo-list {
+  position: fixed;
+  z-index: 60;
+  max-height: 208px;
+  overflow-y: auto;
+  background: var(--card, #fff);
+  border: 1px solid var(--line, #e6e8ec);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  padding: 3px;
+}
+.gu-repo-item {
+  padding: 5px 8px;
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.gu-repo-item.active,
+.gu-repo-item:hover {
+  background: var(--accent-soft-bg, #eef0ff);
+}
+.gu-repo-item .gu-repo-vis {
+  color: var(--muted, #7a828e);
+  font-size: 11px;
+}
+.gu-repo-item .gu-repo-owner {
+  color: var(--muted, #7a828e);
+}
+.gu-repo-item .gu-repo-name {
+  font-weight: 600;
+}
+/* 过滤词高亮（用 <mark> 而非 <b>：语义是「匹配到了这里」） */
+.gu-repo-item mark {
+  background: transparent;
+  color: var(--accent, #4a4ab8);
+  font-weight: 700;
+}
+.gu-repo-empty {
+  padding: 6px 8px;
+  font-size: 12px;
+  color: var(--muted, #7a828e);
+}
+
+/* ====== 环境变量按钮（仿 pi-agent 的 pi-secret-pick） ====== */
+.gu-env-btn {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border: 1px solid var(--line, #e6e8ec);
+  border-radius: 4px;
+  background: var(--seg-bg, #eef0f4);
+  color: var(--accent, #4a4ab8);
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s;
+}
+.gu-env-btn:hover {
+  background: var(--hover-bg, #f7f8fa);
+  border-color: var(--accent, #4a4ab8);
+}
+.gu-env-btn.env-ref {
+  background: var(--accent-soft-bg, #eef0ff);
+  border-color: var(--accent, #4a4ab8);
+  color: var(--accent, #4a4ab8);
+}
+
+.gu-compression-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ====== 开关 ====== */
+.gu-switch {
+  position: relative;
+  display: inline-block;
+  width: 32px;
+  height: 18px;
+  flex-shrink: 0;
+}
+.gu-switch input { opacity: 0; width: 0; height: 0; }
+.gu-switch span {
+  position: absolute;
+  inset: 0;
+  background: var(--line, #ccc);
+  border-radius: 9px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.gu-switch span::before {
+  content: "";
+  position: absolute;
+  width: 14px; height: 14px;
+  left: 2px; top: 2px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform 0.2s;
+}
+.gu-switch input:checked + span { background: var(--accent, #4a4ab8); }
+.gu-switch input:checked + span::before { transform: translateX(14px); }
+
+.gu-config-actions {
+  margin-top: 8px;
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.gu-config-hint {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--muted, #7a828e);
+  border-top: 1px solid var(--line, #e6e8ec);
+  padding-top: 6px;
+}
+.gu-config-hint code {
+  background: var(--code-bg, #eef0f4);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+
+/* ====== 上传区域 ====== */
+.gu-drop-zone {
+  flex: 1 1 auto;
+  min-height: 160px;
+  width: 100%;
+  box-sizing: border-box;
+  border: 3px dashed var(--line, #d0d2d6);
+  border-radius: 16px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+  position: relative;
+  overflow: hidden;
+}
+.gu-drop-zone:hover,
+.gu-drop-zone.dragover {
+  border-color: var(--accent, #4a4ab8);
+  background: var(--accent-soft-bg, #eef0ff);
+}
+
+.gu-drop-hint {
+  text-align: center;
+  color: var(--muted, #7a828e);
+  padding: 20px;
+}
+.gu-drop-hint svg {
+  margin-bottom: 4px;
+  opacity: 0.6;
+}
+.gu-drop-hint p {
+  margin: 0;
+  font-size: 14px;
+}
+
+.gu-preview {
+  max-height: 70%;
+  max-width: 90%;
+  object-fit: contain;
+  display: none;
+  border-radius: 8px;
+}
+
+/* ====== 消息 ====== */
+.gu-msg {
+  flex: 0 0 auto;
+  padding: 6px 0;
+  font-size: 13px;
+  min-height: 20px;
+}
+.gu-msg p { margin: 4px 0; }
+.gu-msg .ok { color: var(--ok, #1a9c5b); }
+.gu-msg .err { color: var(--err, #e02424); }
+.gu-msg .warn { color: #d4a017; }
+
+/* ====== 上传进度条 ======
+   宿主 net.fetch 没有字节级进度事件，所以进度是「阶段」式的：每完成一个
+   阶段跳到该阶段的上限，阶段内用定时器缓缓逼近上限（不会提前到 100%，
+   真正成功才推满），让用户看得出还在动、也知道卡在哪一步。 */
+.gu-progress {
+  flex: 0 0 auto;
+  padding: 6px 0 2px;
+}
+.gu-progress-track {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--line, #e6e8ec);
+  overflow: hidden;
+}
+.gu-progress-bar {
+  height: 100%;
+  width: 0;
+  border-radius: 3px;
+  background: var(--accent, #4a4ab8);
+  transition: width 0.25s ease;
+}
+/* 完成/失败用颜色区分结果，颜色之外的唯一额外信号是文案 */
+.gu-progress.done .gu-progress-bar { background: var(--ok, #1a9c5b); }
+.gu-progress.err .gu-progress-bar { background: var(--err, #e02424); }
+.gu-progress-info {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--muted, #7a828e);
+}
+.gu-progress-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gu-progress-pct {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ====== 结果 ====== */
+.gu-result {
+  flex: 0 0 auto;
+  padding: 6px 0;
+  max-height: 150px;
+  overflow-y: auto;
+}
+.gu-result img {
+  display: block;
+  max-width: 240px;
+  border-radius: 6px;
+  border: 1px solid var(--line, #e6e8ec);
+  margin: 4px 0;
+}
+.gu-result-links {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 4px 0;
+}
+.gu-copy-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  background: var(--card, #fff);
+  border: 1px solid var(--line, #e6e8ec);
+  border-radius: 5px;
+  color: var(--accent, #4a4ab8);
+  text-decoration: none;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.gu-copy-link:hover {
+  background: var(--hover-bg, #f7f8fa);
+}
+.gu-copy-link svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* ====== 上传中动画 ====== */
+.gu-uploading {
+  border-color: var(--accent, #4a4ab8) !important;
+  animation: gu-pulse 1.2s ease-in-out infinite;
+}
+@keyframes gu-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}

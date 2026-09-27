@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="200" height="200">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#5FB2FF"/>
+      <stop offset="100%" stop-color="#2F7FE0"/>
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#bg)"/>
+  <!-- 取景框四角（截图选区） -->
+  <g fill="none" stroke="#fff" stroke-width="52" stroke-linecap="round">
+    <path d="M300 236h-64v64"/>
+    <path d="M724 236h64v64"/>
+    <path d="M300 788h-64v-64"/>
+    <path d="M724 788h64v-64"/>
+  </g>
+  <!-- 中央准星 -->
+  <g stroke="#FFD23F" stroke-width="48" stroke-linecap="round">
+    <line x1="512" y1="404" x2="512" y2="620"/>
+    <line x1="404" y1="512" x2="620" y2="512"/>
+  </g>
+</svg>

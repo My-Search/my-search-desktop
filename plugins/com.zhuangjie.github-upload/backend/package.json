@@ -1,0 +1,7 @@
+{
+  "name": "github-upload-backend",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "description": "GitHub 文件上传插件后端（纯 Node 内置模块，零依赖）"
+}

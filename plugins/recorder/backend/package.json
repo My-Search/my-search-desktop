@@ -1,0 +1,7 @@
+{
+  "name": "com.mysearch.recorder-backend",
+  "private": true,
+  "type": "module",
+  "description": "Backend process for the recorder plugin: probes ffmpeg, drives screen recording and watermark transcoding. Zero npm dependencies.",
+  "main": "index.mjs"
+}

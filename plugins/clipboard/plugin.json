@@ -1,0 +1,33 @@
+{
+  "id": "com.mysearch.clipboard",
+  "name": "剪贴板历史",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "minAppVersion": "7.9.15",
+  "author": "zhuangjie",
+  "description": "自动记录你复制过的文本与图片，按快捷键呼出即可搜索、复制、删除、收藏。收藏的条目永久保留、不会被上限淘汰或清空。监听在后台原生完成，不干扰系统剪贴板。",
+  "icon": "icon.svg",
+  "permissions": [
+    "ui.inlay",
+    "ui.notify",
+    "store",
+    "clipboard.read",
+    "clipboard.write"
+  ],
+  "contributes": {
+    "searchItem": {
+      "title": "剪贴板历史",
+      "desc": "查看 / 搜索 / 复制最近复制过的文本与图片",
+      "keyword": "剪贴板",
+      "icon": "icon.svg",
+      "subSearch": false
+    },
+    "detailView": {
+      "entry": "ui/detail.html",
+      "script": "ui/index.js",
+      "mode": "inlay",
+      "closeBehavior": "minimize",
+      "theme": "inherit"
+    }
+  }
+}

@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GitHub 文件上传</title>
+<link rel="stylesheet" href="detail.css">
+</head>
+<body>
+<div id="app" class="gu-container">
+  <div class="gu-config-bar">
+    <button id="gu-config-toggle" class="gu-btn gu-btn-sm">配置</button>
+    <span id="gu-status-text" class="gu-status-text">拖拽或粘贴文件到下方区域上传</span>
+  </div>
+
+  <div id="gu-config-panel" class="gu-config-panel" style="display:none">
+    <table>
+      <tr>
+        <td>Token：</td>
+        <td class="gu-input-cell">
+          <input id="gu-token" class="gu-input" type="text" placeholder="GitHub Token 或 %环境变量名%" autocomplete="off" spellcheck="false" />
+          <button class="gu-env-btn" data-target="gu-token" title="从「设置 → 环境变量」中选择">变量</button>
+        </td>
+      </tr>
+      <tr>
+        <td>仓库：</td>
+        <td class="gu-input-cell">
+          <!-- 仓库 = 可输入过滤的下拉（combobox）：一个输入框同时承担「选择」与
+               「手动填写 owner/repo（或 %环境变量%）」。输入即过滤已识别仓库，
+               点/回车选中即回填；值不在列表里也照样能上传（走原输入框语义）。
+               旧的下拉 <select> 与输入框两态切换（谁显示谁隐藏）已删除：
+               那个设计每次重建 options 都会丢选择，且无法「输入过滤」。 -->
+          <div class="gu-repo-combo" id="gu-repo-combo">
+            <input id="gu-repo-input" class="gu-input" type="text" role="combobox" aria-expanded="false"
+              aria-autocomplete="list" aria-controls="gu-repo-list" placeholder="输入过滤，或填 owner/repo / %环境变量名%"
+              autocomplete="off" spellcheck="false" />
+            <div id="gu-repo-list" class="gu-repo-list" role="listbox" style="display:none"></div>
+          </div>
+          <button class="gu-env-btn" data-target="gu-repo-input" title="从「设置 → 环境变量」中选择">变量</button>
+        </td>
+      </tr>
+      <tr>
+        <td>分支：</td>
+        <td class="gu-input-cell">
+          <input id="gu-branch" class="gu-input" placeholder="留空=仓库默认分支，或填分支名 / %环境变量名%" autocomplete="off" spellcheck="false" />
+          <button class="gu-env-btn" data-target="gu-branch" title="从「设置 → 环境变量」中选择">变量</button>
+        </td>
+      </tr>
+      <tr>
+        <td>路径：</td>
+        <td class="gu-input-cell">
+          <input id="gu-path" class="gu-input" placeholder="/uploads 或 %环境变量名%" autocomplete="off" spellcheck="false" />
+          <button class="gu-env-btn" data-target="gu-path" title="从「设置 → 环境变量」中选择">变量</button>
+        </td>
+      </tr>
+      <tr>
+        <td>CDN：</td>
+        <td class="gu-input-cell">
+          <input id="gu-dns" class="gu-input" placeholder="https://cdn.jsdelivr.net/gh 或 %环境变量名%" autocomplete="off" spellcheck="false" />
+          <button class="gu-env-btn" data-target="gu-dns" title="从「设置 → 环境变量」中选择">变量</button>
+        </td>
+      </tr>
+      <tr>
+        <td>压缩：</td>
+        <td class="gu-compression-cell">
+          <label class="gu-switch"><input type="checkbox" id="gu-compression" /><span></span></label>
+          <input id="gu-compression-config" class="gu-input gu-input-inline" placeholder="0.9:600:0.9" title="宽高压缩比例:宽度阈值:质量" />
+        </td>
+      </tr>
+    </table>
+    <div class="gu-config-actions">
+      <button id="gu-validate-token" class="gu-btn">校验 Token</button>
+      <button id="gu-save-config" class="gu-btn gu-btn-primary">保存并收起</button>
+    </div>
+    <div class="gu-config-hint">
+      <p>上传到 GitHub 的文件自动按 <code>{路径}/{年}/{月}/{日}/{文件名}</code> 组织</p>
+      <p>💡 仓库框可直接输入过滤已识别的仓库（↑/↓ 选择、回车确认），也可手填 <code>owner/repo</code>；改动在收起面板时自动保存</p>
+      <p>💡 <code>%环境变量名%</code> 引用宿主环境变量，需在 <strong>设置 → 环境变量</strong> 中定义并逐项授予本插件 <code>env.read:NAME</code> 权限；且需授权 <strong>backend.spawn</strong> 让后台进程解析</p>
+    </div>
+  </div>
+
+  <div id="gu-drop-zone" class="gu-drop-zone">
+    <input type="file" id="gu-file-input" style="display:none" />
+    <img id="gu-preview" class="gu-preview" style="display:none" />
+    <div id="gu-drop-hint" class="gu-drop-hint">
+      <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
+      <p>点击选择 <strong>或</strong> 拖拽文件到此处 <strong>或</strong> Ctrl+V 粘贴图片/文件</p>
+    </div>
+  </div>
+
+  <div id="gu-msg" class="gu-msg"></div>
+
+  <!-- 上传进度条：真实阶段进度（读取/压缩 → 解析配置 → 查询远端 → 上传 → 完成）。
+       宿主 ms.net.fetch 不提供字节级事件，所以进度按阶段推进而非流量百分比，
+       阶段权重见 index.js 的 setProgress。 -->
+  <div id="gu-progress" class="gu-progress" style="display:none" role="progressbar"
+    aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="上传进度">
+    <div class="gu-progress-track"><div id="gu-progress-bar" class="gu-progress-bar" style="width:0%"></div></div>
+    <div class="gu-progress-info">
+      <span id="gu-progress-text" class="gu-progress-text">准备中...</span>
+      <span id="gu-progress-pct" class="gu-progress-pct">0%</span>
+    </div>
+  </div>
+
+  <div id="gu-result" class="gu-result"></div>
+</div>
+<script src="index.js"></script>
+</body>
+</html>

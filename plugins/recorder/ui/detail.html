@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>录屏与水印</title>
+  <link rel="stylesheet" href="detail.css">
+</head>
+<body>
+  <!--
+    录屏与水印插件前台。
+
+    三个页签：录屏 / 加水印 / 设置。所有 class 以 `rc-` 前缀避免撞车；
+    颜色一律走宿主主题变量 `var(--token, 兜底)`，深/浅色自动适配。
+
+    重活全在后端（ffmpeg），这里只做：收集参数 → ms.backend.call → 展示进度。
+  -->
+  <div id="app" class="rc-app">
+    <!-- 顶部：ffmpeg 状态条。未就绪时提供「一键下载」（插件自带，装完即用），
+         下载失败再退到「去设置」手动指定路径 -->
+    <div id="rc-ffbar" class="rc-ffbar">
+      <span id="rc-ffdot" class="rc-dot off"></span>
+      <span id="rc-fftext" class="rc-fftext">正在检测 ffmpeg…</span>
+      <button id="rc-ffdl" class="rc-mini primary" data-act="download-ffmpeg" hidden>一键下载</button>
+      <button id="rc-fffix" class="rc-mini" data-act="goto-settings" hidden>手动指定</button>
+    </div>
+
+    <!-- 下载进度（仅在下载中显示） -->
+    <div id="rc-dl" class="rc-progress" hidden>
+      <div class="rc-progress-bar"><div id="rc-dl-fill" class="rc-progress-fill"></div></div>
+      <span id="rc-dl-text" class="rc-muted"></span>
+    </div>
+
+    <!-- 页签 -->
+    <div class="rc-tabs" role="tablist">
+      <button class="rc-tab active" data-tab="rec" data-act="tab" role="tab" aria-selected="true">录屏</button>
+      <button class="rc-tab" data-tab="wm" data-act="tab" role="tab" aria-selected="false">加水印</button>
+      <button class="rc-tab" data-tab="lib" data-act="tab" role="tab" aria-selected="false">作品库</button>
+      <button class="rc-tab" data-tab="set" data-act="tab" role="tab" aria-selected="false">设置</button>
+    </div>
+
+    <!-- 全局状态行 -->
+    <div id="rc-status" class="rc-status" hidden></div>
+
+    <!-- ===================== 页签 1：录屏 ===================== -->
+    <section id="rc-pane-rec" class="rc-pane">
+      <div class="rc-row">
+        <div class="rc-rec-left">
+          <div class="rc-big">
+            <button id="rc-rec-btn" class="rc-btn primary rc-rec-btn" data-act="rec-toggle">开始录制</button>
+            <span id="rc-rec-timer" class="rc-timer">00:00:00</span>
+            <button id="rc-rec-pause" class="rc-btn" data-act="rec-pause" disabled>暂停</button>
+          </div>
+          <div class="rc-rec-meta">
+            <span id="rc-rec-info" class="rc-muted">就绪</span>
+          </div>
+        </div>
+
+        <div class="rc-rec-right">
+          <label class="rc-field">
+            <span class="rc-label">录制区域</span>
+            <select id="rc-region-mode" class="rc-input" data-act="region-mode">
+              <option value="full">全屏</option>
+              <option value="custom">自定义区域</option>
+            </select>
+          </label>
+          <div id="rc-region-box" class="rc-region" hidden>
+            <label class="rc-field sm"><span>X</span><input id="rc-region-x" class="rc-input" type="number" value="0" min="0"></label>
+            <label class="rc-field sm"><span>Y</span><input id="rc-region-y" class="rc-input" type="number" value="0" min="0"></label>
+            <label class="rc-field sm"><span>宽</span><input id="rc-region-w" class="rc-input" type="number" value="1280" min="2"></label>
+            <label class="rc-field sm"><span>高</span><input id="rc-region-h" class="rc-input" type="number" value="720" min="2"></label>
+          </div>
+
+          <div class="rc-grid2">
+            <label class="rc-field"><span class="rc-label">帧率</span>
+              <select id="rc-fps" class="rc-input">
+                <option value="15">15 fps</option>
+                <option value="24">24 fps</option>
+                <option value="30" selected>30 fps</option>
+                <option value="60">60 fps</option>
+              </select>
+            </label>
+            <label class="rc-field"><span class="rc-label">编码器</span>
+              <select id="rc-encoder" class="rc-input">
+                <option value="libx264" selected>H.264（推荐）</option>
+                <option value="mpeg4">MPEG-4（兼容兜底）</option>
+              </select>
+            </label>
+          </div>
+
+          <label class="rc-check">
+            <input id="rc-draw-mouse" type="checkbox" checked>
+            <span>录制鼠标指针</span>
+          </label>
+        </div>
+      </div>
+
+      <!-- 录制水印（复用同一套水印控件） -->
+      <div class="rc-section">
+        <div class="rc-section-head">
+          <span class="rc-section-title">录制时叠加水印</span>
+          <label class="rc-switch">
+            <input id="rc-rec-wm-on" type="checkbox">
+            <span>启用</span>
+          </label>
+        </div>
+        <div id="rc-rec-wm-editor" class="rc-editor" hidden></div>      </div>
+    </section>
+
+    <!-- ===================== 页签 2：给已有视频加水印 ===================== -->
+    <section id="rc-pane-wm" class="rc-pane" hidden>
+      <div class="rc-drop" id="rc-drop">
+        <div class="rc-drop-inner">
+          <div class="rc-drop-title">把视频文件拖进来</div>
+          <div class="rc-drop-hint">或粘贴到搜索框；也可以直接在下方的输入框里填路径</div>
+          <div class="rc-path-row">
+            <input id="rc-wm-input" class="rc-input" type="text" placeholder="视频文件绝对路径，如 D:\videos\a.mp4">
+            <button class="rc-btn" data-act="detect">读取信息</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="rc-video-meta" class="rc-vmeta" hidden></div>
+
+      <div class="rc-section">
+        <div class="rc-section-head">
+          <span class="rc-section-title">水印</span>
+          <label class="rc-switch">
+            <input id="rc-wm-on" type="checkbox" checked>
+            <span>启用</span>
+          </label>
+        </div>
+        <div id="rc-wm-editor" class="rc-editor"></div>
+      </div>
+
+      <div class="rc-actions">
+        <button id="rc-wm-apply" class="rc-btn primary" data-act="apply">开始加水印</button>
+        <button id="rc-wm-cancel" class="rc-btn" data-act="cancel-wm" hidden>取消</button>
+      </div>
+
+      <div id="rc-wm-progress" class="rc-progress" hidden>
+        <div class="rc-progress-bar"><div id="rc-wm-progress-fill" class="rc-progress-fill"></div></div>
+        <span id="rc-wm-progress-text" class="rc-muted"></span>
+      </div>
+    </section>
+
+    <!-- ===================== 页签 3：作品库 ===================== -->
+    <section id="rc-pane-lib" class="rc-pane" hidden>
+      <div class="rc-lib-head">
+        <span id="rc-lib-count" class="rc-muted"></span>
+        <button class="rc-btn" data-act="lib-refresh">刷新</button>
+      </div>
+      <div id="rc-lib-grid" class="rc-lib-grid"></div>
+      <div id="rc-lib-empty" class="rc-empty" hidden>
+        <p>还没有录制或导出过视频。</p>
+      </div>
+    </section>
+
+    <!-- ===================== 页签 4：设置 ===================== -->
+    <section id="rc-pane-set" class="rc-pane" hidden>
+      <div class="rc-section">
+        <div class="rc-section-title">ffmpeg 运行环境</div>
+        <p class="rc-help">
+          插件可以<b>自带 ffmpeg</b>：点下面的「一键下载」，会从官方构建源拉取对应平台的
+          ffmpeg 到插件私有目录，装完即用，无需你手动配置。
+        </p>
+        <div class="rc-path-row">
+          <button id="rc-set-dl" class="rc-btn primary" data-act="download-ffmpeg">一键下载 ffmpeg</button>
+          <button id="rc-set-dlrm" class="rc-btn" data-act="remove-bundled" hidden>删除自带副本</button>
+          <button class="rc-btn" data-act="reprobe">重新检测</button>
+        </div>
+        <div id="rc-set-bundled" class="rc-help"></div>
+        <div id="rc-set-sources" class="rc-help rc-mono"></div>
+      </div>
+
+      <div class="rc-section">
+        <div class="rc-section-title">或：使用本机已安装的 ffmpeg</div>
+        <p class="rc-help">
+          若你已自行安装（<code>winget install Gyan.FFmpeg</code> / <code>brew install ffmpeg</code>），
+          可在此指定路径——<b>手填路径优先级最高</b>，会覆盖自带副本。留空表示自动探测。
+        </p>
+        <div class="rc-path-row">
+          <input id="rc-set-ffpath" class="rc-input" type="text" placeholder="C:\ffmpeg\bin\ffmpeg.exe（可留空，自动检测）">
+          <button class="rc-btn" data-act="set-ffpath">保存并检测</button>
+        </div>
+        <div id="rc-set-ffinfo" class="rc-help"></div>
+      </div>
+
+      <div class="rc-section">
+        <div class="rc-section-title">默认水印预设</div>
+        <p class="rc-help">保存一套常用水印，之后在「录屏 / 加水印」里一键套用。</p>
+        <div class="rc-preset-row">
+          <input id="rc-preset-name" class="rc-input" type="text" placeholder="预设名称，如「右下角署名」">
+          <button class="rc-btn" data-act="preset-save">保存当前水印为预设</button>
+        </div>
+        <div id="rc-preset-list" class="rc-preset-list"></div>
+      </div>
+
+      <div class="rc-section">
+        <div class="rc-section-title">存储位置</div>
+        <div id="rc-set-outdir" class="rc-help rc-mono"></div>
+        <div id="rc-set-bindir" class="rc-help rc-mono"></div>
+      </div>
+    </section>
+  </div>
+
+  <!-- 水印控件模板：录屏页与加水印页各渲染一份，避免两处手写重复结构 -->
+  <template id="rc-wm-template">
+    <div class="rc-wm">
+      <div class="rc-grid3">
+        <label class="rc-field"><span class="rc-label">类型</span>
+          <select class="rc-input" data-wm="type">
+            <option value="text">文字</option>
+            <option value="image">图片 / Logo</option>
+          </select>
+        </label>
+        <label class="rc-field"><span class="rc-label">位置</span>
+          <select class="rc-input" data-wm="anchor">
+            <option value="top-left">左上</option>
+            <option value="top-center">上中</option>
+            <option value="top-right">右上</option>
+            <option value="middle-left">左中</option>
+            <option value="center">居中</option>
+            <option value="middle-right">右中</option>
+            <option value="bottom-left">左下</option>
+            <option value="bottom-center">下中</option>
+            <option value="bottom-right">右下</option>
+          </select>
+        </label>
+        <label class="rc-field"><span class="rc-label">边距 <b data-wm-out="marginPct"></b></span>
+          <input class="rc-input" type="range" min="0" max="20" step="0.5" data-wm="marginPct">
+        </label>
+      </div>
+
+      <div class="rc-wm-body">
+        <!-- 文字 -->
+        <div class="rc-wm-text">
+          <label class="rc-field"><span class="rc-label">水印文字</span>
+            <input class="rc-input" type="text" data-wm="text" placeholder="如 我的搜索">
+          </label>
+          <div class="rc-grid2">
+            <label class="rc-field"><span class="rc-label">字号 <b data-wm-out="sizePct"></b></span>
+              <input class="rc-input" type="range" min="1" max="20" step="0.5" data-wm="sizePct">
+            </label>
+            <label class="rc-field"><span class="rc-label">不透明度 <b data-wm-out="opacity"></b></span>
+              <input class="rc-input" type="range" min="0" max="1" step="0.05" data-wm="opacity">
+            </label>
+          </div>
+          <div class="rc-grid2">
+            <label class="rc-field"><span class="rc-label">颜色</span>
+              <input class="rc-input" type="color" data-wm="color">
+            </label>
+            <label class="rc-field"><span class="rc-label">中文字体</span>
+              <select class="rc-input" data-wm="fontFile"><option value="">自动（可能显示方块）</option></select>
+            </label>
+          </div>
+          <div class="rc-checks">
+            <label class="rc-check"><input type="checkbox" data-wm="border"><span>加描边（浅色背景更清晰）</span></label>
+            <label class="rc-check"><input type="checkbox" data-wm="timestamp"><span>附加时间戳</span></label>
+          </div>
+        </div>
+
+        <!-- 图片 -->
+        <div class="rc-wm-image" hidden>
+          <label class="rc-field"><span class="rc-label">图片路径（PNG/JPG，建议带透明通道）</span>
+            <input class="rc-input" type="text" data-wm="imagePath" placeholder="D:\logo.png">
+          </label>
+        </div>
+      </div>
+
+      <!-- 预览 -->
+      <div class="rc-preview">
+        <div class="rc-label">预览（按 16:9 模拟）</div>
+        <div class="rc-preview-stage"><canvas class="rc-preview-canvas" width="320" height="180"></canvas></div>
+      </div>
+    </div>
+  </template>
+
+  <script src="index.js"></script>
+</body>
+</html>

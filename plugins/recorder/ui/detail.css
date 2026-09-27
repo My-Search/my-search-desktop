@@ -1,0 +1,571 @@
+/*
+ * 录屏与水印插件前台样式。
+ *
+ * 两条硬约定（与截图插件一致，见 docs/plugin-market-publish.md「界面与主题」）：
+ *   1. 只用宿主提供的 CSS 变量 `var(--token, 兜底值)`，不写 @media
+ *      (prefers-color-scheme)——宿主把系统偏好解析成 html.theme-dark 类；
+ *   2. 不用 :root / body 选择器——插件 CSS 会被宿主加前缀作用域化。
+ *
+ * 宿主给插件视图加了负 margin，留白由 .rc-app 自己补。
+ */
+
+.rc-app {
+  --rc-line: var(--line, #e6e8ec);
+  --rc-card: var(--card, #ffffff);
+  --rc-field: var(--field, #f5f6f8);
+  --rc-hover: var(--hover-bg, #f2f4f7);
+  --rc-text: var(--text, #1f2329);
+  --rc-muted: var(--muted, #8a9099);
+  --rc-accent: var(--brand, #e0392b);
+  --rc-err: var(--err, #e5484d);
+  --rc-ok: #2ea043;
+
+  padding: 10px 16px 16px;
+  color: var(--rc-text);
+  font-size: 13px;
+  line-height: 1.5;
+  max-height: 520px;
+  overflow-y: auto;
+  box-sizing: border-box;
+}
+
+.rc-app * {
+  box-sizing: border-box;
+}
+
+.rc-app [hidden] {
+  display: none !important;
+}
+
+.rc-mono {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+}
+
+.rc-muted {
+  color: var(--rc-muted);
+}
+
+/* ---------- ffmpeg 状态条 ---------- */
+.rc-ffbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--rc-field);
+  font-size: 12px;
+}
+
+.rc-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--rc-muted);
+}
+
+.rc-dot.on { background: var(--rc-ok); }
+.rc-dot.off { background: var(--rc-err); }
+
+.rc-fftext {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- 页签 ---------- */
+.rc-tabs {
+  display: flex;
+  gap: 4px;
+  margin: 10px 0 12px;
+  border-bottom: 1px solid var(--rc-line);
+}
+
+.rc-tab {
+  padding: 6px 12px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--rc-muted);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.rc-tab:hover { color: var(--rc-text); }
+
+.rc-tab.active {
+  color: var(--rc-accent);
+  border-bottom-color: var(--rc-accent);
+}
+
+/* ---------- 状态行 ---------- */
+.rc-status {
+  margin-bottom: 10px;
+  padding: 6px 10px;
+  border-radius: 5px;
+  background: var(--rc-field);
+  color: var(--rc-muted);
+  font-size: 12px;
+}
+
+.rc-status.error { color: var(--rc-err); }
+.rc-status.ok { color: var(--rc-ok); }
+
+/* ---------- 通用控件 ---------- */
+.rc-btn {
+  padding: 5px 12px;
+  font-size: 12px;
+  border: 1px solid var(--rc-line);
+  border-radius: 5px;
+  background: var(--rc-card);
+  color: var(--rc-text);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.rc-btn:hover { background: var(--rc-hover); }
+
+.rc-btn.primary {
+  background: var(--rc-accent);
+  border-color: var(--rc-accent);
+  color: #fff;
+}
+
+.rc-btn.primary:hover { opacity: 0.9; }
+
+.rc-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.rc-btn.recording {
+  background: var(--rc-err);
+  border-color: var(--rc-err);
+}
+
+.rc-mini {
+  padding: 2px 8px;
+  font-size: 11px;
+  border: 1px solid var(--rc-line);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--rc-muted);
+  cursor: pointer;
+}
+
+.rc-mini:hover { color: var(--rc-accent); border-color: var(--rc-accent); }
+
+/* 状态条上的「一键下载」：它是未就绪时的主 CTA，给强调色。
+   注意放在 .rc-mini:hover 之后，否则 hover 的常规样式会盖掉它的底色。 */
+.rc-mini.primary {
+  background: var(--rc-accent);
+  border-color: var(--rc-accent);
+  color: #fff;
+}
+
+.rc-mini.primary:hover,
+.rc-mini.primary:focus {
+  background: var(--rc-accent);
+  border-color: var(--rc-accent);
+  color: #fff;
+  opacity: 0.9;
+}
+
+.rc-mini.primary:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.rc-input {
+  width: 100%;
+  padding: 4px 8px;
+  font-size: 12px;
+  border: 1px solid var(--rc-line);
+  border-radius: 5px;
+  background: var(--rc-card);
+  color: var(--rc-text);
+  font-family: inherit;
+}
+
+.rc-input:focus {
+  outline: none;
+  border-color: var(--rc-accent);
+}
+
+input[type="range"].rc-input {
+  padding: 0;
+  border: none;
+  background: transparent;
+}
+
+input[type="color"].rc-input {
+  height: 26px;
+  padding: 1px;
+}
+
+.rc-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.rc-field.sm {
+  flex-direction: row;
+  align-items: center;
+  gap: 4px;
+}
+
+.rc-field.sm span { color: var(--rc-muted); font-size: 11px; }
+.rc-field.sm .rc-input { width: 64px; }
+
+.rc-label {
+  color: var(--rc-muted);
+  font-size: 11px;
+}
+
+.rc-label b {
+  color: var(--rc-text);
+  font-weight: 600;
+}
+
+.rc-check,
+.rc-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.rc-checks {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+.rc-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.rc-grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+
+/* ---------- 录屏页 ---------- */
+.rc-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
+  gap: 14px;
+}
+
+.rc-big {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.rc-rec-btn {
+  padding: 9px 18px;
+  font-size: 14px;
+  border-radius: 7px;
+}
+
+.rc-timer {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 20px;
+  font-variant-numeric: tabular-nums;
+  color: var(--rc-text);
+}
+
+.rc-rec-meta {
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+.rc-region {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.rc-rec-right {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* ---------- 区块 ---------- */
+.rc-section {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--rc-line);
+}
+
+.rc-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.rc-section-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.rc-help {
+  margin: 6px 0;
+  color: var(--rc-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.rc-help code {
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--rc-field);
+  font-size: 11px;
+}
+
+/* ---------- 水印编辑器 ---------- */
+.rc-editor { margin-top: 6px; }
+
+.rc-wm {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.rc-wm-body { display: block; }
+
+.rc-wm-text,
+.rc-wm-image {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rc-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.rc-preview-stage {
+  border: 1px solid var(--rc-line);
+  border-radius: 5px;
+  overflow: hidden;
+  background: repeating-conic-gradient(#00000010 0% 25%, transparent 0% 50%) 50% / 16px 16px;
+  max-width: 320px;
+}
+
+.rc-preview-canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+/* ---------- 加水印页 ---------- */
+.rc-drop {
+  padding: 14px;
+  border: 1px dashed var(--rc-line);
+  border-radius: 8px;
+  background: var(--rc-field);
+}
+
+.rc-drop.dragover {
+  border-color: var(--rc-accent);
+  background: var(--rc-hover);
+}
+
+.rc-drop-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.rc-drop-title { font-weight: 600; }
+
+.rc-drop-hint {
+  color: var(--rc-muted);
+  font-size: 12px;
+}
+
+.rc-path-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-top: 4px;
+}
+
+.rc-path-row .rc-input { flex: 1; }
+
+.rc-vmeta {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--rc-field);
+  font-size: 12px;
+}
+
+.rc-vmeta-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 4px 12px;
+}
+
+.rc-vmeta-grid b {
+  color: var(--rc-muted);
+  font-weight: 400;
+}
+
+.rc-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.rc-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.rc-progress-bar {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--rc-field);
+  overflow: hidden;
+}
+
+.rc-progress-fill {
+  height: 100%;
+  width: 0;
+  background: var(--rc-accent);
+  transition: width 0.2s ease;
+}
+
+/* ---------- 作品库 ---------- */
+.rc-lib-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.rc-lib-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.rc-lib-card {
+  position: relative;
+  border: 1px solid var(--rc-line);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--rc-field);
+}
+
+.rc-lib-thumb {
+  display: block;
+  width: 100%;
+  height: 88px;
+  object-fit: cover;
+  background: #000;
+}
+
+.rc-lib-body {
+  padding: 6px 8px;
+  background: var(--rc-card);
+  border-top: 1px solid var(--rc-line);
+}
+
+.rc-lib-name {
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rc-lib-sub {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-top: 2px;
+  color: var(--rc-muted);
+  font-size: 11px;
+}
+
+.rc-tag {
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--rc-field);
+  font-size: 10px;
+}
+
+.rc-tag.rec { color: var(--rc-err); }
+.rc-tag.wm { color: var(--rc-accent); }
+
+.rc-lib-acts {
+  display: flex;
+  gap: 4px;
+  padding: 6px 8px;
+  border-top: 1px solid var(--rc-line);
+  background: var(--rc-card);
+}
+
+.rc-lib-acts .rc-mini { flex: 1; text-align: center; }
+
+.rc-lib-acts .rc-mini:hover { color: var(--rc-accent); border-color: var(--rc-accent); }
+
+.rc-lib-acts .rc-mini.del:hover { color: var(--rc-err); border-color: var(--rc-err); }
+
+/* ---------- 预设 ---------- */
+.rc-preset-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin: 8px 0;
+}
+
+.rc-preset-row .rc-input { flex: 1; }
+
+.rc-preset-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.rc-preset-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border: 1px solid var(--rc-line);
+  border-radius: 5px;
+  font-size: 12px;
+}
+
+.rc-preset-item .rc-preset-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rc-preset-item .rc-mini:hover { color: var(--rc-accent); }
+
+/* ---------- 空态 ---------- */
+.rc-empty {
+  padding: 32px 16px;
+  text-align: center;
+  color: var(--rc-muted);
+}
+
+.rc-empty p { margin: 0; }

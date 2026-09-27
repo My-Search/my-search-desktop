@@ -1,0 +1,449 @@
+/*
+ * 剪贴板历史插件前台样式。
+ *
+ * 两条硬约定（见 docs/plugin-market-publish.md「界面与主题」）：
+ *   1. 只用宿主提供的 CSS 变量 `var(--token, 兜底值)`，不写 @media
+ *      (prefers-color-scheme)——宿主会把系统偏好解析成 html.theme-dark 类，
+ *      变量随之变化，插件跟随即可；
+ *   2. 不用 :root / body 选择器——插件 CSS 会被宿主加前缀作用域化
+ *      （#text_show .plugin-view ...），写它们会被映射到容器本身，语义错位。
+ */
+
+.cb-app {
+  --cb-line: var(--line, #e6e8ec);
+  --cb-card: var(--card, #ffffff);
+  --cb-field: var(--field, #f5f6f8);
+  --cb-hover: var(--hover-bg, #f2f4f7);
+  --cb-text: var(--text, #1f2329);
+  --cb-muted: var(--muted, #8a9099);
+  --cb-accent: var(--brand, #2f7fe0);
+  --cb-err: var(--err, #e5484d);
+  /* 收藏星标色：优先用宿主警告色，退回一个通用琥珀金，深浅色下都醒目 */
+  --cb-star: var(--warn, #e6a23c);
+
+  padding: 10px 16px 16px;
+  color: var(--cb-text);
+  font-size: 13px;
+  line-height: 1.5;
+  max-height: 486px;
+  overflow-y: auto;
+  box-sizing: border-box;
+}
+
+.cb-app * {
+  box-sizing: border-box;
+}
+
+/* 宿主规则可能覆盖 hidden，这里强制生效 */
+.cb-app [hidden] {
+  display: none !important;
+}
+
+/* ---------- 右侧滚动条（极简，跟随主题） ----------
+   两条经验：
+   1. 只给 `.cb-app` 本体设滚动条样式——宿主会把插件 CSS 加前缀作用域化
+      （`#text_show .plugin-view .cb-app::-webkit-scrollbar`），所以写在这里
+      只会美化本插件视图的滚动条，不影响宿主其它区域。
+   2. 拇指色用主题变量 `--cb-muted` 配透明度，而不是写死 `rgba(0,0,0,x)`：
+      深色主题下黑拇指会几乎看不见。`--muted` 在浅色是 #7a828e、深色是
+      #98a0ab，都是中性灰，两边都清楚。
+*/
+.cb-app {
+  scrollbar-width: thin;
+  scrollbar-color: var(--cb-line, #e6e8ec) transparent;
+}
+
+.cb-app::-webkit-scrollbar {
+  -webkit-appearance: none;
+  width: 8px;
+}
+
+.cb-app::-webkit-scrollbar-track {
+  background-color: transparent;
+  border-radius: 4px;
+}
+
+/* 悬停在视图上时才让轨道轻微显形，静态时不打扰内容 */
+.cb-app:hover::-webkit-scrollbar-track {
+  background-color: var(--cb-hover, #f7f8fa);
+}
+
+.cb-app::-webkit-scrollbar-thumb {
+  background-color: var(--cb-line, #e6e8ec);
+  border-radius: 4px;
+  /* 用 2px 透明边框把拇指收窄，视觉上比轨道细一圈，更精致 */
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  transition: background-color 0.15s ease;
+}
+
+.cb-app::-webkit-scrollbar-thumb:hover {
+  background-color: var(--cb-muted, #7a828e);
+  background-clip: padding-box;
+}
+
+.cb-app::-webkit-scrollbar-thumb:active {
+  background-color: var(--cb-accent, #5b5bd6);
+  background-clip: padding-box;
+}
+
+/* 横向滚动条（超长文本换行一般用不到，兜底） */
+.cb-app::-webkit-scrollbar-corner {
+  background-color: transparent;
+}
+
+/* ---------- 顶部 ---------- */
+.cb-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--cb-line);
+}
+
+.cb-hotkey {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cb-hotkey-label {
+  color: var(--cb-muted);
+  font-size: 12px;
+}
+
+.cb-hotkey-key {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  padding: 3px 10px;
+  border: 1px solid var(--cb-line);
+  border-radius: 5px;
+  background: var(--cb-field);
+  color: var(--cb-text);
+  cursor: pointer;
+}
+
+.cb-hotkey-key:hover {
+  border-color: var(--cb-accent);
+}
+
+.cb-hotkey-key.capturing {
+  border-color: var(--cb-accent);
+  color: var(--cb-accent);
+}
+
+.cb-hotkey-key.invalid {
+  border-color: var(--cb-err);
+  color: var(--cb-err);
+}
+
+.cb-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cb-search {
+  width: 180px;
+  padding: 5px 10px;
+  font-size: 12px;
+  border: 1px solid var(--cb-line);
+  border-radius: 5px;
+  background: var(--cb-field);
+  color: var(--cb-text);
+  outline: none;
+}
+
+.cb-search:focus {
+  border-color: var(--cb-accent);
+}
+
+/* ---------- 标签（全部 / 收藏） ---------- */
+.cb-tabs {
+  display: flex;
+  gap: 4px;
+  margin-top: 10px;
+  border-bottom: 1px solid var(--cb-line);
+}
+
+.cb-tab {
+  position: relative;
+  padding: 6px 12px;
+  font-size: 12px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--cb-muted);
+  cursor: pointer;
+}
+
+.cb-tab:hover {
+  color: var(--cb-text);
+}
+
+.cb-tab.active {
+  color: var(--cb-accent);
+  border-bottom-color: var(--cb-accent);
+  font-weight: 600;
+}
+
+.cb-tab-badge {
+  display: inline-block;
+  margin-left: 5px;
+  padding: 0 5px;
+  min-width: 16px;
+  text-align: center;
+  font-size: 10px;
+  line-height: 15px;
+  border-radius: 8px;
+  background: var(--cb-field);
+  color: var(--cb-muted);
+}
+
+.cb-tab.active .cb-tab-badge {
+  background: var(--cb-accent);
+  color: #fff;
+}
+
+/* ---------- 按钮 ---------- */
+.cb-btn {
+  padding: 5px 12px;
+  font-size: 12px;
+  border: 1px solid var(--cb-line);
+  border-radius: 5px;
+  background: var(--cb-card);
+  color: var(--cb-text);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.cb-btn:hover {
+  background: var(--cb-hover);
+}
+
+.cb-btn.primary {
+  background: var(--cb-accent);
+  border-color: var(--cb-accent);
+  color: #fff;
+}
+
+.cb-btn.primary:hover {
+  opacity: 0.9;
+}
+
+.cb-btn.danger:hover {
+  color: var(--cb-err);
+  border-color: var(--cb-err);
+}
+
+.cb-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.cb-mini {
+  padding: 2px 8px;
+  font-size: 11px;
+  border: 1px solid var(--cb-line);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--cb-muted);
+  cursor: pointer;
+}
+
+.cb-mini:hover {
+  color: var(--cb-err);
+  border-color: var(--cb-err);
+}
+
+/* ---------- 状态 / 统计 ---------- */
+.cb-status {
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-radius: 5px;
+  background: var(--cb-field);
+  color: var(--cb-muted);
+  font-size: 12px;
+}
+
+.cb-status.error {
+  color: var(--cb-err);
+}
+
+.cb-meta {
+  margin: 10px 0 8px;
+  color: var(--cb-muted);
+  font-size: 12px;
+  min-height: 16px;
+}
+
+/* ---------- 列表 ---------- */
+.cb-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cb-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--cb-line);
+  border-radius: 6px;
+  background: var(--cb-card);
+  cursor: pointer;
+}
+
+.cb-item:hover {
+  border-color: var(--cb-accent);
+  background: var(--cb-hover);
+}
+
+.cb-item-kind {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border-radius: 5px;
+  overflow: hidden;
+  background: var(--cb-field);
+  border: 1px solid var(--cb-line);
+  font-size: 11px;
+  color: var(--cb-muted);
+}
+
+.cb-item-kind img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.cb-item-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.cb-item-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.cb-item-sub {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--cb-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cb-item-actions {
+  flex: none;
+  display: flex;
+  gap: 4px;
+}
+
+.cb-item-btn {
+  border: 1px solid var(--cb-line);
+  background: var(--cb-card);
+  color: var(--cb-text);
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.cb-item-btn:hover {
+  border-color: var(--cb-accent);
+  color: var(--cb-accent);
+}
+
+.cb-item-btn.del:hover {
+  border-color: var(--cb-err);
+  color: var(--cb-err);
+}
+
+/* 收藏星标：未收藏时低调，鼠标悬停/已收藏时点亮为琥珀金 */
+.cb-item-btn.fav {
+  font-size: 13px;
+  line-height: 1;
+  padding: 3px 7px;
+  color: var(--cb-muted);
+}
+
+.cb-item-btn.fav:hover {
+  border-color: var(--cb-star);
+  color: var(--cb-star);
+}
+
+.cb-item-btn.fav.on {
+  color: var(--cb-star);
+  border-color: var(--cb-star);
+}
+
+/* ---------- 触底哨兵（加载更多 / 已全部加载） ---------- */
+.cb-sentinel {
+  padding: 12px 0 4px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--cb-muted);
+}
+
+/* ---------- 空态 ---------- */
+.cb-empty {
+  padding: 32px 16px;
+  text-align: center;
+  color: var(--cb-muted);
+}
+
+.cb-empty p {
+  margin: 0 0 6px;
+}
+
+.cb-empty-hint {
+  font-size: 12px;
+}
+
+/* ---------- 大图预览 ---------- */
+.cb-viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(0, 0, 0, 0.72);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 16px;
+}
+
+.cb-viewer img {
+  max-width: 100%;
+  max-height: 78vh;
+  object-fit: contain;
+  border-radius: 4px;
+  background: #fff;
+}
+
+.cb-viewer-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.cb-viewer-name {
+  color: #fff;
+  font-size: 12px;
+  opacity: 0.85;
+  font-family: ui-monospace, Consolas, monospace;
+}

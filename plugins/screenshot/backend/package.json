@@ -1,0 +1,7 @@
+{
+  "name": "com.zhuangjie.screenshot-backend",
+  "private": true,
+  "type": "module",
+  "description": "Backend process for the screenshot plugin. Zero dependencies.",
+  "main": "index.mjs"
+}

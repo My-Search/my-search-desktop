@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>截图</title>
+  <link rel="stylesheet" href="detail.css">
+</head>
+<body>
+  <!--
+    截图插件前台：最近 7 天截图画廊（分页）+ 快捷键设置 + 「开始截图」入口。
+
+    所有 class 都以 `ss-` 前缀，避免与宿主及其它插件的样式撞车；
+    颜色一律走宿主主题变量 `var(--token, 兜底)`，深/浅色自动适配。
+  -->
+  <div id="app" class="ss-app">
+    <!-- 顶部：快捷键 + 操作 -->
+    <div class="ss-header">
+      <div class="ss-hotkey">
+        <span class="ss-hotkey-label">截图快捷键</span>
+        <button id="ss-hotkey-btn" class="ss-hotkey-key" data-act="set-hotkey" title="点击后按下新的组合键">未设置</button>
+        <button id="ss-hotkey-clear" class="ss-mini" data-act="clear-hotkey" title="解绑快捷键（关掉全局截图热键）" hidden>解绑</button>
+      </div>
+      <div class="ss-actions">
+        <button id="ss-shot" class="ss-btn primary" data-act="capture">开始截图</button>
+        <button id="ss-refresh" class="ss-btn" data-act="refresh">刷新</button>
+      </div>
+    </div>
+
+    <!-- 状态行：错误 / 过程消息（成功后清空并整行隐藏） -->
+    <div id="ss-status" class="ss-status" hidden></div>
+
+    <!-- 统计 -->
+    <div id="ss-meta" class="ss-meta"></div>
+
+    <!-- 画廊 -->
+    <div id="ss-grid" class="ss-grid"></div>
+
+    <!-- 空态 -->
+    <div id="ss-empty" class="ss-empty" hidden>
+      <p>最近 7 天还没有截图。</p>
+      <p class="ss-empty-hint">点上方「开始截图」，或按 <b id="ss-empty-key">快捷键</b> 框选屏幕区域。</p>
+    </div>
+
+    <!-- 分页 -->
+    <div id="ss-pager" class="ss-pager" hidden>
+      <button id="ss-prev" class="ss-btn" data-act="prev">上一页</button>
+      <span id="ss-pageinfo" class="ss-pageinfo"></span>
+      <button id="ss-next" class="ss-btn" data-act="next">下一页</button>
+    </div>
+
+    <!-- 大图预览浮层 -->
+    <div id="ss-viewer" class="ss-viewer" hidden>
+      <img id="ss-viewer-img" alt="截图预览">
+      <div class="ss-viewer-bar">
+        <span id="ss-viewer-name" class="ss-viewer-name"></span>
+        <button id="ss-viewer-copy" class="ss-btn primary" data-act="viewer-copy">复制</button>
+        <button id="ss-viewer-saveas" class="ss-btn" data-act="viewer-saveas" title="另存为…（选择保存位置）">另存为…</button>
+        <button id="ss-viewer-close" class="ss-btn" data-act="viewer-close">关闭</button>
+      </div>
+    </div>
+  </div>
+  <script src="index.js"></script>
+</body>
+</html>

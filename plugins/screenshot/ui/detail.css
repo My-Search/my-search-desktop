@@ -1,0 +1,298 @@
+/*
+ * 截图插件前台样式。
+ *
+ * 两条硬约定（见 docs/plugin-market-publish.md「界面与主题」）：
+ *   1. 只用宿主提供的 CSS 变量 `var(--token, 兜底值)`，不写 @media
+ *      (prefers-color-scheme)——宿主会把系统偏好解析成 html.theme-dark 类，
+ *      变量随之变化，插件跟随即可；
+ *   2. 不用 :root / body 选择器——插件 CSS 会被宿主加前缀作用域化
+ *      （#text_show .plugin-view ...），写它们会被映射到容器本身，语义错位。
+ *
+ * 宿主给插件视图加了负 margin 让它填满，因此留白要插件自己补（见 .ss-app 的
+ * padding）。
+ */
+
+.ss-app {
+  --ss-line: var(--line, #e6e8ec);
+  --ss-card: var(--card, #ffffff);
+  --ss-field: var(--field, #f5f6f8);
+  --ss-hover: var(--hover-bg, #f2f4f7);
+  --ss-text: var(--text, #1f2329);
+  --ss-muted: var(--muted, #8a9099);
+  --ss-accent: var(--brand, #2f7fe0);
+  --ss-err: var(--err, #e5484d);
+
+  padding: 10px 16px 16px;
+  color: var(--ss-text);
+  font-size: 13px;
+  line-height: 1.5;
+  max-height: 486px;
+  overflow-y: auto;
+  box-sizing: border-box;
+}
+
+.ss-app * {
+  box-sizing: border-box;
+}
+
+/* 宿主规则可能覆盖 hidden，这里强制生效 */
+.ss-app [hidden] {
+  display: none !important;
+}
+
+/* ---------- 顶部 ---------- */
+.ss-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--ss-line);
+}
+
+.ss-hotkey {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ss-hotkey-label {
+  color: var(--ss-muted);
+  font-size: 12px;
+}
+
+.ss-hotkey-key {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  padding: 3px 10px;
+  border: 1px solid var(--ss-line);
+  border-radius: 5px;
+  background: var(--ss-field);
+  color: var(--ss-text);
+  cursor: pointer;
+}
+
+.ss-hotkey-key:hover {
+  border-color: var(--ss-accent);
+}
+
+.ss-hotkey-key.capturing {
+  border-color: var(--ss-accent);
+  color: var(--ss-accent);
+}
+
+.ss-hotkey-key.invalid {
+  border-color: var(--ss-err);
+  color: var(--ss-err);
+}
+
+.ss-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* ---------- 按钮 ---------- */
+.ss-btn {
+  padding: 5px 12px;
+  font-size: 12px;
+  border: 1px solid var(--ss-line);
+  border-radius: 5px;
+  background: var(--ss-card);
+  color: var(--ss-text);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ss-btn:hover {
+  background: var(--ss-hover);
+}
+
+.ss-btn.primary {
+  background: var(--ss-accent);
+  border-color: var(--ss-accent);
+  color: #fff;
+}
+
+.ss-btn.primary:hover {
+  opacity: 0.9;
+}
+
+.ss-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.ss-mini {
+  padding: 2px 8px;
+  font-size: 11px;
+  border: 1px solid var(--ss-line);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ss-muted);
+  cursor: pointer;
+}
+
+.ss-mini:hover {
+  color: var(--ss-err);
+  border-color: var(--ss-err);
+}
+
+/* ---------- 状态 / 统计 ---------- */
+.ss-status {
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-radius: 5px;
+  background: var(--ss-field);
+  color: var(--ss-muted);
+  font-size: 12px;
+}
+
+.ss-status.error {
+  color: var(--ss-err);
+}
+
+.ss-meta {
+  margin: 10px 0 8px;
+  color: var(--ss-muted);
+  font-size: 12px;
+  min-height: 16px;
+}
+
+/* ---------- 画廊 ---------- */
+.ss-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  gap: 10px;
+}
+
+.ss-card {
+  position: relative;
+  border: 1px solid var(--ss-line);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--ss-field);
+  cursor: pointer;
+}
+
+.ss-card:hover {
+  border-color: var(--ss-accent);
+}
+
+.ss-thumb {
+  display: block;
+  width: 100%;
+  height: 84px;
+  object-fit: cover;
+  background: var(--ss-field);
+}
+
+.ss-thumb-placeholder {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 84px;
+  color: var(--ss-muted);
+  font-size: 11px;
+}
+
+.ss-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 5px 7px;
+  background: var(--ss-card);
+  border-top: 1px solid var(--ss-line);
+}
+
+.ss-card-time {
+  font-size: 11px;
+  color: var(--ss-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ss-card-del {
+  flex: none;
+  border: none;
+  background: transparent;
+  color: var(--ss-muted);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 3px;
+}
+
+.ss-card-del:hover {
+  color: var(--ss-err);
+  background: var(--ss-hover);
+}
+
+/* ---------- 空态 ---------- */
+.ss-empty {
+  padding: 32px 16px;
+  text-align: center;
+  color: var(--ss-muted);
+}
+
+.ss-empty p {
+  margin: 0 0 6px;
+}
+
+.ss-empty-hint {
+  font-size: 12px;
+}
+
+/* ---------- 分页 ---------- */
+.ss-pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--ss-line);
+}
+
+.ss-pageinfo {
+  font-size: 12px;
+  color: var(--ss-muted);
+}
+
+/* ---------- 大图预览 ---------- */
+.ss-viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(0, 0, 0, 0.72);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 16px;
+}
+
+.ss-viewer img {
+  max-width: 100%;
+  max-height: 78vh;
+  object-fit: contain;
+  border-radius: 4px;
+  background: #fff;
+}
+
+.ss-viewer-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ss-viewer-name {
+  color: #fff;
+  font-size: 12px;
+  opacity: 0.85;
+  font-family: ui-monospace, Consolas, monospace;
+}

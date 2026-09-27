@@ -1,0 +1,378 @@
+/* 待办清单 UI。
+ *
+ * 主题契约（与宿主 style.css「插件共享主题变量」节一致）：
+ *   所有颜色一律走 `var(宿主 token, 兜底值)`，随宿主浅/深**同步**生效。
+ *   兜底值取浅色外观，保证脱离宿主单独打开时不变样。
+ *
+ * 两条硬约束（与 market 插件同源，都踩过坑，勿回退）：
+ *
+ *  1) **不要用 `:root` / `html.theme-dark` / `body.theme-*` 这类宿主级选择器**：
+ *     宿主用 scopeCss 作用域化插件 CSS，它们会被改写成
+ *     `.plugin-view .ms-plugin-session html.theme-dark …` —— 插件容器内并没有
+ *     html 元素，规则永远匹配不到（死代码）。
+ *
+ *  2) **装饰色不要靠 JS 打类来切换**：JS 执行前 HTML 已按浅色渲染一帧，
+ *     深色用户会看到「浅 → 深」闪一下（FOUC）。用宿主变量 + color-mix 组合，
+ *     深浅两套在 CSS 解析时即已就位。
+ *
+ * 注意：本容器是搜索详情页里的一段 DOM（不是 iframe），布局高度由宿主按内容
+ * 自适应；不要给 #app 写死 100vh，否则会在详情页里撑出一屏空白。
+ */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+#app.todo {
+  --todo-accent: #2868f5;
+  --todo-accent-soft: color-mix(in srgb, var(--todo-accent) 12%, var(--surface, #f5f6f8));
+  --todo-accent-line: color-mix(in srgb, var(--todo-accent) 30%, var(--line, #e6e8ec));
+  --todo-danger: #d7263d;
+  --todo-danger-soft: color-mix(in srgb, var(--todo-danger) 12%, var(--surface, #f5f6f8));
+  --todo-high: #d7263d;
+  --todo-mid: #d98600;
+  --todo-low: #2f9e6b;
+
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  /* 四边留白：插件界面紧贴详情页边缘会显得局促，且卡片描边会被裁切。
+     上下也留出来，压在底部的圆角与描边才不会顶到边界。 */
+  padding: 14px 16px 18px;
+  color: var(--text, #172b4d);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+/* ===== 头部 ===== */
+.todo-header { display: flex; flex-direction: column; gap: 2px; }
+
+.todo-title-row { display: flex; align-items: center; gap: 8px; }
+
+.todo-title {
+  margin: 0;
+  flex: 1;
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: 0.2px;
+}
+
+/* 统计常驻（0 也显示），只在数字上做轻重区分 */
+.todo-stats {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text-secondary, #6b7a90);
+}
+.todo-stats b { color: var(--text, #172b4d); font-weight: 650; }
+.todo-stats .todo-stat-due { color: var(--todo-accent); font-weight: 650; }
+.todo-stats .todo-stat-over { color: var(--todo-danger); font-weight: 650; }
+
+/* ===== 按钮 ===== */
+.todo-btn {
+  appearance: none;
+  border: 1px solid var(--line, #e6e8ec);
+  background: var(--card, #ffffff);
+  color: var(--text, #172b4d);
+  border-radius: 7px;
+  padding: 5px 11px;
+  font-size: 12.5px;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color .12s ease, border-color .12s ease, opacity .12s ease;
+}
+.todo-btn:hover { border-color: var(--todo-accent-line); background: var(--todo-accent-soft); }
+.todo-btn:disabled { opacity: .5; cursor: not-allowed; }
+.todo-btn:disabled:hover { border-color: var(--line, #e6e8ec); background: var(--card, #ffffff); }
+
+.todo-btn-primary {
+  background: var(--todo-accent);
+  border-color: var(--todo-accent);
+  color: #fff;
+  font-weight: 600;
+}
+.todo-btn-primary:hover { background: var(--todo-accent); border-color: var(--todo-accent); opacity: .9; }
+
+.todo-btn-ghost { background: transparent; }
+.todo-btn-danger { color: var(--todo-danger); }
+.todo-btn-danger:hover { background: var(--todo-danger-soft); border-color: color-mix(in srgb, var(--todo-danger) 40%, var(--line, #e6e8ec)); }
+
+/* ===== 新增区 ===== */
+.todo-composer { display: flex; flex-direction: column; gap: 6px; }
+
+.todo-composer-main { display: flex; gap: 8px; align-items: stretch; }
+
+/* 紧急等级选择器：与输入框同高，放在最前 */
+.todo-level {
+  flex: none;
+  border: 1px solid var(--line, #e6e8ec);
+  background: var(--card, #ffffff);
+  color: var(--text, #172b4d);
+  border-radius: 8px;
+  padding: 0 8px;
+  font-size: 13px;
+  font-family: inherit;
+  height: auto;
+  min-height: 34px;
+  cursor: pointer;
+  transition: border-color .12s ease, box-shadow .12s ease;
+}
+.todo-level:hover { border-color: var(--todo-accent-line); }
+.todo-level:focus {
+  outline: none;
+  border-color: var(--todo-accent);
+  box-shadow: 0 0 0 3px var(--todo-accent-soft);
+}
+
+.todo-input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--line, #e6e8ec);
+  background: var(--card, #ffffff);
+  color: var(--text, #172b4d);
+  border-radius: 8px;
+  padding: 8px 11px;
+  font-size: 13.5px;
+  font-family: inherit;
+  transition: border-color .12s ease, box-shadow .12s ease;
+}
+.todo-input::placeholder { color: var(--text-secondary, #6b7a90); opacity: .8; }
+.todo-input:focus {
+  outline: none;
+  border-color: var(--todo-accent);
+  box-shadow: 0 0 0 3px var(--todo-accent-soft);
+}
+
+/* 输入提示：仅在解析出 #标签 / !优先级 / 日期 时出现 */
+.todo-hint { margin: 0; font-size: 12px; color: var(--text-secondary, #6b7a90); }
+.todo-hint .todo-chip-inline {
+  display: inline-block;
+  margin: 0 4px 0 0;
+  padding: 1px 6px;
+  border-radius: 5px;
+  font-size: 11.5px;
+  background: var(--todo-accent-soft);
+  color: var(--todo-accent);
+  border: 1px solid var(--todo-accent-line);
+}
+.todo-hint-error { color: var(--todo-danger); }
+
+/* ===== 筛选页签 ===== */
+.todo-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--line, #e6e8ec);
+  padding-bottom: 6px;
+}
+
+.todo-tab {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary, #6b7a90);
+  font-family: inherit;
+  font-size: 12.5px;
+  padding: 4px 9px;
+  border-radius: 6px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.todo-tab:hover { color: var(--text, #172b4d); background: var(--todo-accent-soft); }
+.todo-tab.active {
+  color: var(--todo-accent);
+  background: var(--todo-accent-soft);
+  font-weight: 650;
+}
+
+.todo-tab-num {
+  font-size: 11px;
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  text-align: center;
+  background: color-mix(in srgb, var(--text, #172b4d) 8%, transparent);
+}
+.todo-tab.active .todo-tab-num { background: color-mix(in srgb, var(--todo-accent) 22%, transparent); }
+
+.todo-tabs-gap { flex: 1; }
+
+/* ===== 排序条 ===== */
+.todo-sortbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.todo-sortbar-label { color: var(--text-secondary, #6b7a90); }
+
+.todo-sort-btn {
+  appearance: none;
+  border: 1px solid var(--line, #e6e8ec);
+  background: var(--card, #ffffff);
+  color: var(--text-secondary, #6b7a90);
+  font-family: inherit;
+  font-size: 12px;
+  padding: 3px 9px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color .12s ease, border-color .12s ease, color .12s ease;
+}
+.todo-sort-btn:hover { border-color: var(--todo-accent-line); color: var(--text, #172b4d); }
+.todo-sort-btn.active {
+  color: var(--todo-accent);
+  border-color: var(--todo-accent-line);
+  background: var(--todo-accent-soft);
+  font-weight: 650;
+}
+
+/* 方向切换：方形小按钮，只放箭头 */
+.todo-sort-dir {
+  appearance: none;
+  border: 1px solid var(--line, #e6e8ec);
+  background: var(--card, #ffffff);
+  color: var(--text-secondary, #6b7a90);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.todo-sort-dir:hover { border-color: var(--todo-accent-line); color: var(--text, #172b4d); }
+
+/* ===== 状态行（异常/过程）===== */
+.todo-status {
+  margin: 0;
+  font-size: 12.5px;
+  padding: 6px 9px;
+  border-radius: 7px;
+  background: var(--todo-accent-soft);
+  color: var(--text, #172b4d);
+}
+.todo-status.todo-status-error { background: var(--todo-danger-soft); color: var(--todo-danger); }
+
+/* ===== 列表 ===== */
+.todo-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+
+.todo-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--line, #e6e8ec);
+  background: var(--card, #ffffff);
+  border-radius: 9px;
+  transition: border-color .12s ease, background-color .12s ease;
+}
+.todo-item:hover { border-color: var(--todo-accent-line); }
+
+/* 左缘优先级色条：语义色，不随主题变（同徽章做法） */
+.todo-item[data-priority="high"] { box-shadow: inset 3px 0 0 var(--todo-high); }
+.todo-item[data-priority="mid"]  { box-shadow: inset 3px 0 0 var(--todo-mid); }
+.todo-item[data-priority="low"]  { box-shadow: inset 3px 0 0 var(--todo-low); }
+
+.todo-item.todo-item-done { background: color-mix(in srgb, var(--text, #172b4d) 3%, var(--card, #ffffff)); }
+.todo-item.todo-item-overdue { border-color: color-mix(in srgb, var(--todo-danger) 40%, var(--line, #e6e8ec)); }
+
+.todo-check {
+  flex: none;
+  width: 17px;
+  height: 17px;
+  margin-top: 2px;
+  accent-color: var(--todo-accent);
+  cursor: pointer;
+}
+
+.todo-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+
+.todo-text {
+  word-break: break-word;
+  cursor: default;
+  border-radius: 4px;
+}
+.todo-item-done .todo-text { text-decoration: line-through; color: var(--text-secondary, #6b7a90); }
+
+/* 行内编辑态：整行换成输入框 + 保存/取消 */
+.todo-edit-row { display: flex; gap: 6px; align-items: center; }
+.todo-edit-input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--todo-accent);
+  background: var(--card, #ffffff);
+  color: var(--text, #172b4d);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 13.5px;
+  font-family: inherit;
+}
+.todo-edit-input:focus { outline: none; box-shadow: 0 0 0 3px var(--todo-accent-soft); }
+
+/* 元信息行：优先级 / 标签 / 截止日期 */
+.todo-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 11.5px; }
+
+.todo-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--text, #172b4d) 6%, transparent);
+  color: var(--text-secondary, #6b7a90);
+  white-space: nowrap;
+}
+.todo-chip-prio-high { color: var(--todo-high); background: color-mix(in srgb, var(--todo-high) 12%, transparent); font-weight: 600; }
+.todo-chip-prio-mid  { color: var(--todo-mid);  background: color-mix(in srgb, var(--todo-mid) 14%, transparent); font-weight: 600; }
+.todo-chip-prio-low  { color: var(--todo-low);  background: color-mix(in srgb, var(--todo-low) 12%, transparent); font-weight: 600; }
+.todo-chip-tag { color: var(--todo-accent); background: var(--todo-accent-soft); }
+.todo-chip-due-over { color: var(--todo-danger); background: var(--todo-danger-soft); font-weight: 600; }
+
+.todo-actions { flex: none; display: flex; gap: 4px; align-items: center; }
+
+.todo-icon-btn {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-secondary, #6b7a90);
+  border-radius: 6px;
+  width: 26px;
+  height: 26px;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.todo-icon-btn:hover { color: var(--text, #172b4d); background: color-mix(in srgb, var(--text, #172b4d) 7%, transparent); }
+.todo-icon-btn-danger:hover { color: var(--todo-danger); background: var(--todo-danger-soft); }
+
+/* ===== 空状态 ===== */
+.todo-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 26px 12px;
+  color: var(--text-secondary, #6b7a90);
+  text-align: center;
+}
+.todo-empty-icon { font-size: 26px; line-height: 1; opacity: .85; }
+.todo-empty-text { margin: 0; font-size: 13px; }
+
+/* ===== 底部 ===== */
+.todo-foot {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11.5px;
+  color: var(--text-secondary, #6b7a90);
+  border-top: 1px solid var(--line, #e6e8ec);
+  padding-top: 7px;
+}
