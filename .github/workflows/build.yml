@@ -1,10 +1,20 @@
 name: 三平台构建
 
-# 触发方式：
-#   - push 到 master：三平台各构建一次安装包，作为 Actions 产物上传（不发 Release，
-#     避免覆盖已发布版本的同名 Release 资产）；
-#   - push v* tag：三平台构建并创建/更新对应 Release（正式发版走这条）；
-#   - workflow_dispatch：手动触发，按当前 ref 走上面两条中匹配的那条。
+# 结构：4 个平台 job 全部并行构建 → 1 个独立的 release job 统一发版。
+#
+# 为什么拆出 release job（而不是像以前那样让每个 job 各调 tauri-action 发版）：
+# 旧写法下 4 个 job 都往同一个 tag 建 Release / 传资产，同时起跑会互相竞态
+# （都发现「该 tag 还没有 Release」→ 一起 POST 创建 → 一个成功其余 422，
+# 部分安装包被静默丢弃），所以当时被迫把 4 个 job 串成一条链（aarch64 →
+# x86_64 → [linux, windows]），墙钟约 18.5 分钟。
+# 现在构建与发版解耦：构建永远并行、只上传 artifact；发版由一个 job 在全部
+# 构建完成后串行执行，既快又无竞态。
+#
+# 触发：
+#   - push master：4 平台并行构建，成功后刷新正式 Release
+#     （tag 取 package.json 的版本号，即 v<version>）；
+#   - push v* tag：同上，但 tag 用推送的 tag 名（正式发版语义）；
+#   - workflow_dispatch：按当前 ref 走上面两条中匹配的那条。
 #
 # 注意：插件（.mspp）的打包与市场索引构建**不在本仓库**进行，
 # 见市场仓库 My-Search/my-search-plugin-market 的「构建插件市场索引」工作流。
@@ -17,109 +27,48 @@ on:
 permissions:
   contents: write
 
+# 同一 ref 的并发构建只保留最新一次：否则两次 master 推送若重叠，
+# 两个 release job 会同时删/传同一个 Release 的资产而互相踩踏。
+# tag 构建不取消（发版只应向前，不能被后来的同 tag 构建打断）。
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
 jobs:
-  # macOS aarch64 build — runs first to create the release
-  build-macos-aarch64:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: 安装 Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin
-
-      - name: 安装 Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: 安装前端依赖
-        run: npm install
-
-      - name: 构建并发布 Release（tag 推送）
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tagName: v__VERSION__
-          releaseName: "我的搜索 v__VERSION__"
-          releaseBody: "我的搜索桌面版 - 订阅式搜索"
-          releaseDraft: false
-          prerelease: false
-          args: --target aarch64-apple-darwin
-
-      - name: 构建安装包（分支推送，仅产出产物）
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
-        run: npx tauri build --target aarch64-apple-darwin
-
-      - name: 上传安装包
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: my-search-macos-aarch64
-          path: src-tauri/target/aarch64-apple-darwin/release/bundle/**
-
-  # macOS x86_64 build — runs after aarch64 to avoid release race
-  build-macos-x86_64:
-    needs: [build-macos-aarch64]
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: 安装 Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-apple-darwin
-
-      - name: 安装 Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: 安装前端依赖
-        run: npm install
-
-      - name: 构建并发布 Release（tag 推送）
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tagName: v__VERSION__
-          releaseName: "我的搜索 v__VERSION__"
-          releaseBody: "我的搜索桌面版 - 订阅式搜索"
-          releaseDraft: false
-          prerelease: false
-          args: --target x86_64-apple-darwin
-
-      - name: 构建安装包（分支推送，仅产出产物）
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
-        run: npx tauri build --target x86_64-apple-darwin
-
-      - name: 上传安装包
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: my-search-macos-x86_64
-          path: src-tauri/target/x86_64-apple-darwin/release/bundle/**
-
-  # Linux & Windows builds — run after macOS builds are done to avoid
-  # tauri-action release-upload race (both macOS and this job create/upload
-  # to the same tag; without serialization some artifacts get silently dropped).
+  # 四个平台并行构建，各自只上传安装包（不再整目录上传 bundle/：
+  # bundle/ 里还有解包出来的 .app / AppDir / deb 数据目录，几百个文件无意义）。
   build:
-    needs: [build-macos-x86_64]
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: "ubuntu-22.04"
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            args: "--target aarch64-apple-darwin"
+            artifact: my-search-macos-aarch64
+            bundles: |
+              src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+          - platform: macos-latest
+            target: x86_64-apple-darwin
+            args: "--target x86_64-apple-darwin"
+            artifact: my-search-macos-x86_64
+            bundles: |
+              src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+          - platform: ubuntu-22.04
+            target: ""
             args: ""
             artifact: my-search-linux
-          - platform: "windows-latest"
+            bundles: |
+              src-tauri/target/release/bundle/appimage/*.AppImage
+              src-tauri/target/release/bundle/deb/*.deb
+              src-tauri/target/release/bundle/rpm/*.rpm
+          - platform: windows-latest
+            target: ""
             args: ""
             artifact: my-search-windows
+            bundles: |
+              src-tauri/target/release/bundle/msi/*.msi
+              src-tauri/target/release/bundle/nsis/*.exe
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -131,7 +80,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libxdo-dev
 
-      - name: 安装 Rust
+      # 指定 target（macOS 双架构）：两个 job 分别装自己的 target。
+      - name: 安装 Rust（指定 target）
+        if: matrix.target != ''
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # 不指定 target（Linux / Windows）：走本机默认 target，
+      # 产物落在 target/release 而非 target/<triple>/release。
+      - name: 安装 Rust（默认 target）
+        if: matrix.target == ''
         uses: dtolnay/rust-toolchain@stable
 
       - name: 安装 Node
@@ -142,26 +101,83 @@ jobs:
       - name: 安装前端依赖
         run: npm install
 
-      - name: 构建并发布 Release（tag 推送）
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tagName: v__VERSION__
-          releaseName: "我的搜索 v__VERSION__"
-          releaseBody: "我的搜索桌面版 - 订阅式搜索"
-          releaseDraft: false
-          prerelease: false
-          args: ${{ matrix.args }}
-
-      - name: 构建安装包（分支推送，仅产出产物）
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+      - name: 构建安装包
         run: npx tauri build ${{ matrix.args }}
 
       - name: 上传安装包
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: src-tauri/target/release/bundle/**
+          path: ${{ matrix.bundles }}
+          if-no-files-found: error
+
+  # 全部构建成功后统一发版（唯一接触 Release 的 job → 无竞态）。
+  release:
+    needs: [build]
+    runs-on: ubuntu-latest
+    # 顶层 concurrency 按 ref 分组，但「master 推送」与「tag 推送」可能指向
+    # 同一个 Release tag（如 master 刷新 v7.9.15、同时有人推 v7.9.15），
+    # 两者 ref 不同 → 顶层分组拦不住 → 仍可能同时改同一个 Release。
+    # 这里再加一层全工作流共用的锁，保证任何时刻只有一个 release job 在写。
+    # 不取消（cancel-in-progress: false），排队执行即可。
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 计算版本与 tag
+        id: meta
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            TAG="v${VERSION}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "发布 tag = ${TAG}（版本 ${VERSION}）"
+
+      - name: 下载全部平台安装包
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: 汇总安装包
+        run: |
+          mkdir -p release-files
+          # 只收「安装包」本体；构建产物里的解包目录（.app / AppDir / deb 数据目录）
+          # 不上传，故这里也不会有它们。
+          # 注：本应用未配置 tauri updater（bundle.createUpdaterArtifacts 默认 false），
+          # 故没有 *.app.tar.gz / *.nsis.zip 这类更新包，无需纳入。
+          find artifacts -type f \( \
+            -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \
+            -o -name '*.msi' -o -name '*-setup.exe' \) \
+            -exec cp -v {} release-files/ \;
+          echo "---- 待发布文件 ----"
+          ls -la release-files/
+          # 一个安装包都没有说明上游上传出了问题，宁可失败也不要发空 Release
+          test -n "$(ls -A release-files)"
+
+      - name: 创建或刷新 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.meta.outputs.tag }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # 已存在（master 复用已发版本号，或 tag 重跑）：
+            # 先上传本次产物（--clobber 覆盖同名），再删掉本次没产出的旧资产，
+            # 保证 Release 只反映本次构建，且过程中不会出现「资产被清空」的窗口。
+            gh release upload "$TAG" release-files/* --clobber
+            for name in $(gh release view "$TAG" --json assets -q '.assets[].name'); do
+              [ -f "release-files/$name" ] || gh release delete-asset "$TAG" "$name" --yes || true
+            done
+            gh release edit "$TAG" --title "我的搜索 $TAG" --latest
+          else
+            gh release create "$TAG" release-files/* \
+              --title "我的搜索 $TAG" \
+              --notes "我的搜索桌面版 - 订阅式搜索" \
+              --latest
+          fi
