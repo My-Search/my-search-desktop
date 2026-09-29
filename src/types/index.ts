@@ -109,6 +109,13 @@ export interface UpdateInfo {
   current_version: string;
   download_url: string;
   release_url: string;
+  /**
+   * 检查是否失败（网络异常 / 数据源全部不可用）。
+   *
+   * 与 `has_update=false` 搭配表示「没查到」，**不是**「已是最新」——
+   * UI 必须区分二者，否则会把网络失败谎报成「当前已经是最新版本」。
+   */
+  check_failed?: boolean;
 }
 
 /** 更新下载进度事件载荷 */

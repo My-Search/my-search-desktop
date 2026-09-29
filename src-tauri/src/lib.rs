@@ -1864,6 +1864,12 @@ struct UpdateInfo {
     download_url: String,
     /// 发布页地址
     release_url: String,
+    /// 检查是否失败（网络异常 / 三个数据源全部不可用时为 true）。
+    ///
+    /// 必须与「确实已是最新」区分：`has_update=false, check_failed=true` 表示
+    /// 「没查到」，前端要提示失败而不是谎报「已是最新」。
+    #[serde(default)]
+    check_failed: bool,
 }
 
 /// 下载进度（实时推送到前端）
@@ -1881,46 +1887,75 @@ struct DownloadProgress {
     error: Option<String>,
 }
 
+/// 一个 Release 资产（文件名 + 下载直链）。
+#[derive(Debug, Clone, PartialEq)]
+struct ReleaseAsset {
+    name: String,
+    url: String,
+}
+
+/// 版本数据源解析结果：最新版本号 + 发布页 + （可能为空的）资产清单。
+type ReleaseInfo = (String, String, Vec<ReleaseAsset>);
+
 /// 检查 GitHub Releases 是否有新版本。
 ///
-/// 调用 GitHub API `GET /repos/{owner}/{repo}/releases/latest`，
-/// 解析最新 tag 与当前版本比较，并匹配当前平台的下载资产。
+/// **多源回退**（任一源成功即返回，全部失败则如实返回 `check_failed=true`）：
+///   1. GitHub API `GET /repos/{owner}/{repo}/releases/latest`
+///      —— 唯一带 `assets` 的源，但未认证限额只有 60 次/小时/IP，且国内常被重置；
+///   2. `https://github.com/{owner}/{repo}/releases.atom`
+///      —— 无速率限制的 Atom 订阅，取首个 entry 即最新正式版；
+///   3. jsDelivr data API `GET https://data.jsdelivr.com/v1/packages/gh/{owner}/{repo}/resolved`
+///      —— 国内可达的 CDN（与本项目订阅链路回退策略一致）。
+///
+/// 之所以要回退：旧实现只看源 1，一旦它被限流/超时/被墙就静默返回
+/// `has_update=false`，前端因此谎报「已是最新」——这正是「GitHub 已发 v7.9.17、
+/// 客户端却检测为最新」的根因。现在失败会显式上报（`check_failed`），
+/// 且只要 Atom / jsDelivr 任一可达仍能发现新版本。
 #[tauri::command]
 async fn check_update() -> Result<UpdateInfo, String> {
     let current = env!("CARGO_PKG_VERSION").to_string();
     let owner = "My-Search";
     let repo = "my-search-desktop";
-    let api_url = format!("https://api.github.com/repos/{owner}/{repo}/releases/latest");
+    let mut errors: Vec<String> = Vec::new();
 
-    let client = build_client(10, UA)?;
-    let resp = client
-        .get(&api_url)
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .await
-        .map_err(|e| format!("请求 GitHub API 失败: {e}"))?;
+    // 依次尝试三个数据源，任一成功即停止。
+    let mut found: Option<ReleaseInfo> = None;
 
-    if !resp.status().is_success() {
-        // API 限流 / 无 Release 时静默返回无更新
+    // 1) GitHub API（唯一带 assets 的源，优先）
+    match fetch_api_release(owner, repo).await {
+        Ok(info) => found = Some(info),
+        Err(e) => errors.push(format!("GitHub API: {e}")),
+    }
+
+    // 2) releases.atom（无速率限制）
+    if found.is_none() {
+        match fetch_atom_release(owner, repo).await {
+            Ok(info) => found = Some(info),
+            Err(e) => errors.push(format!("Atom: {e}")),
+        }
+    }
+
+    // 3) jsDelivr data API（国内 CDN）
+    if found.is_none() {
+        match fetch_jsdelivr_release(owner, repo).await {
+            Ok(info) => found = Some(info),
+            Err(e) => errors.push(format!("jsDelivr: {e}")),
+        }
+    }
+
+    let Some((latest, release_url, mut assets)) = found else {
+        // 三个源全部失败：如实上报「检查失败」，绝不谎报「已是最新」。
+        eprintln!("[check_update] 所有数据源均失败: {}", errors.join("；"));
         return Ok(UpdateInfo {
             has_update: false,
             latest_version: String::new(),
-            current_version: current.clone(),
+            current_version: current,
             download_url: String::new(),
             release_url: String::new(),
+            check_failed: true,
         });
-    }
+    };
 
-    let json: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("解析响应 JSON 失败: {e}"))?;
-
-    let tag_name = json["tag_name"].as_str().unwrap_or("").trim_start_matches('v');
-    let release_url = json["html_url"].as_str().unwrap_or("").to_string();
-
-    // 比较版本号（去掉前置 v）
-    let latest = tag_name.to_string();
     let has_update = compare_versions(&latest, &current) > 0;
 
     if !has_update {
@@ -1930,31 +1965,21 @@ async fn check_update() -> Result<UpdateInfo, String> {
             current_version: current,
             download_url: String::new(),
             release_url,
+            check_failed: false,
         });
     }
 
-    // 匹配当前平台的下载资产
-    let target_ext = if cfg!(target_os = "windows") {
-        ".msi"
-    } else if cfg!(target_os = "macos") {
-        ".dmg"
-    } else {
-        ".AppImage"
-    };
+    // 走 Atom / jsDelivr 时拿不到资产清单，按当前 tag 补拉一次 expanded_assets 页面。
+    if assets.is_empty() {
+        match fetch_assets_from_html(owner, repo, &latest).await {
+            Ok(a) => assets = a,
+            Err(e) => errors.push(format!("资产清单: {e}")),
+        }
+    }
 
-    let download_url = json["assets"]
-        .as_array()
-        .and_then(|assets| {
-            assets.iter().find_map(|asset| {
-                let name = asset["name"].as_str()?;
-                if name.ends_with(target_ext) {
-                    asset["browser_download_url"].as_str().map(|s| s.to_string())
-                } else {
-                    None
-                }
-            })
-        })
-        .unwrap_or_default();
+    // 按平台 + 架构挑选安装包（修正旧实现「取第一个 .dmg，macOS 上可能给 x64
+    // 机器下发 aarch64 包」的问题）。
+    let download_url = pick_asset(&assets, platform_ext(), arch_aliases()).unwrap_or_default();
 
     Ok(UpdateInfo {
         has_update: true,
@@ -1962,7 +1987,209 @@ async fn check_update() -> Result<UpdateInfo, String> {
         current_version: current,
         download_url,
         release_url,
+        check_failed: false,
     })
+}
+
+/// 拉取 GitHub API 的 latest release（唯一带 assets 的源）。
+async fn fetch_api_release(owner: &str, repo: &str) -> Result<ReleaseInfo, String> {
+    let api_url = format!("https://api.github.com/repos/{owner}/{repo}/releases/latest");
+    let client = build_client(10, UA)?;
+    let resp = client
+        .get(&api_url)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        // 限流(403) / 无 Release(404) 等：交给上层继续尝试其它源。
+        return Err(format!("HTTP {}", resp.status().as_u16()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    parse_api_release(&json).ok_or_else(|| "响应缺少 tag_name".to_string())
+}
+
+/// 拉取 releases.atom（无速率限制），取首个 entry。
+async fn fetch_atom_release(owner: &str, repo: &str) -> Result<ReleaseInfo, String> {
+    let url = format!("https://github.com/{owner}/{repo}/releases.atom");
+    let client = build_client(10, UA)?;
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status().as_u16()));
+    }
+    let text = resp.text().await.map_err(|e| e.to_string())?;
+    let (tag, release_url) =
+        parse_atom_latest(&text).ok_or_else(|| "Atom 中没有可解析的 entry".to_string())?;
+    Ok((tag, release_url, Vec::new()))
+}
+
+/// 拉取 jsDelivr data API 的 resolved 版本（国内可达）。
+async fn fetch_jsdelivr_release(owner: &str, repo: &str) -> Result<ReleaseInfo, String> {
+    let url = format!("https://data.jsdelivr.com/v1/packages/gh/{owner}/{repo}/resolved");
+    let client = build_client(10, UA)?;
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status().as_u16()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let version = parse_jsdelivr_version(&json).ok_or_else(|| "响应缺少 version".to_string())?;
+    let release_url = format!("https://github.com/{owner}/{repo}/releases/tag/v{version}");
+    Ok((version, release_url, Vec::new()))
+}
+
+/// 从 `releases/expanded_assets/{tag}` 页面解析资产直链（Atom/jsDelivr 源
+/// 拿不到 assets 时的补充）。
+async fn fetch_assets_from_html(owner: &str, repo: &str, version: &str) -> Result<Vec<ReleaseAsset>, String> {
+    let tag = format!("v{version}");
+    let url = format!("https://github.com/{owner}/{repo}/releases/expanded_assets/{tag}");
+    let client = build_client(10, UA)?;
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status().as_u16()));
+    }
+    let html = resp.text().await.map_err(|e| e.to_string())?;
+    Ok(parse_assets_from_html(&html))
+}
+
+/// 解析 GitHub API latest release JSON → (版本号, 发布页, 资产清单)。
+fn parse_api_release(json: &serde_json::Value) -> Option<ReleaseInfo> {
+    let tag = json["tag_name"].as_str()?.trim_start_matches('v').to_string();
+    if tag.is_empty() {
+        return None;
+    }
+    let release_url = json["html_url"].as_str().unwrap_or("").to_string();
+    let assets = json["assets"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|a| {
+                    let name = a["name"].as_str()?.to_string();
+                    let url = a["browser_download_url"].as_str()?.to_string();
+                    Some(ReleaseAsset { name, url })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Some((tag, release_url, assets))
+}
+
+/// 解析 releases.atom，取首个 `<entry>` 的 tag 与发布页链接。
+///
+/// entry 形如：
+/// ```xml
+/// <entry>
+///   <id>tag:github.com,2008:Repository/…/v7.9.17</id>
+///   <link rel="alternate" type="text/html"
+///         href="https://github.com/{owner}/{repo}/releases/tag/v7.9.17"/>
+/// </entry>
+/// ```
+fn parse_atom_latest(xml: &str) -> Option<(String, String)> {
+    let start = xml.find("<entry>")?;
+    let rest = &xml[start..];
+    let end = rest.find("</entry>").unwrap_or(rest.len());
+    let entry = &rest[..end];
+    let href = extract_href(entry)?;
+    let tag = href.rsplit("/tag/").next()?.trim_end_matches('/').to_string();
+    if tag.is_empty() {
+        return None;
+    }
+    Some((tag.trim_start_matches('v').to_string(), href))
+}
+
+/// 解析 jsDelivr resolved 响应 → 版本号。
+fn parse_jsdelivr_version(json: &serde_json::Value) -> Option<String> {
+    let v = json["version"].as_str()?.trim().trim_start_matches('v');
+    if v.is_empty() {
+        None
+    } else {
+        Some(v.to_string())
+    }
+}
+
+/// 从 expanded_assets HTML 中抓取所有 `/releases/download/…` 资产直链。
+fn parse_assets_from_html(html: &str) -> Vec<ReleaseAsset> {
+    let mut out: Vec<ReleaseAsset> = Vec::new();
+    let mut search_from = 0usize;
+    while let Some(rel) = html[search_from..].find("href=\"") {
+        let start = search_from + rel + "href=\"".len();
+        let Some(quote_rel) = html[start..].find('"') else {
+            break;
+        };
+        let target = &html[start..start + quote_rel];
+        search_from = start + quote_rel + 1;
+        // 只收 releases/download 资产；页面里的 tag 链接等一律跳过。
+        if !target.contains("/releases/download/") {
+            continue;
+        }
+        // href 通常是站内绝对路径 `/owner/repo/releases/download/...`，
+        // 少数情况下可能是完整 URL；统一拼成可下载的绝对地址。
+        let url = if target.starts_with("http://") || target.starts_with("https://") {
+            target.to_string()
+        } else if target.starts_with('/') {
+            format!("https://github.com{target}")
+        } else {
+            continue;
+        };
+        let name = target.rsplit('/').next().unwrap_or("");
+        if name.is_empty() {
+            continue;
+        }
+        out.push(ReleaseAsset {
+            name: name.to_string(),
+            url,
+        });
+    }
+    out
+}
+
+/// 取字符串里第一个 `href="…"` 的值。
+fn extract_href(s: &str) -> Option<String> {
+    let start = s.find("href=\"")? + "href=\"".len();
+    let end = s[start..].find('"')? + start;
+    Some(s[start..end].to_string())
+}
+
+/// 当前平台安装包后缀。
+fn platform_ext() -> &'static str {
+    if cfg!(target_os = "windows") {
+        ".msi"
+    } else if cfg!(target_os = "macos") {
+        ".dmg"
+    } else {
+        ".AppImage"
+    }
+}
+
+/// 当前架构在资产名中的别名（各平台命名不统一）。
+fn arch_aliases() -> &'static [&'static str] {
+    if cfg!(target_arch = "x86_64") {
+        &["x64", "x86_64", "amd64"]
+    } else if cfg!(target_arch = "aarch64") {
+        &["aarch64", "arm64"]
+    } else {
+        &[]
+    }
+}
+
+/// 按「平台后缀 + 架构别名」挑选安装包，返回下载直链。
+///
+/// 两级匹配：先要求后缀与架构都命中；架构匹配不到时退回「只看后缀」，
+/// 以兼容未标注架构（或别名未覆盖）的资产。全都不中返回 `None`。
+fn pick_asset(assets: &[ReleaseAsset], ext: &str, arch: &[&str]) -> Option<String> {
+    let suffix_hits: Vec<&ReleaseAsset> = assets
+        .iter()
+        .filter(|a| a.name.to_lowercase().ends_with(&ext.to_lowercase()))
+        .collect();
+
+    // 1) 后缀 + 架构
+    for a in &suffix_hits {
+        let lower = a.name.to_lowercase();
+        if arch.iter().any(|alias| lower.contains(&alias.to_lowercase())) {
+            return Some(a.url.clone());
+        }
+    }
+    // 2) 仅后缀（架构未标注时的兜底）
+    suffix_hits.first().map(|a| a.url.clone())
 }
 
 /// 语义化版本比较：a > b 返回正数，a == b 返回 0，a < b 返回负数。
@@ -3721,4 +3948,116 @@ mod tests {
         assert_eq!((owner, repo, branch, path.as_str()), ("o", "r", "main", "a.md"));
     }
 
+    // ---------- 版本更新：数据源解析 ----------
+
+    #[test]
+    fn parses_github_api_release() {
+        let json: serde_json::Value = serde_json::json!({
+            "tag_name": "v7.9.17",
+            "html_url": "https://github.com/My-Search/my-search-desktop/releases/tag/v7.9.17",
+            "assets": [
+                { "name": "MySearch_7.9.17_x64_en-US.msi",
+                  "browser_download_url": "https://github.com/o/r/releases/download/v7.9.17/a.msi" },
+                { "name": "MySearch_7.9.17_x64.dmg",
+                  "browser_download_url": "https://github.com/o/r/releases/download/v7.9.17/a.dmg" }
+            ]
+        });
+        let (tag, url, assets) = super::parse_api_release(&json).unwrap();
+        assert_eq!(tag, "7.9.17"); // 前置 v 已剥离
+        assert_eq!(
+            url,
+            "https://github.com/My-Search/my-search-desktop/releases/tag/v7.9.17"
+        );
+        assert_eq!(assets.len(), 2);
+        assert_eq!(assets[0].name, "MySearch_7.9.17_x64_en-US.msi");
+    }
+
+    #[test]
+    fn api_release_without_tag_is_none() {
+        assert!(super::parse_api_release(&serde_json::json!({ "assets": [] })).is_none());
+    }
+
+    #[test]
+    fn parses_atom_first_entry() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Release notes</title>
+  <entry>
+    <id>tag:github.com,2008:Repository/1319700718/v7.9.17</id>
+    <link rel="alternate" type="text/html" href="https://github.com/My-Search/my-search-desktop/releases/tag/v7.9.17"/>
+    <title>我的搜索 v7.9.17</title>
+  </entry>
+  <entry>
+    <id>tag:github.com,2008:Repository/1319700718/v7.9.16</id>
+    <link rel="alternate" type="text/html" href="https://github.com/My-Search/my-search-desktop/releases/tag/v7.9.16"/>
+  </entry>
+</feed>"#;
+        let (tag, url) = super::parse_atom_latest(xml).unwrap();
+        assert_eq!(tag, "7.9.17"); // 取首个 entry，不是 7.9.16
+        assert!(url.ends_with("/releases/tag/v7.9.17"));
+    }
+
+    #[test]
+    fn atom_without_entry_is_none() {
+        assert!(super::parse_atom_latest("<feed></feed>").is_none());
+    }
+
+    #[test]
+    fn parses_jsdelivr_resolved_version() {
+        let json: serde_json::Value = serde_json::json!({
+            "type": "gh",
+            "name": "My-Search/my-search-desktop",
+            "version": "7.9.17"
+        });
+        assert_eq!(super::parse_jsdelivr_version(&json).as_deref(), Some("7.9.17"));
+        assert!(super::parse_jsdelivr_version(&serde_json::json!({})).is_none());
+    }
+
+    #[test]
+    fn parses_assets_from_expanded_html() {
+        let html = r#"<div>
+          <a href="/My-Search/my-search-desktop/releases/download/v7.9.17/MySearch_7.9.17_x64_en-US.msi">msi</a>
+          <a href="/My-Search/my-search-desktop/releases/download/v7.9.17/MySearch_7.9.17_aarch64.dmg">dmg</a>
+          <a href="/My-Search/my-search-desktop/releases/tag/v7.9.17">other</a>
+        </div>"#;
+        let assets = super::parse_assets_from_html(html);
+        assert_eq!(assets.len(), 2);
+        assert_eq!(assets[0].name, "MySearch_7.9.17_x64_en-US.msi");
+        assert_eq!(
+            assets[0].url,
+            "https://github.com/My-Search/my-search-desktop/releases/download/v7.9.17/MySearch_7.9.17_x64_en-US.msi"
+        );
+    }
+
+    #[test]
+    fn pick_asset_prefers_matching_arch() {
+        let assets = vec![
+            super::ReleaseAsset { name: "App_7.9.17_aarch64.dmg".into(), url: "u-arm".into() },
+            super::ReleaseAsset { name: "App_7.9.17_x64.dmg".into(), url: "u-x64".into() },
+        ];
+        // x64 必须拿到 x64 包，而不是列表里第一个的 aarch64（旧实现的 bug）
+        assert_eq!(
+            super::pick_asset(&assets, ".dmg", &["x64", "x86_64", "amd64"]).as_deref(),
+            Some("u-x64")
+        );
+        assert_eq!(
+            super::pick_asset(&assets, ".dmg", &["aarch64", "arm64"]).as_deref(),
+            Some("u-arm")
+        );
+    }
+
+    #[test]
+    fn pick_asset_falls_back_to_extension_only() {
+        let assets = vec![super::ReleaseAsset {
+            name: "App_7.9.17_amd64.AppImage".into(),
+            url: "u".into(),
+        }];
+        // 架构别名未覆盖时仍能按后缀命中
+        assert_eq!(
+            super::pick_asset(&assets, ".AppImage", &["mips"]).as_deref(),
+            Some("u")
+        );
+        // 后缀不匹配 → None
+        assert!(super::pick_asset(&assets, ".msi", &["x64"]).is_none());
+    }
 }

@@ -21,6 +21,14 @@ import { getAutoDownloadUpdate } from "../../lib/update-settings";
 
 /** 定时检查间隔：20 分钟 */
 const UPDATE_CHECK_INTERVAL_MS = 20 * 60 * 1000;
+/**
+ * 「呼出即查」的最小间隔：60 秒。
+ *
+ * 搜索框每次呼出都会触发一次检查；用户高频呼出时若不节流，会迅速打爆
+ * GitHub API 未认证限额（60 次/小时/IP）→ 403 → 旧版静默谎报「已是最新」。
+ * 设置窗口切换开关时不走节流（那条路径必须当刻生效）。
+ */
+const MIN_RECHECK_INTERVAL_MS = 60 * 1000;
 /** 环形进度条周长（r=16 → 2π·16 ≈ 100.53） */
 const RING_TOTAL = 100.53;
 
@@ -41,6 +49,10 @@ export function useUpdateChecker() {
   let unlistenProgress: UnlistenFn | null = null;
   let unlistenComplete: UnlistenFn | null = null;
   let checkTimer: ReturnType<typeof setInterval> | null = null;
+  /** 上次真正发起检查的时刻（用于「呼出即查」节流） */
+  let lastCheckAt = 0;
+  /** 是否有一次检查正在进行（防止节流窗口外的并发重复请求） */
+  let checking = false;
   /** 「自动下载更新」开关变更监听（配置窗口切换时立即重求值用） */
   let unlistenSettingChange: UnlistenFn | null = null;
   /** 监听注册进行中（异步 gap 内防止重复注册） */
@@ -217,8 +229,20 @@ export function useUpdateChecker() {
       resetUpdateState();
       return;
     }
+    // 并发去重：一次检查未返回时再次触发直接忽略（避免叠加请求把 API 打爆）。
+    if (checking) return;
+    checking = true;
+    lastCheckAt = Date.now();
     try {
       const info = await checkUpdate();
+
+      // 检查失败（数据源全部不可用）：保留上一次结果，不清空、不误报。
+      // 若此前已发现过更新，徽章继续保留，用户仍可点击安装。
+      if (info.check_failed) {
+        console.warn("[我的搜索] 更新检查失败（网络/数据源不可用），保留既有状态");
+        return;
+      }
+
       state.info = info;
 
       if (info.has_update) {
@@ -240,7 +264,26 @@ export function useUpdateChecker() {
       }
     } catch (e) {
       console.warn("[我的搜索] 更新检查失败:", e);
+    } finally {
+      checking = false;
     }
+  }
+
+  /**
+   * 按节流规则触发一次检查（供「每次呼出」路径使用）。
+   *
+   * 高频呼出时若每次都真查，会迅速耗尽 GitHub 未认证 API 限额（60 次/小时），
+   * 导致后续检查 403、并掩盖新版本。这里限制为最短 60 秒一次。
+   */
+  function throttledCheck(): void {
+    if (!isTauri) return;
+    if (!getAutoDownloadUpdate()) {
+      resetUpdateState();
+      return;
+    }
+    if (checking) return;
+    if (Date.now() - lastCheckAt < MIN_RECHECK_INTERVAL_MS) return;
+    void checkAndAutoDownload();
   }
 
   /** 启动定时检查更新（启动时立即执行一次，之后每 20 分钟） */
@@ -273,14 +316,24 @@ export function useUpdateChecker() {
   }
 
   /**
-   * 立即按当前「自动下载更新」设置重新求值一次。
+   * 立即按当前「自动下载更新」设置重新求值一次（**不节流**）。
    *
-   * 两个调用方：主窗口每次呼出时；配置窗口切换开关的当刻（见
-   * scheduleUpdateCheck 里的监听）。用户刚改过开关时无需等待下一个
-   * 20 分钟定时点——开启则马上检查并（必要时）下载，关闭则马上清空徽章。
+   * 调用方：配置窗口切换开关的当刻（见 scheduleUpdateCheck 里的监听）。
+   * 用户刚改过开关时无需等待下一个 20 分钟定时点——开启则马上检查并
+   * （必要时）下载，关闭则马上清空徽章。
    */
   function recheckSetting(): void {
     void checkAndAutoDownload();
+  }
+
+  /**
+   * 主窗口每次呼出时调用：按节流规则检查一次更新。
+   *
+   * 与 `recheckSetting` 的区别：呼出可能非常频繁，必须节流（见
+   * `throttledCheck`），否则会打爆 GitHub API 限额。
+   */
+  function recheckOnSummon(): void {
+    throttledCheck();
   }
 
   /** 组件卸载时清理 */
@@ -309,6 +362,7 @@ export function useUpdateChecker() {
     handleBadgeClick,
     scheduleUpdateCheck,
     recheckSetting,
+    recheckOnSummon,
     dispose,
   };
 }

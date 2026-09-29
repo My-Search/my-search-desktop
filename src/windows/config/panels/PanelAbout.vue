@@ -38,10 +38,11 @@ function setStatus(text: string, type: typeof statusType.value): void {
   statusType.value = type;
 }
 
-/** 整行是否可点击（有新版本 / 安装文件已下载但打开失败时可重试） */
+/** 整行是否可点击（有新版本且拿得到下载直链 / 安装文件已下载但打开失败时可重试） */
 function rowClickable(): boolean {
   if (downloading) return false;
-  if (statusType.value === "new-version") return true;
+  // 有新版本但没拿到本平台安装包直链时不可点击（避免点了没反应）
+  if (statusType.value === "new-version") return !!currentDownloadUrl;
   // 下载完成但打开安装程序失败时，点击重试
   if (currentDownloadUrl && statusType.value === "latest" && statusText.value === "安装文件已下载，请手动运行") {
     return true;
@@ -113,11 +114,20 @@ async function doCheckUpdate(): Promise<void> {
   currentDownloadUrl = null;
   try {
     const info = await checkUpdate();
-    if (!info.has_update) {
+    if (info.check_failed) {
+      // 数据源全部不可用：如实报错，绝不能谎报「已是最新」
+      setStatus("检查更新失败，请检查网络后重试", "error");
+    } else if (!info.has_update) {
       setStatus("当前已经是最新版本！", "latest");
     } else {
-      setStatus("有新版本，点击下载", "new-version");
       currentDownloadUrl = info.download_url;
+      if (currentDownloadUrl) {
+        setStatus(`发现新版本 v${info.latest_version}，点击下载`, "new-version");
+      } else {
+        // 有更新但未匹配到本平台安装包（如资产名意外变更）：给出发布页入口，
+        // 不要显示成可点击下载却点了没反应。
+        setStatus(`发现新版本 v${info.latest_version}，请到发布页下载`, "new-version");
+      }
     }
   } catch (e) {
     setStatus("检查更新失败，请检查网络后重试", "error");

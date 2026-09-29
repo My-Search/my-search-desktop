@@ -880,6 +880,7 @@ const EMPTY_UPDATE_INFO: UpdateInfo = {
   current_version: "",
   download_url: "",
   release_url: "",
+  check_failed: false,
 };
 
 /**
@@ -890,8 +891,10 @@ export async function checkUpdate(): Promise<UpdateInfo> {
   try {
     return await invoke<UpdateInfo>("check_update");
   } catch (e) {
+    // 命令本身失败（如 IPC 异常）：标记 check_failed，避免上层把它当成
+    // 「已是最新」——这正是旧版「检测不到新版本」被掩盖的路径。
     console.warn("检查更新失败:", e);
-    return { ...EMPTY_UPDATE_INFO };
+    return { ...EMPTY_UPDATE_INFO, check_failed: true };
   }
 }
 

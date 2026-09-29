@@ -1865,9 +1865,10 @@ onMounted(async () => {
     }
     // 复位后再检查一次：若缓存已被清理，立即进入加载状态
     if (initialLoadDone) search.reloadIfSubscribesChanged(true);
-    // 「自动下载更新」开关可能刚在设置窗口被改动：呼出时立即按新设置求值
-    // （开启则马上检查并下载、关闭则马上隐藏徽章），无需等待下个 20 分钟定时点。
-    update.recheckSetting();
+    // 「自动下载更新」开关可能刚在设置窗口被改动：呼出时按新设置求值
+    // （开启则检查、关闭则立即隐藏徽章）。此处走节流版本——呼出可能很频繁，
+    // 每次都真查会迅速打爆 GitHub API 未认证限额并掩盖新版本。
+    update.recheckOnSummon();
     // 弹窗开着时焦点留在弹窗按钮上（PluginInstallDialog 可见时会自动聚焦「安装」）
     if (!installDialogVisible.value) searchBoxRef.value?.focus();
   });
