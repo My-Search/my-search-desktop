@@ -1325,7 +1325,14 @@ pub(crate) fn build_client(timeout_secs: u64, ua: &str) -> Result<reqwest::Clien
         .map_err(|e| e.to_string())
 }
 
-pub(crate) const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36 MySearchDesktop/7.9.12";
+/// 通用 User-Agent。末尾的 `MySearchDesktop/<版本>` 用 `env!("CARGO_PKG_VERSION")`
+/// 在编译期拼接，避免像以前那样写死（曾长期停留在 7.9.12，与真实版本脱节）。
+/// `concat!` + `env!` 都是编译期求值，故 UA 仍是 `&'static str` 常量，
+/// 各调用点（market.rs / cloud.rs 等）无需改动。
+pub(crate) const UA: &str = concat!(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36 MySearchDesktop/",
+    env!("CARGO_PKG_VERSION")
+);
 
 /// 供插件网关复用的通用请求实现（插件已在前端与网关双重校验过目标地址）。
 /// 与 `http_request` 的差别：不默认塞 GitHub 的 Accept 头，其余行为一致。
@@ -3946,6 +3953,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!((owner, repo, branch, path.as_str()), ("o", "r", "main", "a.md"));
+    }
+
+    #[test]
+    fn user_agent_carries_crate_version() {
+        // UA 末尾版本必须跟随 CARGO_PKG_VERSION（曾写死停留在 7.9.12）
+        assert!(super::UA.ends_with(env!("CARGO_PKG_VERSION")));
+        assert!(super::UA.contains("MySearchDesktop/"));
     }
 
     // ---------- 版本更新：数据源解析 ----------
