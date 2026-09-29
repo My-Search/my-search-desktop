@@ -354,6 +354,9 @@ export function describeProvider(providerId, raw, { availability = new Set(), au
     builtin: false,
     authConfigured: Boolean(auth?.configured),
     authSource: auth?.source || "",
+    // 环境变量引用的具体名字（pi 的 authStorage 放在 label 里，如 "MY_KEY"）。
+    // 前端据此在「密钥来源」提示条与列表徽章上写出到底是哪个变量。
+    authLabel: auth?.label || "",
   };
 }
 
@@ -369,5 +372,6 @@ export function describeBuiltinProvider(providerId, { name, models = [], availab
     builtin: true,
     authConfigured: Boolean(auth?.configured),
     authSource: auth?.source || "",
+    authLabel: auth?.label || "",
   };
 }

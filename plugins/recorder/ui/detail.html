@@ -69,6 +69,14 @@
             <label class="rc-field sm"><span>Y</span><input id="rc-region-y" class="rc-input" type="number" value="0" min="0"></label>
             <label class="rc-field sm"><span>宽</span><input id="rc-region-w" class="rc-input" type="number" value="1280" min="2"></label>
             <label class="rc-field sm"><span>高</span><input id="rc-region-h" class="rc-input" type="number" value="720" min="2"></label>
+            <div class="rc-region-acts">
+              <button id="rc-region-pick" class="rc-btn sm" type="button" data-act="region-pick">框选区域…</button>
+              <label class="rc-check">
+                <input id="rc-region-frame" type="checkbox" checked>
+                <span>录制时显示边框</span>
+              </label>
+            </div>
+            <div class="rc-region-tip">坐标为屏幕物理像素（左上角 0,0）；边框画在录制框外侧，不会录进视频。</div>
           </div>
 
           <div class="rc-grid2">
@@ -184,6 +192,7 @@
           <button class="rc-btn" data-act="set-ffpath">保存并检测</button>
         </div>
         <div id="rc-set-ffinfo" class="rc-help"></div>
+        <div id="rc-set-capture" class="rc-help"></div>
       </div>
 
       <div class="rc-section">
@@ -202,6 +211,28 @@
         <div id="rc-set-bindir" class="rc-help rc-mono"></div>
       </div>
     </section>
+
+    <!-- 区域框选：后端冻结一张桌面截图，用户在图上拖出录制矩形。
+         必须放在 #app.rc-app **里面**：插件靠 `.rc-app [hidden]{display:none!important}`
+         压住带 hidden 的元素，放到外面时 .rc-pick 自己的 display:flex（作者样式）
+         会盖过浏览器默认的 [hidden] 规则，面板一打开浮层就常驻显示。 -->
+    <div id="rc-pick" class="rc-pick" hidden>
+      <div class="rc-pick-panel">
+        <div class="rc-pick-head">
+          <span class="rc-pick-title">框选录制区域</span>
+          <span id="rc-pick-hint" class="rc-muted">正在截取当前桌面…</span>
+          <button class="rc-mini" type="button" data-act="pick-cancel">取消</button>
+        </div>
+        <div id="rc-pick-stage" class="rc-pick-stage">
+          <img id="rc-pick-img" alt="">
+          <div id="rc-pick-rect" class="rc-pick-rect" hidden></div>
+        </div>
+        <div class="rc-pick-foot">
+          <span id="rc-pick-size" class="rc-muted">按住鼠标在图上拖出要录的区域</span>
+          <button id="rc-pick-ok" class="rc-btn primary" type="button" data-act="pick-ok" disabled>使用该区域</button>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- 水印控件模板：录屏页与加水印页各渲染一份，避免两处手写重复结构 -->

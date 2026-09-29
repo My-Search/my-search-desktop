@@ -4,7 +4,7 @@
 
 **Goal:** 设计并交付「插件市场」——它本身是一个插件（`com.mysearch.market`），与翻译插件（`com.mysearch.baidu-translate`）、Pi 编码代理（`com.mysearch.pi-agent`）一起作为**内置插件**随应用分发，且用户**可选择卸载**任一内置插件。
 
-**Architecture:** 三个内置插件打包为 Tauri 资源（`resources/plugins/*.msplugin`），应用启动时由 Rust 侧引导安装到 `plugins/<id>/`（`source.kind: "builtin"`），卸载走「移除标记」（`removedBuiltins`）——升级应用不复活已卸载插件（Firefox 用户安装覆盖内置的优先级模型）。市场目录是一个 GitHub 仓库：插件源 + CI 打包出 `.msplugin` Release 资产 + GitHub Pages 托管 `catalog.json`（索引）与二进制，提交走 PR 评审（Raycast/Alfred 的策展式信任模型）。市场插件的 UI 复用宿主现有全链路：搜索关键词打开 `detailView`（inlay），安装/更新/卸载复用既有 `install.ts` 解包→校验→权限确认→原子落盘管线；危险操作（二进制下载）在 Rust 侧再拦一道（`plugin.install` 权限 + 目录 origin 白名单）。
+**Architecture:** 三个内置插件打包为 Tauri 资源（`resources/plugins/*.mspp`），应用启动时由 Rust 侧引导安装到 `plugins/<id>/`（`source.kind: "builtin"`），卸载走「移除标记」（`removedBuiltins`）——升级应用不复活已卸载插件（Firefox 用户安装覆盖内置的优先级模型）。市场目录是一个 GitHub 仓库：插件源 + CI 打包出 `.mspp` Release 资产 + GitHub Pages 托管 `catalog.json`（索引）与二进制，提交走 PR 评审（Raycast/Alfred 的策展式信任模型）。市场插件的 UI 复用宿主现有全链路：搜索关键词打开 `detailView`（inlay），安装/更新/卸载复用既有 `install.ts` 解包→校验→权限确认→原子落盘管线；危险操作（二进制下载）在 Rust 侧再拦一道（`plugin.install` 权限 + 目录 origin 白名单）。
 
 **Tech Stack:** 现有 Tauri 2 + Vue 3 + TS + Vite（不变）；无新增第三方依赖（目录拉取走既有 reqwest/base64；包解析走既有 hand-rolled ZIP）。
 
@@ -26,7 +26,7 @@
 |---|---|---|
 | 市场放哪 | 专用 GitHub 仓库（源 + CI 打包 + Release 资产 + Pages 目录），PR 提交 | Raycast / Alfred 策展式 |
 | 市场是不是插件 | **是**。`com.mysearch.market` 内置插件，贡献 `searchItem` + `detailView` + `settingsPanel` | VS Code 内置扩展与商店同构（dogfooding） |
-| 内置插件怎么交付 | 打成 `.msplugin` 放 Tauri 资源，Rust 启动引导安装 | Firefox system add-ons（随应用分发的签名单） |
+| 内置插件怎么交付 | 打成 `.mspp` 放 Tauri 资源，Rust 启动引导安装 | Firefox system add-ons（随应用分发的签名单） |
 | 卸载会不会复活 | 不会。`removedBuiltins` 标记，升级跳过；「恢复内置」显式重装 | Firefox 用户安装覆盖内置的优先级链 |
 | 安装/更新的安全 | 校验 sha256 + 目录 origin 白名单 + `plugin.install` 权限 + 复用全套既有校验管线 | VS Code 签名 + 块名单；Firefox 强签名；OBS 反面教材 |
 | 更新检查 | 后台拉目录 → 写 `updateAvailable` → 用户手动一键更新（不自动装） | VS Code 自动更新关闭时的手动语义；Raycast「本地导入只看不更」 |
@@ -52,7 +52,7 @@
    - **B. 权限 = 既有 Android 式网关 + 新增 `plugin.install`**（对应市场「信任」）。
 2. **内置 vs 用户安装的层叠**：取 Firefox「用户安装覆盖内置」的优先级，而不是 VS Code「@builtin 不可卸载」。因为需求明确「用户可选择卸载」。
 3. **信任模型分阶段**：MVP 到 Alfred 级（策展目录 + sha256 + PR 评审），第二阶段再上 Firefox 级的离线签名。**绝不复刻 OBS 的无签名模型**。目录二进制下载的 origin 白名单 + sha256 是底线，不做这个不放市场。
-4. **不发明新协议**：`.msplugin` 就是 ZIP，目录 `downloadUrl` 直指 Release 资产；目录 JSON 就是结构化索引（GitHub Pages），不需要 Gallery Query API。
+4. **不发明新协议**：`.mspp` 就是 ZIP，目录 `downloadUrl` 直指 Release 资产；目录 JSON 就是结构化索引（GitHub Pages），不需要 Gallery Query API。
 
 ---
 
@@ -76,7 +76,7 @@
                           ┌───────────────────────────────┐
                           │      目录仓库（GitHub）          │
                           │  plugins/<id>/ + meta.json      │
-                          │  CI: pack → Release(.msplugin) ─┼─┐
+                          │  CI: pack → Release(.mspp) ─┼─┐
                           │  CI: Pages → catalog.json       │ │
                           └───────────────────────────────┘ │
                                                              │ https
@@ -114,7 +114,7 @@
 | `plugins/mysearch-market/plugin.json` | 市场插件清单 |
 | `plugins/mysearch-market/ui/detail.html` + `detail.css` + `index.js` | 商店 UI（搜索/分类/已安装/更新 四段 + 详情 + 安装/更新/卸载） |
 | `plugins/mysearch-market/README.md` | 市场插件说明 |
-| `src-tauri/resources/plugins/.gitkeep` + 打包产物目录 | 内置资源落点（CI 填 `*.msplugin`） |
+| `src-tauri/resources/plugins/.gitkeep` + 打包产物目录 | 内置资源落点（CI 填 `*.mspp`） |
 | `.github/workflows/publish-plugin-market.yml` | P4：pack 三个内置/参赛插件 → Release → 生成 catalog.json → Pages |
 | `test/market-catalog.test.mjs` | `market-types.ts`/`market.ts` 纯逻辑测试 |
 | `test/market-ui.test.mjs` | 浏览器端到端：本地目录 fixture，市场插件装/更/卸 |
@@ -141,13 +141,13 @@
 
 ### 6.1 交付形态
 
-每个内置插件在发布时用既有 `test/pack-plugin.mjs` 打成 `.msplugin`，放进 `src-tauri/resources/plugins/`：
+每个内置插件在发布时用既有 `test/pack-plugin.mjs` 打成 `.mspp`，放进 `src-tauri/resources/plugins/`：
 
 ```
 src-tauri/resources/plugins/
-  com.mysearch.baidu-translate.msplugin
-  com.mysearch.pi-agent.msplugin
-  com.mysearch.market.msplugin          # P3 加入
+  com.mysearch.baidu-translate.mspp
+  com.mysearch.pi-agent.mspp
+  com.mysearch.market.mspp          # P3 加入
 ```
 
 `tauri.conf.json` 追加：
@@ -155,7 +155,7 @@ src-tauri/resources/plugins/
 ```jsonc
 "bundle": {
   ...,
-  "resources": ["resources/plugins/*.msplugin"]
+  "resources": ["resources/plugins/*.mspp"]
 }
 ```
 
@@ -217,8 +217,8 @@ for each (id, bundle) in resources:
 
 ```rust
 pub fn bundle_manifest(app: &AppHandle) -> Vec<BundledPlugin> {
-    // BundledPlugin { id, resource_path, version } —— 从 resources/plugins/*.msplugin
-    // 文件名解析（id 即文件名去掉 .msplugin），版本在引导后读 plugin.json 得到
+    // BundledPlugin { id, resource_path, version } —— 从 resources/plugins/*.mspp
+    // 文件名解析（id 即文件名去掉 .mspp），版本在引导后读 plugin.json 得到
 }
 
 pub fn bootstrap(app: &AppHandle) -> Result<BootstrapReport, String> {
@@ -233,7 +233,7 @@ fn install_bundle(app: &AppHandle, bundle: &BundledPlugin) -> Result<(), String>
     // 复用 plugin_host 的 staging+rename 落盘辅助（提取为 pub(crate) 函数）
 ```
 
-安装细节：解压 `.msplugin`（既有 hand-rolled ZIP 读取逻辑在 `package.ts` 前端侧——**Rust 侧没有 ZIP 解包实现**。为避免跨语言重复安全校验（路径穿越等），内置引导 RUST 侧只做「整体拷贝资源 → 请求前端做安装受理」：
+安装细节：解压 `.mspp`（既有 hand-rolled ZIP 读取逻辑在 `package.ts` 前端侧——**Rust 侧没有 ZIP 解包实现**。为避免跨语言重复安全校验（路径穿越等），内置引导 RUST 侧只做「整体拷贝资源 → 请求前端做安装受理」：
 
 > **P1 修正设计**：`bootstrap` 不自己解包。改为 Rust 把资源路径通过事件 `builtin://available` 广播给两个窗口，前端用既有 `install-from-path` 管线（`install.ts` 解包 → 校验 manifest → 权限注册 → `plugin_install` 原子落盘）完成安装。Rust 只负责：存在性检查、白名单、`removed` 标记读写。
 > 好处：安全校验只在 `install.ts` 一份实现；`bootstrap` 只是「把资源当作本地文件装的触发器」。
@@ -273,7 +273,7 @@ export interface MarketPluginEntry {
   description: string;                 // 卡片摘要（≤120 字，UI 截断）
   changelog?: string;                  // 详情页展示
   downloadUrl: string;                 // 完整 URL，必须以 baseUrl 为前缀（校验）
-  sha256: string;                      // .msplugin 摘要，安装必验
+  sha256: string;                      // .mspp 摘要，安装必验
   size?: number;                       // 字节，列表展示
   permissions: string[];               // 声明权限（安装确认页预填，来自清单，信任展示用）
   official?: boolean;                  // com.mysearch.* 第一方
@@ -323,7 +323,7 @@ ms.market.install(id)        // 权限 plugin.install
        Rust: 校验 grants.plugin.install + url 前缀 ∈ catalogBaseUrl 白名单
              reqwest 拿 bytes → base64 返回
        前端: sha256 比对，不符报「包摘要不符，已拒绝」
-  → 得到 .msplugin bytes → 走 install.ts 的「从字节安装」分支
+  → 得到 .mspp bytes → 走 install.ts 的「从字节安装」分支
        （现有 install.ts 已能处理解包/剥离包裹目录/清单校验/权限确认/报文；缺「字节直装」路径则在 P2 补一个纯函数：bytes → FileTable，复用 TestPluginZip 的单测）
   → plugin_install（Rust）原子落盘
   → 升级走得 planUpgrade：新增必需权限 → 确认框；降级 → 拒绝
@@ -461,7 +461,7 @@ mysearch-plugin-market/
     com.foo.bar/
       meta.json
   .github/workflows/
-    publish.yml                # tag/v 触发：pack-plugin → GitHub Release(.msplugin) → 重写 catalog.json → Pages
+    publish.yml                # tag/v 触发：pack-plugin → GitHub Release(.mspp) → 重写 catalog.json → Pages
   CONTRIBUTING.md              # 提交规范
 ```
 
@@ -576,7 +576,7 @@ clearUpdateAvailable(reg, id): void;
 ### Task 5: 内置插件交付（Rust 资源引导）
 **Files:**
 - Create: `src-tauri/src/builtin.rs`
-- Modify: `src-tauri/tauri.conf.json`（`bundle.resources` 加 `resources/plugins/*.msplugin`）
+- Modify: `src-tauri/tauri.conf.json`（`bundle.resources` 加 `resources/plugins/*.mspp`）
 - Modify: `src-tauri/src/lib.rs`（`setup` 里发 `builtin://available` 事件）
 - Create: `src-tauri/resources/plugins/.gitkeep`（占位，CI 填真包）
 - Modify: `package.json`（`pack:builtin` script：`node test/pack-plugin.mjs` 依次打三个内置插件到 `src-tauri/resources/plugins/`）
@@ -641,7 +641,7 @@ installFromBytes(bytes: Uint8Array, opts: { source: { kind: "market"; ref: strin
 - Create: `docs/plugin-market.md`（开发者接入文档）
 - Modify: `README.md`
 
-- [ ] **Step 1**: workflow：checkout → `npm ci` → 遍历 `plugins/*/meta.json` → `pack-plugin` → 建 Release 上传 `.msplugin` → 用 `pack` 输出计算 `sha256/size/downloadUrl` → 重写 `catalog.json` → 部署 Pages。
+- [ ] **Step 1**: workflow：checkout → `npm ci` → 遍历 `plugins/*/meta.json` → `pack-plugin` → 建 Release 上传 `.mspp` → 用 `pack` 输出计算 `sha256/size/downloadUrl` → 重写 `catalog.json` → 部署 Pages。
 - [ ] **Step 2**: `docs/plugin-market.md`：目录结构、`meta.json` 字段、提交清单、评审标准、信任边界说明。
 - [ ] **Step 3**: `README.md` 插件市场章节。
 - [ ] **Step 4**: Commit.

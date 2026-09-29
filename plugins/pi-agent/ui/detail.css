@@ -2,7 +2,13 @@
  * Pi Agent 界面样式
  *
  * 严格对齐设计稿 pi-ui.html：最左侧项目导航栏 / 中间会话侧边栏 / 右侧主内容区。
- * 布局尺寸、配色、圆角、阴影全部按设计稿取值，不自行发明。
+ * 布局尺寸、圆角全部按设计稿取值，不自行发明。
+ *
+ * 主题兼容（v2.1.1）：中性配色不再写死深色，而是映射到宿主的共享主题变量
+ * （style.css「插件共享主题变量」节，html / html.theme-dark 上各一份）：
+ * 宿主浅色时本面板自动变浅，深色时自动变深。兜底值（var() 第二参数）一律
+ * 取设计稿的深色原值——独立开发环境（无宿主变量）保持原设计稿外观。
+ * 蓝色 / 黄色 accent 是语义色，主题无关，保持字面量。
  *
  * 已按需求调整：模型与密钥仍复用 pi 自身的配置——设置面板里的「模型配置」
  * 就是 pi 那份 ~/.pi/agent/models.json 的可视化编辑器（后端 model-config.mjs 落盘）。
@@ -12,23 +18,23 @@
  * ========================================================================== */
 
 .pi-agent-container {
-  /* ===== 设计稿变量 ===== */
-  --bg-darkest: #121212;
-  --bg-dark: #1e1e1e;
-  --bg-main: #252526;
-  --bg-input: #1a1a1c;
-  --bg-hover: #2a2a2c;
-  --bg-active: #2f3136;
-  --border-color: #3e3e42;
+  /* ===== 设计稿变量（主题兼容版：宿主 token + 深色兜底） ===== */
+  --bg-darkest: var(--surface, #121212);
+  --bg-dark: var(--field, #1e1e1e);
+  --bg-main: var(--card, #252526);
+  --bg-input: var(--code-bg, #1a1a1c);
+  --bg-hover: var(--hover-bg, #2a2a2c);
+  --bg-active: var(--seg-bg, #2f3136);
+  --border-color: var(--line, #3e3e42);
 
-  --text-primary: #e0e0e0;
-  --text-secondary: #a0a0a0;
-  --text-muted: #6a6a6a;
+  --text-primary: var(--text, #e0e0e0);
+  --text-secondary: var(--muted, #a0a0a0);
+  --text-muted: var(--muted, #6a6a6a);
 
   --accent-blue: #3b82f6;
-  --accent-green: #10b981;
+  --accent-green: var(--ok, #10b981);
   --accent-yellow: #f59e0b;
-  --accent-red: #ef4444;
+  --accent-red: var(--err, #ef4444);
 
   --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 
@@ -58,8 +64,8 @@
 /* 滚动条 */
 .pi-agent-container ::-webkit-scrollbar { width: 6px; }
 .pi-agent-container ::-webkit-scrollbar-track { background: transparent; }
-.pi-agent-container ::-webkit-scrollbar-thumb { background: #424242; border-radius: 4px; }
-.pi-agent-container ::-webkit-scrollbar-thumb:hover { background: #555; }
+.pi-agent-container ::-webkit-scrollbar-thumb { background: var(--hover-border, #424242); border-radius: 4px; }
+.pi-agent-container ::-webkit-scrollbar-thumb:hover { background: var(--text-secondary, #555); }
 
 /* ================= 1. 最左侧项目导航栏 ================= */
 .pi-agent-container .sidebar-left {
@@ -73,13 +79,45 @@
   flex-shrink: 0;
   /* 不用 space-between：添加按钮要紧贴最后一个项目，
      设置按钮靠 .pi-settings-wrap 的 margin-top:auto 自己沉底 */
+  transition: background-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+/* 文件夹拖拽悬停：整条左栏高亮 + 内描边 + 底部提示，明确「拖到这里可添加项目」。
+   原生拖放下 HTML5 dragover 不触发（见 drop-target.ts），高亮由宿主投递的
+   ms-drop-hover 事件驱动（宿主在 enter/over 里给悬停元素，插件用 closest 判定）。 */
+.pi-agent-container .sidebar-left.pi-drop-active {
+  background-color: var(--bg-active);
+  box-shadow: inset 0 0 0 2px var(--accent-blue);
+}
+
+/* 悬停时把「+」按钮也点亮并缩放，视线一眼落在添加入口上 */
+.pi-agent-container .sidebar-left.pi-drop-active .pi-add-wrap .settings-btn {
+  border-color: var(--accent-blue);
+  color: var(--accent-blue);
+  transform: scale(1.08);
+}
+
+/* 悬停提示文字：附在「+」按钮下方（那里就是落点），竖排向下延伸。
+   放在栏底会与沉底的设置按钮重叠，因此挂在 .pi-add-wrap 上。 */
+.pi-agent-container .sidebar-left.pi-drop-active .pi-add-wrap::after {
+  content: "松开添加项目";
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  writing-mode: vertical-rl;
+  letter-spacing: 2px;
+  font-size: 11px;
+  color: var(--accent-blue);
+  pointer-events: none;
+  white-space: nowrap;
 }
 
 /* 项目图标列表。
-   padding 不是随手加的：`.status-badge` 用绝对定位贴在图标右下角（会探出
-   图标矩形 4px），绝对定位的后代**照样计入滚动容器的可滚动溢出**。早先
-   列表没有余量，角标一挂上就把列表顶出 8px 溢出，于是「只有一个项目」
-   也会常驻一条灰色滚动条。左右给 6px、底部给 8px 余量后，角标落在
+   padding 不是随手加的：`.project-status-dot` 用绝对定位贴在图标右下角（会探出
+   图标矩形 6px），绝对定位的后代**照样计入滚动容器的可滚动溢出**。早先
+   列表没有余量，圆点一挂上就把列表顶出溢出，于是「只有一个项目」
+   也会常驻一条灰色滚动条。左右给 6px、底部给 8px 余量后，圆点落在
    padding 区里，既不触发滚动条，也不会被 overflow-x:hidden 裁掉。 */
 .pi-agent-container .project-list {
   display: flex;
@@ -123,31 +161,69 @@
 
 .pi-agent-container .project-icon:hover { border-color: var(--text-secondary); }
 
-/* 右下角角标。
-   贴在内侧（right/bottom 为负值的一半在图标内），而不是往外探 —— 探出去
-   既会撑出左栏滚动条（见 .project-list 注释），又会被 overflow-x:hidden
-   裁掉半边。 */
-.pi-agent-container .status-badge {
+/* 项目图标右下角状态圆点：**单个圆**，数字写在圆里（角标并入圆点）。
+   绿 = 有已完成未查看（数字=未查看数，带深色圆边框）；
+   黄 = 只有运行中（数字=运行中会话数）；都没有则不画。
+   单字符时是正圆，两位数/99+ 自然撑成胶囊。
+   贴在内侧探出（right/bottom 为负值的部分落在图标外），靠 .project-list
+   的 padding 余量保证不撑出滚动条、不被 overflow-x:hidden 裁掉
+   （见 .project-list 注释）。 */
+.pi-agent-container .project-status-dot {
   position: absolute;
   right: -6px;
   bottom: -6px;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
-  border-radius: 9px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 3px;
+  box-sizing: border-box;
+  border-radius: 999px;
   display: flex;
   justify-content: center;
   align-items: center;
-  font-size: 10px;
+  font-size: 9px;
   font-weight: bold;
-  color: #fff;
+  line-height: 1;
   border: 2px solid var(--bg-darkest);
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
   z-index: 10;
 }
 
-.pi-agent-container .status-badge.yellow { background-color: var(--accent-yellow); color: #000; }
-.pi-agent-container .status-badge.green { background-color: var(--accent-green); }
+.pi-agent-container .project-status-dot.yellow {
+  background-color: var(--accent-yellow);
+  color: #fff;
+  box-shadow: 0 0 6px rgba(245, 158, 11, 0.65);
+}
+
+/* 黄问号：项目里有会话在等用户回答（优先级最高的提示，压过绿/黄数字点）。
+   圆圈里不是数字而是「?」——比数字稍大、居中，一眼能认出是「要你回话」。
+   z-index 给到最高：圆点是绝对定位、探出图标外 6px，相邻项目的圆点/图标
+   会跟它重叠；问号是最需要用户处理的信号，不能被别的项目盖住。 */
+.pi-agent-container .project-status-dot.yellow.ask {
+  font-size: 11px;
+  color: #1e1e1e;
+  background-color: var(--accent-yellow);
+  box-shadow: 0 0 7px rgba(245, 158, 11, 0.85);
+  z-index: 30;
+}
+
+/* 挂着黄问号的项目图标整体抬高：否则相邻项（DOM 顺序靠后、或 hover 抬升）
+   仍可能盖住探出的问号圆点。:has 不被个别老内核支持时，仅退化为圆点自身
+   的 z-index(30) 生效，不影响功能。 */
+.pi-agent-container .project-icon:has(.project-status-dot.ask) {
+  z-index: 25;
+}
+
+.pi-agent-container .project-status-dot.green {
+  background-color: var(--accent-green);
+  color: #fff;
+  box-shadow: 0 0 6px rgba(16, 185, 129, 0.65);
+}
+
+/* 绿点但项目里还有运行中的会话：描边换成黄色，提示「有活跃在跑的」 */
+.pi-agent-container .project-status-dot.green.has-running {
+  border-color: var(--accent-yellow);
+  box-shadow: 0 0 6px rgba(245, 158, 11, 0.65);
+}
 
 .pi-agent-container .settings-btn {
   width: 40px;
@@ -192,6 +268,95 @@
   margin-top: auto;
 }
 
+/* ===================== 设置 → 外观（界面主题） =====================
+   主题切换放在设置面板的「外观」页（左下角齿轮 → 左菜单「外观」）。
+   外观页复用设置面板的整体配色（--bg-* / --text-* token），
+   因此本页自身也随主题切换而变。 */
+.pi-agent-container .pi-appearance {
+  max-width: 460px;
+}
+
+.pi-agent-container .pi-appearance-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+}
+
+.pi-agent-container .pi-theme-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.pi-agent-container .pi-theme-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 11px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background-color: var(--bg-dark);
+  color: var(--text-primary);
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s ease;
+}
+
+.pi-agent-container .pi-theme-choice:hover {
+  background-color: var(--bg-hover);
+  border-color: var(--hover-border, var(--border-color));
+}
+
+.pi-agent-container .pi-theme-choice.active {
+  border-color: var(--accent-blue);
+  background-color: var(--bg-active);
+}
+
+.pi-agent-container .pi-theme-radio {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+  border-radius: 50%;
+  border: 2px solid var(--text-muted);
+  position: relative;
+  transition: all 0.15s ease;
+}
+
+.pi-agent-container .pi-theme-choice.active .pi-theme-radio {
+  border-color: var(--accent-blue);
+}
+
+.pi-agent-container .pi-theme-choice.active .pi-theme-radio::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  background-color: var(--accent-blue);
+}
+
+.pi-agent-container .pi-theme-choice-texts {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.pi-agent-container .pi-theme-choice-label {
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.pi-agent-container .pi-theme-choice-desc {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
 .pi-agent-container .pi-add-popover {
   position: absolute;
   /* 按钮已移到列表中段，气泡改为向下展开；
@@ -206,11 +371,92 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.7);
+  box-shadow: var(--dialog-shadow, 0 12px 40px rgba(0, 0, 0, 0.7));
   z-index: 60;
 }
 
 .pi-agent-container .pi-add-popover[hidden] { display: none; }
+
+/* 项目图标右键菜单：「全部标为已读」/「移除项目」 */
+.pi-agent-container .pi-project-menu {
+  min-width: 150px;
+  background-color: var(--bg-dark);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  box-shadow: var(--dialog-shadow, 0 12px 40px rgba(0, 0, 0, 0.7));
+  z-index: 80;
+}
+
+.pi-agent-container .pi-project-menu-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+  white-space: nowrap;
+}
+
+.pi-agent-container .pi-project-menu-item:hover { background-color: var(--bg-hover); }
+
+.pi-agent-container .pi-project-menu-item.danger { color: var(--accent-red); }
+.pi-agent-container .pi-project-menu-item.danger:hover { background-color: rgba(239, 68, 68, 0.16); }
+
+/* 首选动作：调系统「选择文件夹」对话框（比手敲路径省事）。 */
+.pi-agent-container .pi-pick-folder-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  padding: 9px 11px;
+  border-radius: 8px;
+  border: 1px solid var(--accent-blue);
+  background-color: rgba(59, 130, 246, 0.14);
+  color: var(--accent-blue);
+  font-family: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.pi-agent-container .pi-pick-folder-btn:hover {
+  background-color: rgba(59, 130, 246, 0.24);
+}
+
+.pi-agent-container .pi-pick-folder-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* 分隔线：分隔「选择文件夹」与「手动输入路径」两条退路。 */
+.pi-agent-container .pi-add-popover-divider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 11px;
+  margin: 2px 0;
+}
+
+.pi-agent-container .pi-add-popover-divider::before,
+.pi-agent-container .pi-add-popover-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background-color: var(--border-color);
+}
 
 .pi-agent-container .pi-add-popover label {
   font-size: 12px;
@@ -239,13 +485,66 @@
 
 /* ================= 2. 中间会话侧边栏 ================= */
 .pi-agent-container .sidebar-middle {
-  width: 290px;
+  /* 宽度由 JS 按用户拖拽结果内联设置（--pi-session-width）；默认 290px。
+     最小 180px / 最大 520px 的硬约束在 JS 里保证，这里也有兜底。 */
+  width: var(--pi-session-width, 290px);
+  min-width: 180px;
+  max-width: 520px;
   background-color: var(--bg-dark);
   border-right: 1px solid var(--border-color);
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
   overflow: hidden;
+}
+
+/* 会话列表宽度拖拽手柄：盖在中栏右边界上，加宽命中区（视觉仍是 1px 细线）。
+   平时透明，悬停/拖拽时显示一条高亮竖线，提示此处可拖动。 */
+.pi-agent-container .pi-sidebar-resizer {
+  position: relative;
+  flex: 0 0 auto;
+  width: 5px;
+  margin-left: -3px;   /* 让手柄跨在中栏边框两侧 */
+  margin-right: -2px;
+  cursor: col-resize;
+  background: transparent;
+  z-index: 5;
+  /* 命中区窄，禁止选中文字，拖拽时不出现文本选择 */
+  user-select: none;
+  touch-action: none;
+}
+
+/* 手柄中间的可见细线：默认透明，悬停/拖拽时点亮为强调色 */
+.pi-agent-container .pi-sidebar-resizer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  background: transparent;
+  transition: background-color 0.15s ease;
+}
+
+.pi-agent-container .pi-sidebar-resizer:hover::after,
+.pi-agent-container .pi-sidebar-resizer.pi-resizing::after,
+.pi-agent-container .pi-sidebar-resizer:focus-visible::after {
+  background: var(--accent-blue);
+}
+
+.pi-agent-container .pi-sidebar-resizer:focus-visible {
+  outline: none;
+}
+
+/* 拖拽期间：全局光标保持 col-resize，且禁用文本选择，避免划过内容时选中文字 */
+body.pi-sidebar-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+body.pi-sidebar-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
 }
 
 .pi-agent-container .session-list-container {
@@ -284,6 +583,15 @@
   overflow: hidden;
   text-overflow: ellipsis;
   flex: 1;
+  min-width: 0;
+}
+
+/* 会话底部子行里的最后活跃时间（相对时间：刚刚 / 分钟前 / 小时前 / 天前 /
+   月前 / 年前）。与状态同处一行：「进行中 · 3 小时前」，弱色小字号，不换行。 */
+.pi-agent-container .sub-agent-item .session-time {
+  color: var(--text-muted);
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .pi-agent-container .session-index { color: var(--accent-blue); font-weight: 600; margin-right: 4px; }
@@ -291,6 +599,8 @@
 .pi-agent-container .badge { font-size: 11px; padding: 2px 6px; border-radius: 10px; font-weight: 500; flex-shrink: 0; }
 .pi-agent-container .badge.unread { background-color: var(--accent-green); color: #fff; }
 .pi-agent-container .badge.progress { background-color: rgba(245, 158, 11, 0.2); color: var(--accent-yellow); }
+/* 「待回答」：这个会话有个 ask 在等用户回答，用黄色实心强调，和「当前」徽标区分 */
+.pi-agent-container .badge.ask { background-color: var(--accent-yellow); color: #1e1e1e; font-weight: 600; }
 
 .pi-agent-container .sub-agent-list {
   padding: 0 12px 10px 28px;
@@ -351,8 +661,8 @@
 .pi-agent-container .status-dot.busy { background-color: var(--accent-yellow); box-shadow: 0 0 6px var(--accent-yellow); }
 .pi-agent-container .status-dot.error { background-color: var(--accent-red); box-shadow: 0 0 6px var(--accent-red); }
 
-/* 会话状态点：进行中（绿）/ 已完成未查看（蓝，与「当前」角标同色系）
-   用途与项目角标一致：回答完了但用户还没点开看 → 蓝色，扫一眼就知道哪条要回。 */
+/* 会话状态点：处理中（绿，脉动）/ 已完成未读（蓝，与「当前」角标同色系）
+   用途与项目角标一致：扫一眼就知道哪条还在跑、哪条还没看。 */
 .pi-agent-container .status-dot.running {
   background-color: var(--accent-green);
   box-shadow: 0 0 6px var(--accent-green);
@@ -433,16 +743,10 @@
 .pi-agent-container .load-history-btn:disabled { opacity: 0.5; cursor: not-allowed; border-style: solid; }
 
 /* 「加载更多历史会话」：会话列表默认只列待处理的（进行中/未读），
-   其余历史按页展开。放在列表末尾，与顶部「新建会话」形成上下分工。
-   用 sticky 贴住容器底部——会话一多，按钮会被顶到滚动区之外，
-   用户得先滚到底才看得见（那就失去「点下面展开」的意义了）。 */
+   其余历史按页展开。作为普通元素排在列表内容最末尾，随列表一起滚动——
+   滚到底才看得到、要点开下一页，符合「下面还有更多」的阅读顺序。 */
 .pi-agent-container .pi-more-sessions-btn {
-  position: sticky;
-  bottom: 0;
-  z-index: 4;
   margin: 4px 0 0;
-  background-color: var(--bg-dark);
-  background-clip: padding-box;
   font-size: 12.5px;
   color: var(--text-muted);
 }
@@ -487,12 +791,15 @@
   min-width: 0;
 }
 
+/* 只承载标题文本：用块级 + line-height 垂直居中，
+   而不是 flex——flex 下文本成为匿名 flex item（min-width:auto 不收缩），
+   text-overflow: ellipsis 不生效，只会被 overflow 裁掉。 */
 .pi-agent-container .chat-header {
   height: 60px;
   padding: 0 24px;
   border-bottom: 1px solid var(--border-color);
-  display: flex;
-  align-items: center;
+  display: block;
+  line-height: 60px;
   font-weight: 600;
   font-size: 16px;
   background-color: var(--bg-main);
@@ -519,6 +826,13 @@
   gap: 20px;
 }
 
+/* 聊天区是「可滚动的纵向 flex 容器」：消息块**一律不许被压缩**。
+   flex 子项默认 flex-shrink:1，放不下时浏览器会把它们按比例压扁 ——
+   overflow 非 visible 的子项（.pi-ask-card、.turn-work 等）自动最小高度按 0
+   算，会被直接压扁裁掉底部（ask 卡片的「取消/提交」按钮整个消失），
+   而不是把容器撑出滚动条。同 .pi-settings-body，统一兜住。 */
+.pi-agent-container .chat-body > * { flex-shrink: 0; }
+
 /* 「回到最新消息」：用户向上翻看历史时，固定在消息容器最下面 */
 .pi-agent-container .pi-scroll-bottom {
   position: absolute;
@@ -536,7 +850,7 @@
   font-size: 12.5px;
   font-family: inherit;
   cursor: pointer;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--dialog-shadow, 0 6px 20px rgba(0, 0, 0, 0.5));
   transition: background 0.2s, border-color 0.2s, color 0.2s, opacity 0.2s;
   z-index: 20;
   white-space: nowrap;
@@ -607,13 +921,80 @@
   border-bottom-left-radius: 2px;
 }
 
+/* ===== 编辑已发送的用户消息 ===== */
+
+/* 编辑按钮：位于气泡**下方**（.message.user 是 column + flex-end，天然落在气泡右下）。
+   用固定高度占位，悬停时只淡入不改变布局，避免 hover 抖动。 */
+.pi-agent-container .msg-edit-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  height: 18px;
+  min-width: 18px;
+  margin-top: 1px;
+  padding: 0 4px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted, #888);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease, color 0.12s ease, background-color 0.12s ease;
+  pointer-events: none;
+}
+.pi-agent-container .message.user:hover .msg-edit-btn {
+  opacity: 1;
+  pointer-events: auto;
+}
+.pi-agent-container .msg-edit-btn:hover {
+  color: var(--accent-blue);
+  background-color: var(--hover-bg, rgba(255, 255, 255, 0.08));
+}
+
+/* 编辑态：隐藏原气泡，显示输入框 + 提示条 */
+.pi-agent-container .message.user.editing .message-content { display: none; }
+.pi-agent-container .message.user.editing .msg-edit-btn { display: none; }
+
+.pi-agent-container .msg-edit-box {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: min(560px, 100%);
+  min-width: 260px;
+}
+.pi-agent-container .msg-edit-input {
+  width: 100%;
+  padding: 12px 16px;
+  border-radius: 12px;
+  border: 1px solid var(--accent-blue);
+  background-color: var(--bg-dark);
+  color: var(--text-primary, #eee);
+  font-size: 14px;
+  line-height: 1.6;
+  font-family: inherit;
+  resize: none;
+  overflow-y: auto;
+  max-height: 240px;
+  box-sizing: border-box;
+}
+.pi-agent-container .msg-edit-input:focus { outline: none; border-color: var(--accent-blue); }
+.pi-agent-container .msg-edit-hint {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  text-align: right;
+  user-select: none;
+}
+
 /* agent 消息内的 markdown 基础排版 */
 .pi-agent-container .message-content p { margin: 4px 0; }
 .pi-agent-container .message-content > :first-child { margin-top: 0; }
 .pi-agent-container .message-content > :last-child { margin-bottom: 0; }
 
 .pi-agent-container .message-content code {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--hover-bg, rgba(255, 255, 255, 0.08));
   padding: 1px 5px;
   border-radius: 3px;
   font-size: 12.5px;
@@ -643,158 +1024,39 @@
 
 .pi-agent-container .message-content a { color: var(--accent-blue); }
 
-/* ================= 工具调用卡片 ================= */
-.pi-agent-container .tool-call-item {
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  overflow: hidden;
-  background: rgba(255, 255, 255, 0.03);
-  width: 100%;
-  margin-bottom: 6px;
-  transition: border-color 0.2s;
-}
-
-.pi-agent-container .tool-call-item:last-child { margin-bottom: 0; }
-
-.pi-agent-container .tool-call-item.tool-running {
-  border-color: rgba(59, 130, 246, 0.4);
-}
-
-.pi-agent-container .tool-call-item.tool-error {
-  border-color: rgba(239, 68, 68, 0.4);
-}
-
-.pi-agent-container .tool-call-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  font-size: 12.5px;
-  color: var(--text-secondary);
-}
-
-.pi-agent-container .tool-call-icon {
-  width: 20px;
-  height: 20px;
-  border-radius: 6px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  background: var(--bg-hover);
-  color: var(--text-muted);
-}
-
-.pi-agent-container .tool-call-icon.tool-icon-running {
-  background: rgba(59, 130, 246, 0.15);
-  color: var(--accent-blue);
-  animation: pi-spin 1.2s linear infinite;
-}
-
-.pi-agent-container .tool-call-icon.tool-icon-success {
-  background: rgba(16, 185, 129, 0.15);
-  color: var(--accent-green);
-}
-
-.pi-agent-container .tool-call-icon.tool-icon-error {
-  background: rgba(239, 68, 68, 0.15);
-  color: var(--accent-red);
-}
-
-.pi-agent-container .tool-call-name {
-  flex: 1;
-  font-weight: 500;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.pi-agent-container .tool-call-status-badge {
-  font-size: 11px;
-  padding: 2px 8px;
-  border-radius: 10px;
-  font-weight: 500;
-  flex-shrink: 0;
-}
-
-.pi-agent-container .tool-call-status-badge.running {
-  background: rgba(59, 130, 246, 0.12);
-  color: var(--accent-blue);
-  animation: pi-pulse 1.6s ease-in-out infinite;
-}
-
-.pi-agent-container .tool-call-status-badge.success {
-  background: rgba(16, 185, 129, 0.12);
-  color: var(--accent-green);
-}
-
-.pi-agent-container .tool-call-status-badge.error {
-  background: rgba(239, 68, 68, 0.12);
-  color: var(--accent-red);
-}
-
-/* 工具调用详细信息（展开后） */
-.pi-agent-container .tool-call-detail {
-  padding: 10px 12px;
-  border-top: 1px solid var(--border-color);
-  font-size: 12.5px;
-  line-height: 1.6;
-  color: var(--text-primary);
-  white-space: pre-wrap;
-  word-break: break-all;
-  font-family: "Consolas", "Monaco", "Menlo", monospace;
-  max-height: 160px;
-  overflow-y: auto;
-  background: rgba(0, 0, 0, 0.15);
-}
-
-/* 命令执行输出的特殊样式 */
-.pi-agent-container .tool-call-detail.cmd-detail {
-  color: #a8d5ff;
-  background: rgba(0, 20, 40, 0.25);
-  border-top-color: rgba(59, 130, 246, 0.2);
-}
-
-/* 文件编辑/写入的特殊样式 */
-.pi-agent-container .tool-call-detail.edit-detail {
-  color: #c5e6b3;
-  background: rgba(16, 185, 129, 0.07);
-  border-top-color: rgba(16, 185, 129, 0.15);
-}
-
-/* 错误信息的样式 */
-.pi-agent-container .tool-call-detail.error-detail {
-  color: var(--accent-red);
-  background: rgba(239, 68, 68, 0.07);
-}
-
-/* ================= 动作折叠区（思考 + 工具调用） ================= */
-.pi-agent-container .thought-accordion {
+/* ================= 一轮的工作分组（思考 + 工具调用） ================= */
+/*
+ * 参考 ZCode 前端：整轮动作收进一条可折叠标题线（「工作中 8 秒」/「已工作 3 秒」/
+ * 「已处理」/「已停止」）。运行中默认展开（能实时看到在做些什么），结束后收起，
+ * 随时可点开回看全部思考与每次工具调用。
+ */
+.pi-agent-container .turn-work {
   margin-bottom: 8px;
+  width: 100%;
   border: 1px solid var(--border-color);
   border-radius: 8px;
   overflow: hidden;
-  background: rgba(0, 0, 0, 0.2);
-  width: 100%;
+  background: var(--seg-bg, rgba(0, 0, 0, 0.18));
 }
 
-.pi-agent-container .thought-accordion[hidden] { display: none; }
+.pi-agent-container .turn-work[hidden] { display: none; }
 
-.pi-agent-container .thought-accordion summary {
-  padding: 8px 12px;
-  font-size: 12px;
-  color: var(--text-secondary);
-  cursor: pointer;
-  user-select: none;
+/* 标题线：左侧状态词，右侧自绘箭头（原生 marker 在 Chromium 下对齐差） */
+.pi-agent-container .turn-work-trigger {
   display: flex;
   align-items: center;
   gap: 6px;
+  padding: 7px 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
   list-style: none;
 }
 
-/* 收/展箭头（原生 marker 在 Chromium 下对齐差，用伪元素自绘） */
-.pi-agent-container .thought-accordion summary::-webkit-details-marker { display: none; }
-.pi-agent-container .thought-accordion summary::before {
+.pi-agent-container .turn-work-trigger::-webkit-details-marker { display: none; }
+
+.pi-agent-container .turn-work-trigger::before {
   content: "";
   width: 0;
   height: 0;
@@ -805,48 +1067,239 @@
   flex-shrink: 0;
   opacity: 0.7;
 }
-.pi-agent-container .thought-accordion[open] summary::before { transform: rotate(90deg); }
 
-.pi-agent-container .thought-accordion summary:hover { background-color: var(--bg-hover); }
+.pi-agent-container .turn-work[open] > .turn-work-trigger::before { transform: rotate(90deg); }
+.pi-agent-container .turn-work-trigger:hover { background-color: var(--bg-hover); }
 
-.pi-agent-container .thought-accordion .accordion-content {
-  padding: 10px 12px;
-  border-top: 1px solid var(--border-color);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  max-height: 260px;
-  overflow-y: auto;
+.pi-agent-container .turn-work-status {
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-/* 一段思考文字（等宽字体、淡化；工具卡片之间的思考另起一段） */
-.pi-agent-container .thought-text {
+/* 运行中的状态词：蓝色扫光，暗示「还在跑」 */
+.pi-agent-container .turn-work-status.streaming {
+  color: var(--accent-blue);
+  animation: pi-pulse 1.6s ease-in-out infinite;
+}
+
+/* 动作区：思考行与工具行依次纵向排列 */
+.pi-agent-container .turn-work-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 8px 8px;
+  border-top: 1px solid var(--border-color);
+}
+
+/* ================= 思考行（独立折叠，默认收起） ================= */
+.pi-agent-container .reasoning-row {
+  width: 100%;
+}
+
+.pi-agent-container .reasoning-trigger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 5px 6px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+
+.pi-agent-container .reasoning-trigger::-webkit-details-marker { display: none; }
+
+.pi-agent-container .reasoning-trigger::before {
+  content: "";
+  width: 0;
+  height: 0;
+  border-left: 4px solid currentColor;
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+  transition: transform 0.15s ease;
+  flex-shrink: 0;
+  opacity: 0.6;
+}
+
+.pi-agent-container .reasoning-row[open] > .reasoning-trigger::before { transform: rotate(90deg); }
+.pi-agent-container .reasoning-trigger:hover { background-color: var(--bg-hover); }
+
+.pi-agent-container .reasoning-label { flex-shrink: 0; font-weight: 500; }
+
+/* 流式中的「正在思考」：蓝色（与分组状态词同一套语言） */
+.pi-agent-container .reasoning-label.streaming { color: var(--accent-blue); }
+
+.pi-agent-container .reasoning-meta {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  opacity: 0.85;
+}
+
+/* 流式期间的一行摘要：不展开也能看出它在想什么；超宽向左省略 */
+.pi-agent-container .reasoning-stream {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-muted);
+  opacity: 0.7;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pi-agent-container .reasoning-content {
+  padding: 2px 6px 6px 18px;
+}
+
+.pi-agent-container .reasoning-text {
   font-size: 12.5px;
   line-height: 1.7;
   color: var(--text-muted);
   font-family: "Consolas", "Monaco", "Menlo", monospace;
   white-space: pre-wrap;
   word-break: break-word;
-  padding: 2px 0;
+  max-height: 220px;
+  overflow-y: auto;
 }
 
-/* 工具卡片在折叠区里撑满宽度 */
-.pi-agent-container .accordion-content > .tool-call-item { width: 100%; }
+/* ================= 工具行（单行内联摘要，点开看参数与结果） ================= */
+.pi-agent-container .tool-row {
+  width: 100%;
+  border-radius: 6px;
+}
 
-/* 工具执行结果（结束事件 / 历史回填） */
-.pi-agent-container .tool-call-result {
-  padding: 8px 12px;
-  border-top: 1px solid var(--border-color);
+/* 摘要行：图标 + 类别词 + 主文本 + 变更量 + 次文本 + 箭头 */
+.pi-agent-container .tool-row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 5px 6px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+
+.pi-agent-container .tool-row-head::-webkit-details-marker { display: none; }
+.pi-agent-container .tool-row-head:hover { background-color: var(--bg-hover); }
+
+.pi-agent-container .tool-row-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  color: var(--text-muted);
+}
+
+.pi-agent-container .tool-row-icon.running { color: var(--accent-blue); animation: pi-spin 1.2s linear infinite; }
+.pi-agent-container .tool-row-icon.success { color: var(--accent-green); }
+.pi-agent-container .tool-row-icon.error { color: var(--accent-red); }
+.pi-agent-container .tool-row-icon.stopped { color: var(--text-muted); }
+
+/* 类别词（正在读取 / 已执行 / 执行失败…） */
+.pi-agent-container .tool-row-kind { flex-shrink: 0; font-weight: 500; color: var(--text-muted); }
+.pi-agent-container .tool-row-kind.running { color: var(--accent-blue); }
+.pi-agent-container .tool-row-kind.error { color: var(--accent-red); }
+.pi-agent-container .tool-row-kind.success { color: var(--text-secondary); }
+
+/* 主文本：命令 / 文件路径，占主要宽度，过长省略 */
+.pi-agent-container .tool-row-primary {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-primary);
+  font-family: "Consolas", "Monaco", "Menlo", monospace;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 变更量：+N -N */
+.pi-agent-container .tool-row-change {
+  flex-shrink: 0;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--accent-green);
+  font-family: "Consolas", "Monaco", "Menlo", monospace;
+}
+
+.pi-agent-container .tool-row-secondary {
+  flex-shrink: 0;
+  max-width: 40%;
+  color: var(--text-muted);
+  opacity: 0.85;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 箭头：hover 或展开时可见（与 ZCode 的 ToolSummaryRow 一致） */
+.pi-agent-container .tool-row-chevron {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  color: var(--text-muted);
+  opacity: 0;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.pi-agent-container .tool-row-head:hover .tool-row-chevron,
+.pi-agent-container .tool-row[open] .tool-row-chevron { opacity: 0.8; }
+.pi-agent-container .tool-row[open] .tool-row-chevron { transform: rotate(90deg); }
+
+/* 展开区：参数块 + 结果 / 错误块 */
+.pi-agent-container .tool-row-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 6px 6px 26px;
+}
+
+.pi-agent-container .tool-row-body[hidden] { display: none; }
+
+.pi-agent-container .tool-block {
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--code-bg, rgba(0, 0, 0, 0.18));
+}
+
+.pi-agent-container .tool-block-title {
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--hover-bg, rgba(255, 255, 255, 0.03));
+  border-bottom: 1px solid var(--border-color);
+}
+
+.pi-agent-container .tool-block-pre {
+  margin: 0;
+  padding: 8px 10px;
   font-size: 12px;
   line-height: 1.6;
-  color: var(--text-secondary);
-  white-space: pre-wrap;
-  word-break: break-all;
+  color: var(--text-primary);
   font-family: "Consolas", "Monaco", "Menlo", monospace;
-  max-height: 180px;
-  overflow-y: auto;
-  background: rgba(0, 0, 0, 0.18);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 220px;
+  overflow: auto;
 }
+
+.pi-agent-container .tool-block-error { border-color: rgba(239, 68, 68, 0.35); }
+.pi-agent-container .tool-block-error .tool-block-title { color: var(--accent-red); }
+.pi-agent-container .tool-block-error .tool-block-pre { color: var(--accent-red); }
 
 /* Agent 运行状态指示 */
 .pi-agent-container .pi-agent-status {
@@ -882,13 +1335,6 @@
   50% { opacity: 0.35; }
 }
 
-/* 已完成的工具调用组标题 */
-.pi-agent-container .pi-tool-summary {
-  font-size: 11px;
-  color: var(--text-muted);
-  padding: 2px 0 4px;
-  align-self: flex-start;
-}
 
 /* 空态 / 欢迎 */
 .pi-agent-container .pi-welcome {
@@ -950,17 +1396,17 @@
 
 .pi-agent-container .input-box {
   background-color: var(--bg-input);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
   border-radius: 16px;
   display: flex;
   flex-direction: column;
   transition: all 0.3s ease;
-  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--dialog-shadow, 0 10px 40px rgba(0, 0, 0, 0.5));
 }
 
 .pi-agent-container .input-box:focus-within {
   border-color: rgba(59, 130, 246, 0.6);
-  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5), 0 0 0 2px rgba(59, 130, 246, 0.2);
+  box-shadow: var(--dialog-shadow, 0 10px 40px rgba(0, 0, 0, 0.5)), 0 0 0 2px rgba(59, 130, 246, 0.2);
 }
 
 .pi-agent-container .input-box textarea {
@@ -978,15 +1424,115 @@
   max-height: 200px;
 }
 
-.pi-agent-container .input-box textarea::placeholder { color: #666; }
+.pi-agent-container .input-box textarea::placeholder { color: var(--text-muted, #666); }
+
+/* ===== 待发送图片 chip 与提示 ===== */
+.pi-agent-container .pi-image-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 14px 0;
+}
+.pi-agent-container .pi-image-chip {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.12));
+  background: var(--bg-input, #1a1a1a);
+}
+.pi-agent-container .pi-image-chip img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.pi-agent-container .pi-image-chip-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  line-height: 16px;
+  text-align: center;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 0;
+}
+.pi-agent-container .pi-image-chip-remove:hover { background: rgba(220, 38, 38, 0.9); }
+
+.pi-agent-container .pi-image-warn {
+  margin: 10px 14px 0;
+  padding: 8px 12px;
+  border-radius: 10px;
+  font-size: 12.5px;
+  color: #fcd34d;
+  background: rgba(250, 204, 21, 0.12);
+  border: 1px solid rgba(250, 204, 21, 0.3);
+}
+
+.pi-agent-container .pi-inline-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 92px;
+  transform: translateX(-50%);
+  z-index: 9999;
+  max-width: 80%;
+  padding: 8px 14px;
+  border-radius: 10px;
+  font-size: 13px;
+  background: rgba(220, 38, 38, 0.92);
+  color: #fff;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+}
+.pi-agent-container .pi-inline-toast.warn { background: rgba(250, 204, 21, 0.95); color: #1a1a1a; }
+
+/* ===== 消息里的图片缩略图 ===== */
+.pi-agent-container .message.user .pi-msg-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.pi-agent-container .message.user .pi-msg-image {
+  width: 120px;
+  max-height: 160px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.12));
+}
+.pi-agent-container .message.user .pi-msg-image img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  cursor: zoom-in;
+}
+.pi-agent-container .pi-msg-text { white-space: pre-wrap; word-break: break-word; }
 
 .pi-agent-container .input-toolbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 10px;
   padding: 8px 16px 12px;
 }
 
+/* 左组：附加图片 + 模型选择，紧靠输入框左侧 */
+.pi-agent-container .toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+/* 模型：只读展示 pi 已配置的模型（当前会话级），点击可切换 */
 .pi-agent-container .model-select {
   display: flex;
   align-items: center;
@@ -994,16 +1540,17 @@
   font-size: 13px;
   font-weight: 500;
   color: var(--text-secondary);
-  background: rgba(255, 255, 255, 0.05);
-  padding: 6px 12px;
+  background: var(--hover-bg, rgba(255, 255, 255, 0.05));
+  padding: 5px 12px;
   border-radius: 20px;
   cursor: pointer;
   transition: all 0.2s;
   position: relative;
+  min-width: 0;
   max-width: 320px;
 }
 
-.pi-agent-container .model-select:hover { color: var(--text-primary); background: rgba(255, 255, 255, 0.1); }
+.pi-agent-container .model-select:hover { color: var(--text-primary); background: var(--bg-active, rgba(255, 255, 255, 0.1)); }
 
 .pi-agent-container .model-select span {
   white-space: nowrap;
@@ -1024,8 +1571,30 @@
   font-family: inherit;
 }
 
-.pi-agent-container .toolbar-right { display: flex; align-items: center; gap: 12px; }
-.pi-agent-container .shortcut-hint { font-size: 12px; color: #666; user-select: none; }
+/* 下拉展开后的选项在 Windows 上由系统绘制，用主题变量显式上色
+   （--bg-dark / --text-primary 随宿主主题联动），任何主题下都读得出来 */
+.pi-agent-container .model-select select option {
+  background-color: var(--bg-dark);
+  color: var(--text-primary);
+}
+
+.pi-agent-container .toolbar-right { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+.pi-agent-container .shortcut-hint { font-size: 12px; color: var(--text-muted, #666); user-select: none; }
+
+.pi-agent-container .pi-attach-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted, #888);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.pi-agent-container .pi-attach-btn:hover { color: var(--text-primary); background: var(--bg-active, rgba(255, 255, 255, 0.1)); }
 
 .pi-agent-container .send-btn {
   display: flex;
@@ -1260,7 +1829,7 @@
 
 .pi-agent-container .pi-settings-hint code {
   font-family: "Consolas", "Monaco", monospace;
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--code-bg, rgba(255, 255, 255, 0.06));
   padding: 1px 4px;
   border-radius: 3px;
   font-size: 11px;
@@ -1293,6 +1862,66 @@
 }
 
 .pi-agent-container .pi-settings-error[hidden] { display: none; }
+
+/* ---- 插件（pi 包）页 ---- */
+.pi-agent-container .pi-plugins { display: flex; flex-direction: column; gap: 8px; }
+
+.pi-agent-container .pi-plugins-add { display: flex; gap: 8px; align-items: center; }
+
+.pi-agent-container .pi-plugins-add > input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  font-size: 12.5px;
+  font-family: inherit;
+  color: var(--text-primary);
+  background-color: var(--bg-dark);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  outline: none;
+}
+
+.pi-agent-container .pi-plugins-add > input:focus { border-color: var(--accent-blue); }
+.pi-agent-container .pi-plugins-add > input:disabled { opacity: 0.6; }
+
+.pi-agent-container .pi-plugin-install-btn {
+  padding: 8px 16px;
+  font-size: 12.5px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.pi-agent-container .pi-plugins-progress {
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--bg-hover, rgba(255, 255, 255, 0.05));
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 7px 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.pi-agent-container .pi-plugin-row { cursor: default; }
+.pi-agent-container .pi-plugin-row:hover { border-color: var(--border-color); background-color: var(--bg-dark); }
+
+.pi-agent-container .pi-plugin-actions { display: flex; gap: 6px; flex-shrink: 0; }
+
+.pi-agent-container .pi-plugin-actions .pi-back-btn {
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.pi-agent-container .pi-plugin-actions .pi-back-btn:disabled { opacity: 0.5; cursor: default; }
+
+.pi-agent-container .pi-plugin-remove { color: var(--accent-red); }
+.pi-agent-container .pi-plugin-remove:hover { border-color: var(--accent-red); }
+
+.pi-agent-container .pi-plugins-counts {
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
 
 /* ---- 提供商列表 ---- */
 .pi-agent-container .pi-provider-row {
@@ -1358,7 +1987,7 @@
   letter-spacing: 0.3px;
 }
 
-.pi-agent-container .pi-chip.builtin { background: rgba(255, 255, 255, 0.08); color: var(--text-secondary); }
+.pi-agent-container .pi-chip.builtin { background: var(--hover-bg, rgba(255, 255, 255, 0.08)); color: var(--text-secondary); }
 .pi-agent-container .pi-chip.custom { background: rgba(59, 130, 246, 0.16); color: var(--accent-blue); }
 .pi-agent-container .pi-chip.ok { background: rgba(16, 185, 129, 0.16); color: var(--accent-green); }
 .pi-agent-container .pi-chip.warn { background: rgba(245, 158, 11, 0.16); color: var(--accent-yellow); }
@@ -1416,7 +2045,9 @@
 /* 表单控件的样式挂在**内容区**而不是 .pi-field 上。
    早先只写 .pi-field 里的控件，结果「高级配置」的 JSON 文本框（在
    .pi-advanced-body 里、不在 .pi-field 内）没被覆盖，露出了浏览器默认的
-   白底 + 默认字号，在深色面板里非常刺眼。挂在容器上就不会再有漏网的控件。 */
+   白底 + 默认字号，在深色面板里非常刺眼。挂在容器上就不会再有漏网的控件。
+   控件配色走主题变量（--bg-input / --text-primary），宿主 color-scheme
+   （html.theme-light/dark）保证原生渲染部分（选中态、光标）同步换色。 */
 .pi-agent-container .pi-settings-body input[type="text"],
 .pi-agent-container .pi-settings-body input[type="password"],
 .pi-agent-container .pi-settings-body select,
@@ -1451,7 +2082,8 @@
   min-height: 64px;
 }
 
-/* 下拉箭头：深色背景下原生箭头几乎看不见，换成描边三角 */
+/* 下拉箭头：原生箭头在深色背景下几乎看不见、浅色背景下形态又不一致，
+   统一换成中性灰（#a0a0a0）描边三角——浅深两种面板下都清晰可读 */
 .pi-agent-container .pi-settings-body select {
   appearance: none;
   -webkit-appearance: none;
@@ -1462,8 +2094,8 @@
   cursor: pointer;
 }
 
-/* 下拉展开后的选项在 Windows 上由系统绘制，深色底可能导致「白底白字」，
-   显式给 option 上色，保证任何主题下都读得出来 */
+/* 下拉展开后的选项在 Windows 上由系统绘制，用主题变量显式上色
+   （--bg-dark / --text-primary 随宿主主题联动），任何主题下都读得出来 */
 .pi-agent-container .pi-settings-body select option {
   background-color: var(--bg-dark);
   color: var(--text-primary);
@@ -1486,7 +2118,7 @@
 
 /* 带「显示/隐藏」按钮的密钥框 */
 .pi-agent-container .pi-secret-wrap { position: relative; }
-.pi-agent-container .pi-secret-wrap input { padding-right: 54px !important; }
+.pi-agent-container .pi-secret-wrap input { padding-right: 106px !important; }
 
 .pi-agent-container .pi-secret-toggle {
   position: absolute;
@@ -1504,6 +2136,43 @@
 }
 
 .pi-agent-container .pi-secret-toggle:hover { color: var(--text-primary); background: var(--bg-hover); }
+
+/* 「变量」按钮：从宿主环境变量里选一个引用（放在「显示」左侧） */
+.pi-agent-container .pi-secret-pick {
+  position: absolute;
+  right: 48px;
+  top: 50%;
+  transform: translateY(-50%);
+  border: 1px solid var(--border-color);
+  background: var(--bg-input);
+  color: var(--accent-blue);
+  font-family: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+  padding: 2px 7px;
+  border-radius: 5px;
+  white-space: nowrap;
+}
+
+.pi-agent-container .pi-secret-pick:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent-blue);
+}
+
+/* 引用环境变量时的说明条 */
+.pi-agent-container .pi-field-note {
+  margin-top: 5px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+/* 「来源是环境变量」的徽章：与「已配密钥」区分开 */
+.pi-agent-container .pi-chip.env {
+  color: var(--accent-blue);
+  border-color: var(--accent-blue);
+  background: transparent;
+}
 
 /* 复选框行 */
 .pi-agent-container .pi-check-row {
@@ -1528,7 +2197,7 @@
 .pi-agent-container .pi-advanced {
   border: 1px solid var(--border-color);
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--seg-bg, rgba(255, 255, 255, 0.02));
   margin-bottom: 10px;
   overflow: hidden;
 }
@@ -1542,7 +2211,7 @@
   list-style: none;
 }
 
-/* 自绘箭头（原生三角在深色底上偏暗，且各平台形态不一） */
+/* 自绘箭头（原生三角各平台形态不一，且颜色不随主题；字符箭头取当前文字色） */
 .pi-agent-container .pi-advanced > summary::-webkit-details-marker { display: none; }
 .pi-agent-container .pi-advanced > summary::before {
   content: '▸';
@@ -1675,7 +2344,7 @@
   max-width: 420px;
   width: 90%;
   text-align: center;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+  box-shadow: var(--dialog-shadow, 0 20px 60px rgba(0, 0, 0, 0.6));
 }
 
 .pi-agent-container .pi-install-icon {
@@ -1767,3 +2436,286 @@
 }
 
 .pi-agent-container .pi-install-skip:hover { color: var(--text-secondary); }
+
+/* ===================== 扩展 UI：ask 问答卡片 / 通用弹框 ===================== */
+
+.pi-agent-container .pi-ask-card {
+  margin: 12px 0;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--bg-dark);
+  overflow: hidden;
+  animation: pi-ask-in 0.18s ease-out;
+}
+
+@keyframes pi-ask-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
+.pi-agent-container .pi-ask-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  background: var(--bg-active);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.pi-agent-container .pi-ask-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--accent-blue);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.pi-agent-container .pi-ask-q {
+  padding: 12px 14px;
+  border-top: 1px solid var(--border-color);
+}
+
+.pi-agent-container .pi-ask-q:first-of-type { border-top: none; }
+
+.pi-agent-container .pi-ask-q-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.pi-agent-container .pi-ask-q-desc {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  margin-bottom: 10px;
+  line-height: 1.55;
+}
+
+.pi-agent-container .pi-ask-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pi-agent-container .pi-ask-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+  padding: 9px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-main);
+  color: var(--text-primary);
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+}
+
+.pi-agent-container .pi-ask-option:hover {
+  background: var(--bg-hover);
+  border-color: var(--text-muted);
+}
+
+.pi-agent-container .pi-ask-option.selected {
+  border-color: var(--accent-blue);
+  background: rgba(59, 130, 246, 0.12);
+}
+
+.pi-agent-container .pi-ask-option-label { flex: 1; }
+
+.pi-agent-container .pi-ask-option-hint {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.pi-agent-container .pi-ask-option-rec {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(16, 185, 129, 0.16);
+  color: var(--accent-green);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.pi-agent-container .pi-ask-input {
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 13px;
+  outline: none;
+}
+
+.pi-agent-container .pi-ask-input:focus { border-color: var(--accent-blue); }
+
+.pi-agent-container .pi-ask-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border-color);
+  background: var(--bg-darkest);
+}
+
+.pi-agent-container .pi-ask-btn {
+  padding: 7px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.12s, opacity 0.12s;
+}
+
+.pi-agent-container .pi-ask-btn.primary {
+  background: var(--accent-blue);
+  border-color: var(--accent-blue);
+  color: #fff;
+  font-weight: 600;
+}
+
+.pi-agent-container .pi-ask-btn.primary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.pi-agent-container .pi-ask-btn.ghost {
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.pi-agent-container .pi-ask-btn.ghost:hover { background: var(--bg-hover); }
+
+/* 通用扩展弹框 */
+.pi-extui-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.pi-extui-box {
+  width: min(560px, 90vw);
+  max-height: 80vh;
+  overflow: auto;
+  border: 1px solid var(--border-color, #3e3e42);
+  border-radius: 12px;
+  background: var(--bg-main, #252526);
+  color: var(--text-primary, #e0e0e0);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+}
+
+.pi-extui-title {
+  padding: 14px 16px 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.pi-extui-message {
+  padding: 0 16px 12px;
+  font-size: 13px;
+  color: var(--text-secondary, #a0a0a0);
+  line-height: 1.6;
+}
+
+.pi-extui-box .pi-ask-options,
+.pi-extui-box .pi-ask-input {
+  margin: 0 16px 12px;
+}
+
+.pi-extui-box .pi-ask-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+  padding: 9px 12px;
+  border: 1px solid var(--border-color, #3e3e42);
+  border-radius: 8px;
+  background: var(--bg-main, #252526);
+  color: var(--text-primary, #e0e0e0);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.pi-extui-box .pi-ask-option.selected {
+  border-color: var(--accent-blue, #3b82f6);
+  background: rgba(59, 130, 246, 0.12);
+}
+
+.pi-extui-editor {
+  display: block;
+  width: calc(100% - 32px);
+  min-height: 120px;
+  margin: 0 16px 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color, #3e3e42);
+  border-radius: 8px;
+  background: var(--bg-input, #1a1a1c);
+  color: var(--text-primary, #e0e0e0);
+  font-family: var(--font-mono, monospace);
+  font-size: 13px;
+  resize: vertical;
+}
+
+.pi-extui-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border-color, #3e3e42);
+}
+
+.pi-extui-footer .pi-ask-btn {
+  padding: 7px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color, #3e3e42);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.pi-extui-footer .pi-ask-btn.primary {
+  background: var(--accent-blue, #3b82f6);
+  border-color: var(--accent-blue, #3b82f6);
+  color: #fff;
+  font-weight: 600;
+}
+
+.pi-extui-footer .pi-ask-btn.primary:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.pi-extui-footer .pi-ask-btn.ghost {
+  background: transparent;
+  color: var(--text-secondary, #a0a0a0);
+}
+
+.pi-extui-terminal-box { width: min(760px, 94vw); }
+
+.pi-extui-terminal {
+  margin: 0;
+  padding: 14px 16px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre;
+  color: var(--text-primary, #e0e0e0);
+  outline: none;
+}
+
+.pi-extui-hint {
+  padding: 8px 16px;
+  border-top: 1px solid var(--border-color, #3e3e42);
+  font-size: 12px;
+  color: var(--text-muted, #6a6a6a);
+}

@@ -231,17 +231,44 @@ export function buildTextFilter(spec, opts = {}) {
 /**
  * 构造图片水印的 filter_complex 片段。
  *
- * 返回 `{ filter, label }`：图片水印需要第二个输入 [1:v]，并用 overlay 合成，
- * 所以不能走 `-vf`，只能走 `-filter_complex`（这也是它比文字水印复杂的地方）。
- * 先把 logo 等比缩放到视频宽度的 `sizePct`，再按九宫格定位叠加。
+ * 返回 `{ filter, hasSecondInput }`：图片水印需要额外一路输入 [N:v]，并用
+ * overlay 合成，所以不能走 `-vf`，只能走 `-filter_complex`（这也是它比文字
+ * 水印复杂的地方）。先把 logo 等比缩放到视频宽度的 `sizePct`，再按九宫格定位
+ * 叠加。
+ *
+ * ## 缩放基准（按可靠性排序）
+ *
+ * 1. `opts.videoWidth` 已知（录屏区域宽度 / ffprobe 读出的宽度）→ 直接算出
+ *    绝对像素 `scale=w=<n>:h=-1`，任何版本的 ffmpeg 都认，首选。
+ * 2. 否则用 `rw`（新版 scale 的「参考宽度」= 滤镜图首个视频输入，即主视频）。
+ *
+ * **不要写 `scale=main_w*...`**：`main_w` 是 scale2ref 的变量，在 `scale` 里
+ * 任何版本都不被接受——旧版报「表达式求值失败」，新版直接报
+ * 「Expressions with scale2ref variables are not valid in scale filter」。
+ * （图片水印此前一直转码失败，就是这个原因。）
+ *
+ * @param {object} opts
+ * @param {boolean} opts.hwDownload      ddagrab：先把硬件帧下载成 BGRA 再合成
+ * @param {number}  opts.imageInputIndex 图片输入的序号（前面可能已有音频输入）
+ * @param {number}  opts.videoWidth      主视频宽度（像素），用于绝对缩放
  */
-export function buildImageFilter(spec) {
+export function buildImageFilter(spec, opts = {}) {
   const w = normalizeWatermark(spec);
   if (!w.imagePath) throw new Error("图片水印未指定图片路径");
   const { x, y } = overlayPositionExpr(w.anchor, w.marginPct);
-  const scale = `[1:v]format=rgba,scale=main_w*${(w.sizePct / 100).toFixed(4)}:-1[wm]`;
-  const overlay = `[0:v][wm]overlay=${x}:${y}:format=auto` + (w.opacity < 1 ? `,format=rgba,colorchannelmixer=aa=${w.opacity.toFixed(3)}` : "");
-  return { filter: `${scale};${overlay}`, hasSecondInput: true };
+  const idx = Number(opts.imageInputIndex) > 0 ? Math.floor(Number(opts.imageInputIndex)) : 1;
+  const pct = (w.sizePct / 100).toFixed(4);
+  const scaleExpr =
+    Number(opts.videoWidth) > 0
+      ? `w=${Math.max(2, Math.round((Number(opts.videoWidth) * w.sizePct) / 100))}:h=-1`
+      : `w=rw*${pct}:h=-1`;
+  const download = opts.hwDownload ? "[0:v]hwdownload,format=bgra[base];" : "";
+  const mainLabel = opts.hwDownload ? "[base]" : "[0:v]";
+  const scale = `[${idx}:v]format=rgba,scale=${scaleExpr}[wm]`;
+  const overlay =
+    `${mainLabel}[wm]overlay=${x}:${y}:format=auto` +
+    (w.opacity < 1 ? `,format=rgba,colorchannelmixer=aa=${w.opacity.toFixed(3)}` : "");
+  return { filter: `${download}${scale};${overlay}`, hasSecondInput: true };
 }
 
 /** 路径进滤镜串前要转义：Windows 的 `C:\a\b` 里冒号和反斜杠都是特殊字符 */
@@ -262,7 +289,7 @@ export function buildWatermarkFilter(spec, opts = {}) {
   if (!w.enabled) return null;
   if (w.type === "image") {
     if (!w.imagePath) return null; // 选了图片但还没挑图：静默跳过，别让转码失败
-    const { filter, hasSecondInput } = buildImageFilter(w);
+    const { filter, hasSecondInput } = buildImageFilter(w, opts);
     return { kind: "image", filter, hasSecondInput: !!hasSecondInput, spec: w };
   }
   if (!String(w.text || "").trim()) return null;

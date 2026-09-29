@@ -1,18 +1,19 @@
 {
   "id": "com.mysearch.pi-agent",
   "name": "Pi Agent",
-  "version": "2.5.2",
+  "version": "2.7.0",
   "apiVersion": 1,
   "minAppVersion": "7.9.15",
   "author": "my-search",
-  "description": "Pi 编码代理 - 支持多项目、多模型、模型配置面板、流式对话与工具调用",
+  "description": "Pi 编码代理 - 支持多项目、多模型、模型配置面板、插件管理、流式对话与工具调用",
   "homepage": "https://github.com/My-Search/my-search-desktop",
   "icon": "icon.svg",
   "permissions": [
     "ui.inlay",
     "ui.notify",
     "store",
-    "backend.spawn"
+    "backend.spawn",
+    "file.read"
   ],
   "optionalPermissions": [],
   "contributes": {

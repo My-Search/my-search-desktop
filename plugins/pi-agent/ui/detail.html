@@ -2,8 +2,9 @@
   Pi Agent 界面（严格对齐设计稿 pi-ui.html）
 
   结构：最左侧项目导航栏 / 中间会话侧边栏 / 右侧主内容区。
-  设置（左菜单 + 右内容）整屏覆盖，目前只有「模型配置」一页：
-  它编辑的是 pi 自己的 ~/.pi/agent/models.json，不是插件私有的第二份配置。
+  设置（左菜单 + 右内容）整屏覆盖，含「模型配置」「外观」「插件」三页：
+  - 模型配置编辑的是 pi 自己的 ~/.pi/agent/models.json，不是插件私有的第二份配置；
+  - 插件页管理 pi 自己的包（settings.json 的 packages）。
 -->
 <div class="pi-agent-container" id="pi-agent">
 
@@ -18,6 +19,23 @@
           <path d="M15 2v2M9 2v2M15 20v2M9 20v2M2 15h2M2 9h2M20 15h2M20 9h2"></path>
         </svg>
         <span>模型配置</span>
+      </button>
+      <button class="pi-settings-nav-item" id="pi-settings-nav-appearance" data-pane="appearance">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="9"></circle>
+          <path d="M12 3a9 9 0 0 0 0 18z"></path>
+        </svg>
+        <span>外观</span>
+      </button>
+      <button class="pi-settings-nav-item" id="pi-settings-nav-plugins" data-pane="plugins">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9 3v4a3 3 0 1 0 0 0"></path>
+          <path d="M4 9h4a3 3 0 1 0 0 0"></path>
+          <rect x="4" y="4" width="16" height="16" rx="2"></rect>
+          <path d="M13 20v-4a3 3 0 1 0 0 0"></path>
+          <path d="M20 11h-4a3 3 0 1 0 0 0"></path>
+        </svg>
+        <span>插件</span>
       </button>
       <div class="pi-settings-nav-foot">
         <div class="pi-settings-nav-foot-label">配置文件</div>
@@ -75,15 +93,22 @@
 
     <!-- 添加项目：紧跟最后一个项目图标（不放进列表内，避免被当成项目参与角标/溢出计算） -->
     <div class="pi-add-wrap">
-      <button class="settings-btn" id="pi-add-project" title="添加项目（选择文件夹）">
+      <button class="settings-btn" id="pi-add-project" title="添加项目（选择文件夹 / 拖拽文件夹到此栏）">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <line x1="12" y1="5" x2="12" y2="19"></line>
           <line x1="5" y1="12" x2="19" y2="12"></line>
         </svg>
       </button>
 
-      <!-- 添加项目气泡（设计稿无此交互，沿用相同的视觉语言） -->
+      <!-- 添加项目气泡：首选「选择文件夹」系统对话框；也保留手动输入路径的退路 -->
       <div class="pi-add-popover" id="pi-add-popover" hidden>
+        <button class="pi-pick-folder-btn" id="pi-pick-folder" type="button">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+          </svg>
+          选择文件夹…
+        </button>
+        <div class="pi-add-popover-divider"><span>或手动输入路径</span></div>
         <label>项目文件夹路径</label>
         <input type="text" id="pi-project-path" placeholder="例如 D:\code\my-project" spellcheck="false" autocomplete="off">
         <div class="pi-add-popover-actions">
@@ -93,7 +118,8 @@
       </div>
     </div>
 
-    <!-- 设置：沉在栏底（与添加按钮分开，避免两个同样的齿轮/加号混淆） -->
+    <!-- 设置：沉在栏底（与添加按钮分开，避免两个同样的齿轮/加号混淆）
+         主题切换在设置面板的「外观」页里（左下角设置 → 外观）。 -->
     <div class="pi-settings-wrap">
       <button class="settings-btn" id="pi-settings-btn" title="设置">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -105,11 +131,15 @@
   </div>
 
   <!-- ================= 2. 中间侧边栏（会话列表） ================= -->
-  <div class="sidebar-middle">
+  <div class="sidebar-middle" id="pi-sidebar-middle">
     <div class="session-list-container" id="pi-session-list">
       <!-- 会话列表由 JS 渲染 -->
     </div>
   </div>
+
+  <!-- 会话列表宽度拖拽手柄（左右拖动可调整中间栏宽度，有最小/最大宽度限制） -->
+  <div class="pi-sidebar-resizer" id="pi-sidebar-resizer" role="separator"
+       aria-orientation="vertical" aria-label="调整会话列表宽度" title="拖动调整会话列表宽度（双击恢复默认）" tabindex="0"></div>
 
   <!-- ================= 3. 右侧主内容区 ================= -->
   <div class="main-content">
@@ -141,19 +171,34 @@
 
     <footer class="chat-input-area">
       <div class="input-box">
-        <textarea id="pi-input" placeholder="给 Agent 发送消息... (Enter 发送，Shift + Enter 换行)" rows="1"></textarea>
+        <!-- 待发送图片预览 chip（粘贴/拖放/选择文件后出现） -->
+        <div class="pi-image-chips" id="pi-image-chips" hidden></div>
+        <!-- 模型不支持图片时的提示横幅 -->
+        <div class="pi-image-warn" id="pi-image-warn" hidden>当前模型不支持图片输入，请先切换到支持图片的模型</div>
+        <textarea id="pi-input" placeholder="给 Agent 发送消息... (Enter 发送，Shift + Enter 换行，可粘贴/拖入图片)" rows="1"></textarea>
+        <input type="file" id="pi-file-input" accept="image/*" multiple hidden>
 
         <div class="input-toolbar">
-          <!-- 模型：只读展示 pi 已配置的模型，点击可切换 -->
-          <div class="model-select" id="pi-model-select-wrap" title="使用 pi 配置的模型">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <rect x="4" y="4" width="16" height="16" rx="2"></rect>
-              <path d="M9 9h6v6H9z"></path>
-              <path d="M15 2v2M9 2v2M15 20v2M9 20v2M2 15h2M2 9h2M20 15h2M20 9h2"></path>
-            </svg>
-            <span id="current-model-display">加载中…</span>
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"></path></svg>
-            <select id="pi-model-select"></select>
+          <div class="toolbar-left">
+            <!-- 附加图片按钮 -->
+            <button class="pi-attach-btn" id="pi-attach-btn" title="附加图片" type="button">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="3" width="18" height="18" rx="2"></rect>
+                <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                <polyline points="21 15 16 10 5 21"></polyline>
+              </svg>
+            </button>
+            <!-- 模型：会话级，靠左展示在输入框工具栏（点击切换） -->
+            <div class="model-select" id="pi-model-select-wrap" title="使用 pi 配置的模型（当前会话）">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="4" y="4" width="16" height="16" rx="2"></rect>
+                <path d="M9 9h6v6H9z"></path>
+                <path d="M15 2v2M9 2v2M15 20v2M9 20v2M2 15h2M2 9h2M20 15h2M20 9h2"></path>
+              </svg>
+              <span id="current-model-display">加载中…</span>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"></path></svg>
+              <select id="pi-model-select"></select>
+            </div>
           </div>
 
           <div class="toolbar-right">

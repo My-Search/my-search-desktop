@@ -75,11 +75,13 @@
     "rc-pane-rec", "rc-pane-wm", "rc-pane-lib", "rc-pane-set",
     "rc-rec-btn", "rc-rec-timer", "rc-rec-pause", "rc-rec-info",
     "rc-region-mode", "rc-region-box", "rc-region-x", "rc-region-y", "rc-region-w", "rc-region-h",
+    "rc-region-pick", "rc-region-frame",
+    "rc-pick", "rc-pick-hint", "rc-pick-stage", "rc-pick-img", "rc-pick-rect", "rc-pick-size", "rc-pick-ok",
     "rc-fps", "rc-encoder", "rc-draw-mouse", "rc-rec-wm-on", "rc-rec-wm-editor",
     "rc-drop", "rc-wm-input", "rc-video-meta", "rc-wm-on", "rc-wm-editor",
     "rc-wm-apply", "rc-wm-cancel", "rc-wm-progress", "rc-wm-progress-fill", "rc-wm-progress-text",
     "rc-lib-count", "rc-lib-grid", "rc-lib-empty",
-    "rc-set-ffpath", "rc-set-ffinfo", "rc-set-outdir", "rc-set-bindir",
+    "rc-set-ffpath", "rc-set-ffinfo", "rc-set-capture", "rc-set-outdir", "rc-set-bindir",
     "rc-set-dl", "rc-set-dlrm", "rc-set-bundled", "rc-set-sources",
     "rc-preset-name", "rc-preset-list"
   ].forEach(function (id) {
@@ -100,6 +102,12 @@
   var currentVideo = null;      // detectVideo 结果
   var wmEditors = {};           // { rec: Editor, wm: Editor }
   var unsubs = [];
+  /** 区域框选浮层的运行态：{ originX, originY, width, height, natW, natH } */
+  var pickState = null;
+  /** 框选中的拖拽矩形（画布 CSS 像素） */
+  var pickDrag = null;
+  /** 后端在录制中途推来的提示（如「ddagrab 回退 GDI」），随每拍 info 一起显示 */
+  var tickNote = null;
 
   /** 判定本实例是否还「活着」：宿主保活后旧实例仍在内存，别去动新实例的 DOM */
   function alive() {
@@ -371,9 +379,10 @@
   function renderFfStatus() {
     var ff = (caps && caps.ffmpeg) || {};
     if (ff.found) {
+      // 状态条只留「已就绪」四个字；版本与完整路径挪到悬停 title，别撑爆一行
       dom["rc-ffdot"].className = "rc-dot on";
-      dom["rc-fftext"].textContent = "ffmpeg 已就绪" + (ff.version ? "（v" + ff.version + "）" : "") + "：" + ff.path;
-      dom["rc-ffbar"].title = ff.path || "";
+      dom["rc-fftext"].textContent = "ffmpeg 已就绪";
+      dom["rc-fftext"].title = "ffmpeg 已就绪" + (ff.version ? "（v" + ff.version + "）" : "") + "：" + (ff.path || "");
       if (dom["rc-fffix"]) dom["rc-fffix"].hidden = true;
       if (dom["rc-ffdl"]) dom["rc-ffdl"].hidden = true;
     } else {
@@ -381,6 +390,7 @@
       var needTxt = ff.download && ff.download.needText;
       dom["rc-fftext"].textContent = "尚未准备好 ffmpeg —— 点「一键下载」由插件自带" +
         (needTxt ? "（约 " + needTxt + "）" : "") + "，或手动指定已安装的路径";
+      dom["rc-fftext"].title = "";
       if (dom["rc-fffix"]) dom["rc-fffix"].hidden = false;
       if (dom["rc-ffdl"]) dom["rc-ffdl"].hidden = !canDownload();
     }
@@ -465,6 +475,258 @@
     };
   }
 
+  /* ---------- 区域偏好：坐标、模式、边框开关（跨会话记住） ---------- */
+
+  function readRegionPrefs() {
+    var p = storeGet(STORE_PREFS, {});
+    return p && typeof p === "object" ? p : {};
+  }
+
+  function persistRegionPrefs() {
+    var p = Object.assign({}, readRegionPrefs(), {
+      regionMode: dom["rc-region-mode"].value,
+      region: {
+        x: Number(dom["rc-region-x"].value) || 0,
+        y: Number(dom["rc-region-y"].value) || 0,
+        width: Number(dom["rc-region-w"].value) || 0,
+        height: Number(dom["rc-region-h"].value) || 0
+      },
+      showRegionFrame: dom["rc-region-frame"].checked !== false
+    });
+    storeSet(STORE_PREFS, p);
+  }
+
+  function restoreRegionPrefs() {
+    var p = readRegionPrefs();
+    if (p.regionMode === "custom" || p.regionMode === "full") {
+      dom["rc-region-mode"].value = p.regionMode;
+    }
+    if (p.region && typeof p.region === "object") {
+      if (p.region.x != null) dom["rc-region-x"].value = String(p.region.x);
+      if (p.region.y != null) dom["rc-region-y"].value = String(p.region.y);
+      if (p.region.width != null) dom["rc-region-w"].value = String(p.region.width);
+      if (p.region.height != null) dom["rc-region-h"].value = String(p.region.height);
+    }
+    if (typeof p.showRegionFrame === "boolean") dom["rc-region-frame"].checked = p.showRegionFrame;
+    dom["rc-region-box"].hidden = dom["rc-region-mode"].value !== "custom";
+  }
+
+  /* ======================= 区域框选（屏幕直接框选 / 面板内截图） ======================= */
+
+  var pickStageBound = false;
+
+  /**
+   * 框选录制区域：直接在**全屏遮罩上拖**（宿主的 `ms.screenshot.pickRegion`，
+   * 与截图热键同一套交互——松手即得坐标、遮罩自动关闭）。
+   *
+   * 不再静默退回「面板里那张缩略截图」：那条路要先把桌面压成一张图塞进小
+   * 弹窗里拖着选，既糊又反直觉。屏幕直接框不可用时（缺 screenshot.overlay
+   * 权限、或宿主没带这个命令），给一条**说清楚缺什么**的报错，让用户去补；
+   * 只有在他明确同意时才开面板兜底。
+   */
+  async function openRegionPicker() {
+    if (recordingActive) {
+      toast("录制中不能重新框选区域", "error");
+      return;
+    }
+    var err = null;
+    try {
+      if (!ms || !ms.screenshot || typeof ms.screenshot.pickRegion !== "function") {
+        throw new Error("当前宿主版本不支持屏幕框选");
+      }
+      var rect = await ms.screenshot.pickRegion();
+      if (!rect) return; // 用户按 Esc 取消：什么都不动
+      if (!applyRegionRect(rect)) {
+        toast("选中的区域太小了（至少 16 × 16），请重新框选", "error");
+      }
+      return;
+    } catch (e) {
+      err = e;
+    }
+    // 到这里 = 屏幕直接框失败。问用户要不要退而用面板截图框选，而不是默认就走。
+    var msg = pickFailHint(err);
+    setStatus("屏幕框选不可用：" + msg, "error");
+    var usePanel = false;
+    try {
+      usePanel = await ms.ui.confirm("屏幕直接框选不可用（" + msg + "）。\n\n改用在弹窗里对着桌面截图拖选？");
+    } catch (e) {
+      usePanel = false; // 没弹成 confirm 就别自作主张
+    }
+    if (usePanel) openPanelPicker();
+  }
+
+  /** 把 pickRegion 的失败原因翻成「用户下一步能照做」的中文 */
+  function pickFailHint(e) {
+    var m = errText(e);
+    if (/缺少权限|permission|screenshot\.overlay/i.test(m)) {
+      return "需要「全屏框选遮罩」权限，请到 设置→插件→录屏与水印→权限 里勾选「全屏框选遮罩」";
+    }
+    if (/不支持屏幕框选|当前版本/i.test(m)) {
+      return "宿主未带屏幕框选命令，请重启应用（或更新到最新版）后重试";
+    }
+    return m;
+  }
+
+  /**
+   * 把一个矩形（虚拟桌面**物理**像素）写进区域输入框并记住偏好。
+   * 尺寸小于 16×16 视为误操作，返回 false 由调用方给提示。
+   */
+  function applyRegionRect(rect) {
+    var x = Math.max(0, Math.round(Number(rect.x) || 0));
+    var y = Math.max(0, Math.round(Number(rect.y) || 0));
+    var w = Math.round(Number(rect.width) || 0);
+    var h = Math.round(Number(rect.height) || 0);
+    if (w < 16 || h < 16) return false;
+    dom["rc-region-mode"].value = "custom";
+    dom["rc-region-box"].hidden = false;
+    dom["rc-region-x"].value = String(x);
+    dom["rc-region-y"].value = String(y);
+    dom["rc-region-w"].value = String(w);
+    dom["rc-region-h"].value = String(h);
+    persistRegionPrefs();
+    toast("已设置录制区域：" + w + " × " + h);
+    return true;
+  }
+
+  /**
+   * 兜底路径：面板内框选。后端抓一张整虚拟桌面的冻结截图（物理坐标，与
+   * gdigrab/ddagrab 同一坐标空间），用户在图上拖出录制矩形，这里再按
+   * 「图上像素 → 物理屏幕像素」换算回真实坐标。
+   */
+  async function openPanelPicker() {
+    var box = dom["rc-pick"];
+    if (!box) return;
+    box.hidden = false;
+    pickState = null;
+    pickDrag = null;
+    dom["rc-pick-hint"].textContent = "正在截取当前桌面…";
+    dom["rc-pick-ok"].disabled = true;
+    dom["rc-pick-rect"].hidden = true;
+    dom["rc-pick-size"].textContent = "按住鼠标在图上拖出要录的区域";
+    bindPickStage();
+    try {
+      var snap = await call("screenSnapshot", {});
+      if (!alive() || box.hidden) return;
+      if (!snap || !snap.dataUrl) throw new Error("截图结果为空");
+      dom["rc-pick-img"].src = snap.dataUrl;
+      pickState = {
+        originX: Number(snap.originX) || 0,
+        originY: Number(snap.originY) || 0,
+        width: Number(snap.width) || 0,
+        height: Number(snap.height) || 0
+      };
+      dom["rc-pick-hint"].textContent = "这是一张冻结的桌面截图（含当前窗口），在图上按住拖动即可";
+    } catch (e) {
+      closeRegionPicker();
+      toast("截图失败：" + errText(e), "error");
+    }
+  }
+
+  function closeRegionPicker() {
+    var box = dom["rc-pick"];
+    if (box) box.hidden = true;
+    pickState = null;
+    pickDrag = null;
+    try {
+      if (dom["rc-pick-img"]) dom["rc-pick-img"].removeAttribute("src");
+    } catch (e) { /* 忽略 */ }
+  }
+
+  function bindPickStage() {
+    if (pickStageBound) return;
+    var stage = dom["rc-pick-stage"];
+    if (!stage) return;
+    pickStageBound = true;
+
+    function stagePos(ev) {
+      var img = dom["rc-pick-img"];
+      var r = img.getBoundingClientRect();
+      return {
+        x: Math.min(Math.max(ev.clientX - r.left, 0), r.width),
+        y: Math.min(Math.max(ev.clientY - r.top, 0), r.height)
+      };
+    }
+
+    stage.addEventListener("mousedown", function (ev) {
+      if (!pickState || ev.button !== 0) return;
+      var p = stagePos(ev);
+      pickDrag = { x0: p.x, y0: p.y, x1: p.x, y1: p.y };
+      ev.preventDefault();
+    });
+    stage.addEventListener("mousemove", function (ev) {
+      if (!pickDrag) return;
+      var p = stagePos(ev);
+      pickDrag.x1 = p.x;
+      pickDrag.y1 = p.y;
+      updatePickRect();
+    });
+    // 在浮层任意处松手都算结束（鼠标移出图片才松开也不会卡住）
+    document.addEventListener("mouseup", function (ev) {
+      if (!pickDrag) return;
+      var p = stagePos(ev); // 已按图片边界钳制
+      pickDrag.x1 = p.x;
+      pickDrag.y1 = p.y;
+      updatePickRect();
+      pickDrag = null;
+    });
+  }
+
+  /** 画框 + 更新「使用该区域」按钮与尺寸文案 */
+  function updatePickRect() {
+    var rect = dom["rc-pick-rect"];
+    if (!rect || !pickDrag) return;
+    var l = Math.min(pickDrag.x0, pickDrag.x1);
+    var t = Math.min(pickDrag.y0, pickDrag.y1);
+    var w = Math.abs(pickDrag.x1 - pickDrag.x0);
+    var h = Math.abs(pickDrag.y1 - pickDrag.y0);
+    rect.style.left = l + "px";
+    rect.style.top = t + "px";
+    rect.style.width = w + "px";
+    rect.style.height = h + "px";
+    rect.hidden = w < 2 || h < 2;
+
+    var scr = pickRectToScreen(l, t, w, h);
+    if (!scr) return;
+    dom["rc-pick-size"].textContent = scr.width + " × " + scr.height + " px" +
+      "（" + scr.x + ", " + scr.y + "）";
+    dom["rc-pick-ok"].disabled = !(scr.width >= 16 && scr.height >= 16);
+  }
+
+  /**
+   * 图上 CSS 像素矩形 → 物理屏幕矩形。
+   * 换算用截图的天然尺寸（naturalWidth）而非显示尺寸，缩放显示不影响精度。
+   */
+  function pickRectToScreen(l, t, w, h) {
+    var img = dom["rc-pick-img"];
+    if (!pickState || !img || !img.naturalWidth || !img.naturalHeight) return null;
+    var kx = pickState.width / img.naturalWidth;
+    var ky = pickState.height / img.naturalHeight;
+    var x = pickState.originX + Math.round(l * kx);
+    var y = pickState.originY + Math.round(t * ky);
+    return {
+      x: Math.max(0, x),
+      y: Math.max(0, y),
+      width: Math.round(w * kx),
+      height: Math.round(h * ky)
+    };
+  }
+
+  /** 把面板内框选的结果写回区域输入框并记住偏好 */
+  function applyPickedRegion() {
+    var rect = dom["rc-pick-rect"];
+    if (!rect || rect.hidden) return;
+    var l = parseFloat(rect.style.left) || 0;
+    var t = parseFloat(rect.style.top) || 0;
+    var w = parseFloat(rect.style.width) || 0;
+    var h = parseFloat(rect.style.height) || 0;
+    var scr = pickRectToScreen(l, t, w, h);
+    if (!scr || !applyRegionRect(scr)) {
+      toast("区域太小了，至少 16 × 16 像素", "error");
+      return;
+    }
+    closeRegionPicker();
+  }
+
   async function startRecording() {
     if (!caps || !caps.ffmpeg || !caps.ffmpeg.found) {
       toast("请先下载或指定 ffmpeg", "error");
@@ -485,15 +747,18 @@
         fps: Number(dom["rc-fps"].value) || 30,
         encoder: dom["rc-encoder"].value,
         drawMouse: dom["rc-draw-mouse"].checked,
+        showRegionFrame: dom["rc-region-frame"].checked !== false,
         watermark: dom["rc-rec-wm-on"].checked && wmEditors.rec ? wmEditors.rec.getSpec() : { enabled: false }
       });
     } catch (e) {
       setStatus("启动录制失败：" + errText(e), "error");
       return;
     }
+    persistRegionPrefs();
 
     recordingActive = true;
     paused = false;
+    tickNote = null;
     dom["rc-rec-btn"].textContent = "停止录制";
     dom["rc-rec-btn"].classList.add("recording");
     dom["rc-rec-pause"].disabled = false;
@@ -812,6 +1077,23 @@
     }
     if (dom["rc-set-outdir"]) dom["rc-set-outdir"].textContent = "视频目录：" + ((caps && caps.outDir) || "（未知）");
     if (dom["rc-set-bindir"]) dom["rc-set-bindir"].textContent = "自带 ffmpeg 目录：" + ((caps && caps.binDir) || "（未知）");
+
+    // 采集后端：如实展示当前会用哪个、以及为什么降级
+    if (dom["rc-set-capture"]) {
+      var cap = caps && caps.capture;
+      if (!cap) {
+        dom["rc-set-capture"].textContent = "";
+      } else if (cap.backend === "ddagrab") {
+        dom["rc-set-capture"].textContent = "采集后端：Desktop Duplication（ddagrab，GPU 直出，录屏时光标不闪）";
+      } else {
+        var why = !cap.dda
+          ? "当前 ffmpeg/环境不支持 ddagrab"
+          : cap.singleMonitor === false
+            ? "检测到多屏（ddagrab 单次只能取一个显示器）"
+            : "已手动指定";
+        dom["rc-set-capture"].textContent = "采集后端：GDI（gdigrab，" + why + "；录屏时光标可能闪烁）";
+      }
+    }
     renderPresets();
   }
 
@@ -934,6 +1216,12 @@
     dom["rc-rec-pause"].addEventListener("click", togglePause);
     dom["rc-region-mode"].addEventListener("change", function () {
       dom["rc-region-box"].hidden = dom["rc-region-mode"].value !== "custom";
+      persistRegionPrefs();
+    });
+    // 区域坐标手改也记下来，下次打开还是这组值
+    ["rc-region-x", "rc-region-y", "rc-region-w", "rc-region-h", "rc-region-frame"].forEach(function (id) {
+      var el = dom[id];
+      if (el) el.addEventListener("change", persistRegionPrefs);
     });
     dom["rc-rec-wm-on"].addEventListener("change", function () {
       if (wmEditors.rec) wmEditors.rec.setEnabled(dom["rc-rec-wm-on"].checked);
@@ -1038,6 +1326,9 @@
       else if (act === "remove-bundled") removeBundledFfmpeg();
       else if (act === "preset-save") saveCurrentAsPreset();
       else if (act === "pick-video") pickFromAttachments();
+      else if (act === "region-pick") openRegionPicker();
+      else if (act === "pick-ok") applyPickedRegion();
+      else if (act === "pick-cancel") closeRegionPicker();
     });
   }
 
@@ -1100,6 +1391,7 @@
     var prefs = storeGet(STORE_PREFS, {});
     if (prefs.fps) dom["rc-fps"].value = String(prefs.fps);
     if (prefs.encoder) dom["rc-encoder"].value = prefs.encoder;
+    restoreRegionPrefs();
 
     bindEvents();
     activateTab("rec");
@@ -1116,7 +1408,12 @@
         tickBase = { elapsedMs: p.elapsedMs || 0, at: Date.now() };
         paused = !!p.paused;
         if (!paused) dom["rc-rec-timer"].textContent = fmtDuration(p.elapsedMs || 0);
-        if (p.size) dom["rc-rec-info"].textContent = "录制中…  已写入 " + fmtSize(p.size);
+        // 后端中途换采集后端（ddagrab 回退 gdigrab）时用 note 提示一句，之后每拍都带上
+        if (p.note) tickNote = p.note;
+        var txt = paused ? "已暂停" : "录制中…";
+        if (tickNote) txt += "（" + tickNote + "）";
+        if (p.size) txt += "  已写入 " + fmtSize(p.size);
+        dom["rc-rec-info"].textContent = txt;
       }));
       unsubs.push(ms.backend.onNotification("record:ended", function (p) {
         if (!alive()) return;

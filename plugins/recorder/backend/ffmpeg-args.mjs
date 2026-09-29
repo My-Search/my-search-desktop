@@ -34,7 +34,7 @@ export function normalizeRegion(region) {
  *
  * @param {object} opts
  * @param {string} opts.output        输出文件绝对路径
- * @param {string} opts.format        平台采集后端：win32 → gdigrab；darwin → avfoundation；否则 x11grab
+ * @param {string} opts.format        平台采集后端：win32 → gdigrab（或 ddagrab）；darwin → avfoundation；否则 x11grab
  * @param {object|null} opts.region   区域（null = 全屏）
  * @param {number} opts.fps           帧率
  * @param {boolean} opts.drawMouse    是否录制鼠标指针
@@ -44,6 +44,7 @@ export function normalizeRegion(region) {
  * @param {number} opts.crf           画质（越小越好，0..51），仅 x264 有意义
  * @param {string} opts.display       X11 的 DISPLAY（默认 :0.0）
  * @param {string} opts.avfoundationIndex  macOS 的屏幕索引（默认 "1"）
+ * @param {number} opts.videoWidth    主视频宽度（像素）；图片水印按它算绝对缩放，见 watermark.mjs
  * @returns {{args:string[], hasFilterComplex:boolean, notes:string[]}}
  */
 export function buildRecordArgs(opts = {}) {
@@ -59,8 +60,27 @@ export function buildRecordArgs(opts = {}) {
   // ---- 覆盖输出（重跑同名文件不要卡在交互式提问上）----
   args.push("-y");
 
+  // ddagrab 出的是 D3D11 硬件帧，软件滤镜/编码器都吃不了，必须先下载回内存。
+  // 这是它和 gdigrab（出普通 BGRA）唯一的参数差异。
+  const hwChain = format === "ddagrab" ? "hwdownload,format=bgra" : "";
+
   // ---- 输入（采集）----
-  if (format === "gdigrab") {
+  if (format === "ddagrab") {
+    // Windows：Desktop Duplication API（GPU 直接给帧）。相比 gdigrab 的
+    // BitBlt(SRCCOPY|CAPTUREBLT)，它不经过 GDI 合成层——CAPTUREBLT 每帧都要
+    // 「隐藏光标 → 拷屏 → 再显示光标」，录屏时鼠标狂闪就是这么来的。
+    // ddagrab 是 lavfi 源滤镜，所以走 -f lavfi -i。
+    const parts = ["framerate=" + fps, "draw_mouse=" + (opts.drawMouse === false ? 0 : 1)];
+    if (region) {
+      // offset_x/offset_y 是**所选输出（显示器）本地坐标**，不是虚拟桌面坐标。
+      // 两者只在单屏时相等（虚拟桌面原点恒为主屏原点），因此后端只在单屏
+      // 场景选本后端，见 index.mjs 的 probeCapture。
+      parts.push(`video_size=${region.width}x${region.height}`);
+      parts.push(`offset_x=${region.x}`);
+      parts.push(`offset_y=${region.y}`);
+    }
+    args.push("-f", "lavfi", "-i", "ddagrab=" + parts.join(":"));
+  } else if (format === "gdigrab") {
     args.push("-f", "gdigrab");
     args.push("-framerate", String(fps));
     args.push("-draw_mouse", opts.drawMouse === false ? "0" : "1");
@@ -101,7 +121,17 @@ export function buildRecordArgs(opts = {}) {
   if (audioInputs === 0) args.push("-an");
 
   // ---- 水印（编码时烘焙进画面）----
-  const wm = buildWatermarkFilter(opts.watermark, { timestampMode: "localtime" });
+  // 图片水印要占一路输入，序号排在视频(+可选音频)之后：音频在前时它就是 [2:v]，
+  // 写死 [1:v] 会把音频输入当图片用。
+  const wmImageIndex = 1 + audioInputs;
+  const wm = buildWatermarkFilter(opts.watermark, {
+    timestampMode: "localtime",
+    hwDownload: !!hwChain,
+    imageInputIndex: wmImageIndex,
+    // 图片水印的缩放基准：优先用调用方已知的主视频宽度（录屏区域宽 /
+    // 探测到的桌面宽），见 watermark.mjs 为什么不能用 main_w。
+    videoWidth: Number(opts.videoWidth) > 0 ? opts.videoWidth : region ? region.width : undefined,
+  });
   let hasFilterComplex = false;
   if (wm) {
     if (wm.kind === "image") {
@@ -109,6 +139,8 @@ export function buildRecordArgs(opts = {}) {
       args.push("-i", opts.watermark.imagePath);
       args.push("-filter_complex", wm.filter);
       hasFilterComplex = true;
+    } else if (hwChain) {
+      args.push("-vf", `${hwChain},${wm.filter}`);
     } else {
       args.push("-vf", wm.filter);
     }
@@ -116,6 +148,9 @@ export function buildRecordArgs(opts = {}) {
     if (wm.kind === "text" && !wm.spec.fontFile) {
       notes.push("未指定字体文件，中文可能显示为方块（建议在设置里选择中文字体）");
     }
+  } else if (hwChain) {
+    // 无水印也要把硬件帧下载回内存，否则编码器拒绝输入
+    args.push("-vf", hwChain);
   }
 
   // ---- 编码 ----
@@ -139,7 +174,10 @@ export function buildWatermarkArgs(opts = {}) {
   if (!input) throw new Error("缺少输入视频路径");
   if (!output) throw new Error("缺少输出视频路径");
 
-  const wm = buildWatermarkFilter(opts.watermark, { timestampMode: opts.timestampMode || "pts" });
+  const wm = buildWatermarkFilter(opts.watermark, {
+    timestampMode: opts.timestampMode || "pts",
+    videoWidth: opts.videoWidth,
+  });
   if (!wm) throw new Error("水印未启用或配置不完整");
 
   const args = ["-y", "-i", input];

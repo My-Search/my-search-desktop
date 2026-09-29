@@ -5,8 +5,9 @@ export function nameSessionFromFirstMessage(rec, message) {
   if (existingName) return;
   const title = String(message || "").replace(/\s+/gu, " ").trim();
   if (!title) return;
-  // 截断标题到合理长度（50字符）
-  const truncatedTitle = title.length > 50 ? title.substring(0, 50) + "..." : title;
-  session.setSessionName(truncatedTitle);
-  rec.title = truncatedTitle;
+  // 不做长度截断：会话名由 UI 负责省略显示（CSS text-overflow），
+  // 后端截断会破坏 Unicode（.length 按 UTF-16 码元计，可能切断代理对/变体选择符），
+  // 且用户看到的名字与真实首条消息不一致。
+  session.setSessionName(title);
+  rec.title = title;
 }

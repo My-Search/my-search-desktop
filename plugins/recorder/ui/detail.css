@@ -569,3 +569,99 @@ input[type="color"].rc-input {
 }
 
 .rc-empty p { margin: 0; }
+
+/* ---------- 区域：框选按钮 / 边框开关 ---------- */
+.rc-region-acts {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.rc-region-tip {
+  grid-column: 1 / -1;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--rc-muted);
+}
+
+.rc-btn.sm {
+  padding: 3px 10px;
+  font-size: 12px;
+}
+
+/* ---------- 区域框选浮层（冻结桌面 + 拖拽） ---------- */
+.rc-pick {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 兜底：即使浮层被挪出 .rc-app（那样就吃不到 `.rc-app [hidden]` 的
+   !important 规则），下面这条作者级规则也能压住浏览器默认的 [hidden]——
+   否则 .rc-pick 自己的 display:flex 会让面板一打开就常驻显示。 */
+.rc-pick[hidden] {
+  display: none !important;
+}
+
+.rc-pick-panel {
+  width: min(760px, calc(100vw - 24px));
+  max-height: calc(100vh - 24px);
+  display: flex;
+  flex-direction: column;
+  background: var(--rc-card);
+  border: 1px solid var(--rc-line);
+  border-radius: 8px;
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.28);
+  overflow: hidden;
+}
+
+.rc-pick-head,
+.rc-pick-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  flex: 0 0 auto;
+}
+
+.rc-pick-head { border-bottom: 1px solid var(--rc-line); }
+.rc-pick-foot {
+  border-top: 1px solid var(--rc-line);
+  justify-content: space-between;
+}
+
+.rc-pick-title { font-weight: 600; }
+.rc-pick-head .rc-muted { flex: 1; font-size: 12px; }
+
+.rc-pick-stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 180px;
+  max-height: 62vh;
+  overflow: auto;
+  background: var(--rc-field);
+  cursor: crosshair;
+  user-select: none;
+  -webkit-user-select: none;
+  line-height: 0;
+}
+
+.rc-pick-stage > img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+.rc-pick-rect {
+  position: absolute;
+  border: 2px solid var(--rc-accent);
+  background: rgba(224, 57, 43, 0.16);
+  pointer-events: none;
+}

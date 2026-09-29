@@ -11,6 +11,7 @@
  *   node scripts/build-index.mjs                     # 全量构建
  *   node scripts/build-index.mjs --local <dir>       # 用本地目录当作市场仓库（离线测试）
  *   node scripts/build-index.mjs --assets <dir>      # 用本地资产目录（离线测试）
+ *   node scripts/build-index.mjs --carry <index>     # 离线构建时三方插件的兜底索引
  *
  * ## 上架时间 / 更新时间（存于 index.json）
  *
@@ -36,6 +37,13 @@
  * - `three-parties`：第三方插件，一个仓库一个插件，走该仓库的 Release：
  *     tag = 插件 id，资产 = <插件id>.mspp
  *   解析时下载包、读包内 plugin.json 校验 id 一致。
+ *
+ * ## 三方插件的兜底（--carry）
+ *
+ * 离线构建（`--local`）读不到三方仓库的 Release，若照常解析会把**在架的三方插件**
+ * 误判为「该仓库没有任何 Release」并写进 index.error.json（发布脚本重建索引时踩过）。
+ * 因此离线构建可以传 `--carry <已发布索引>`：三方条目直接从该索引里按仓库地址沿用，
+ * 沿不到的则**跳过**（记为跳过而非错误）——三方插件的权威解析交给 CI 在线构建。
  *
  * ## 异常处理
  *
@@ -66,6 +74,13 @@ const localIdx = args.indexOf("--local");
 const localRepo = localIdx >= 0 ? path.resolve(root, args[localIdx + 1]) : null;
 const assetsIdx = args.indexOf("--assets");
 const assetsDir = assetsIdx >= 0 ? path.resolve(root, args[assetsIdx + 1]) : null;
+/** 离线构建时，三方插件的兜底索引（见文件头「三方插件的兜底」） */
+const carryIdx = args.indexOf("--carry");
+const carryFile = carryIdx >= 0 ? path.resolve(root, args[carryIdx + 1] ?? "") : null;
+if (carryIdx >= 0 && !args[carryIdx + 1]) {
+  console.error("✗ --carry 需要一个已发布索引的路径");
+  process.exit(1);
+}
 const offline = Boolean(localRepo || assetsDir);
 
 const outDir = path.join(root, "dist", "market");
@@ -183,6 +198,43 @@ function repoExists(repo) {
   } catch {
     return false;
   }
+}
+
+/** 从下载地址反解出托管仓库（user/repo）；非 GitHub Release 地址返回 undefined */
+function repoOfDownloadUrl(url) {
+  const m = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/releases\/download\//.exec(String(url ?? ""));
+  return m ? m[1] : undefined;
+}
+
+/**
+ * 加载「待沿用」的已发布索引（`--carry`）。
+ * 返回 Map<user/repo, entry>；未启用或文件缺失时返回 null。
+ */
+function loadCarryEntries() {
+  if (!offline || !carryFile) {
+    // 离线构建不传 --carry 时，三方插件无从解析（它们的包不在本地镜像里）。
+    // 这里必须**醒目告警**：否则会把在架的三方插件悄悄漏掉，
+    // 与「误报无 Release」是同一个坑的两种表现。
+    if (offline && threePartySources.length > 0) {
+      console.warn(
+        `⚠ 离线构建未指定 --carry：${threePartySources.length} 个三方插件无法解析，本次不纳入索引。\n` +
+        `  正式发布请用 node scripts/publish-market.mjs（会自动带上兜底索引）。`
+      );
+    }
+    return null;
+  }
+  if (!existsSync(carryFile)) {
+    console.warn(`⚠ --carry 指定的索引不存在，三方插件将跳过：${path.relative(root, carryFile)}`);
+    return null;
+  }
+  const doc = JSON.parse(readFileSync(carryFile, "utf8"));
+  const map = new Map();
+  for (const p of Array.isArray(doc.plugins) ? doc.plugins : []) {
+    const repo = repoOfDownloadUrl(p.downloadUrl);
+    if (repo) map.set(repo.toLowerCase(), p);
+  }
+  console.log(`↩ 已载入待沿用索引：${map.size} 条（${path.relative(root, carryFile)}）`);
+  return map;
 }
 
 /** 列出仓库某目录下的子目录名 */
@@ -347,6 +399,22 @@ function buildEntry({ manifest, bytes, digest, downloadUrl, iconUrl, categories,
 
 const autoRemoved = [];
 
+/** processOne 的哨兵：本条源按「跳过」处理（既不算成功也不算错误） */
+const SKIP = Symbol("skip");
+
+/** 待沿用的已发布索引（`--carry`，离线构建专属；未启用时为 null） */
+const carryEntries = loadCarryEntries();
+
+/**
+ * 沿用条目时同步源清单条目的时间字段：
+ * 沿用不代表「刚上架/刚更新」，所以只对齐 lastVersion（供下次版本比对），
+ * createTime / latestVersionUpdateTime 一律保持原值。
+ */
+function syncCarriedTimes(item, carried) {
+  if (!item) return;
+  if (typeof carried.version === "string") item.lastVersion = carried.version;
+}
+
 // ===================== 解析：官方插件（仓库内按版本归档） =====================
 
 /**
@@ -436,6 +504,20 @@ async function resolveThreeParty(src) {
   if (!/^[^/]+\/[^/]+$/.test(repo)) {
     throw new Error(`第三方源格式必须是 用户名/仓库名，实际为 ${repo}`);
   }
+
+  // 离线构建：`--local` 的镜像目录里按设计没有三方包（三方包在开发者自己仓库），
+  // 在这里扫 tag 必然为空，于是：
+  //   - 有 `--carry` → 按仓库地址沿用已发布索引里的条目；
+  //   - 没有（或沿不到）→ **跳过**，记为跳过而非「该仓库没有任何 Release」错误。
+  // 两种情况都不把在架的三方插件写成错误项（这正是 2026-09-28 踩过的坑）。
+  // 显式给了 `--assets`（本地三方包目录）时不走这条路，仍按本地字节正常解析。
+  if (offline && !assetsDir) {
+    const carried = carryEntries?.get(repo.toLowerCase());
+    if (!carried) return SKIP;
+    syncCarriedTimes(src.item, carried);
+    return { ...carried };
+  }
+
   if (!repoExists(repo)) {
     autoRemoved.push({ repo, reason: "仓库不存在（404，可能已删除或转私有）" });
     return null; // 不算错误项，走自动移除
@@ -523,6 +605,7 @@ async function processOne(kind, src, label, fn) {
   process.stdout.write(`🔄 ${label} … `);
   try {
     const entry = await fn();
+    if (entry === SKIP) { console.log("跳过（离线构建，交由 CI 在线解析）"); return; }
     if (entry === null) { console.log("跳过（仓库不存在，已从 index.json 移除）"); return; }
     if (seen.has(entry.id)) throw new Error(`插件 id 重复：${entry.id}`);
     seen.add(entry.id);

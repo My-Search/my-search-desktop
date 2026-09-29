@@ -261,6 +261,118 @@ function runOnce(exe, args, { timeout = 60000 } = {}) {
 
 /* ======================= 录屏 ======================= */
 
+/**
+ * 会话已录制时长（毫秒）。
+ *
+ * - 暂停期间不计时，且计时器**冻结**在进入暂停的那一刻（否则界面上的时间
+ *   会在暂停时继续走）；已结束的会话以 endedAt 为准。
+ * - 所有取时长的路径（tick / recordStatus / pause 通知 / ended 回报）都走这
+ *   一个函数，保证口径一致；`pausedMs` 用 `|| 0` 兜底，杜绝 NaN。
+ */
+function sessionElapsed(session, now = Date.now()) {
+  const end = session.endedAt || now;
+  const anchor = session.paused && session.pausedAt ? Math.min(session.pausedAt, end) : end;
+  const ms = anchor - session.startedAt - (session.pausedMs || 0);
+  return ms > 0 ? ms : 0;
+}
+
+/* ======================= 采集后端探测（Windows） ======================= */
+
+/** 进程内缓存；跨进程的副本写在 config.json（key 含 ffmpeg 路径+版本，换版本即失效） */
+let captureProbeMem = null;
+/** 探测结果的保鲜期：中途插拔显示器后 singleMonitor 会过期，别永久相信它 */
+const PROBE_TTL_MS = 24 * 3600 * 1000;
+
+/** 读 PNG 的 IHDR 得到像素尺寸（探测用，避免引入 ffprobe 依赖） */
+function pngSize(file) {
+  try {
+    const b = readFileSync(file);
+    if (b.length < 24 || b.toString("ascii", 12, 16) !== "IHDR") return null;
+    return { w: b.readUInt32BE(16), h: b.readUInt32BE(20) };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 探测两件事（各抓一帧，结果缓存）：
+ *   1. ddagrab 能不能用（ffmpeg 太老没有这个滤镜、无 GPU/在 RDP 里、DDA 会话
+ *      被别的程序占满都会失败）→ 拿到的帧尺寸就是**主输出**尺寸；
+ *   2. gdigrab 抓整个虚拟桌面的尺寸。
+ *
+ * 两者相等 ⇒ 单屏 ⇒ ddagrab 的 output_idx/offset 与虚拟桌面坐标一致，可以直接
+ * 拿区域坐标喂给它；不相等（多屏）时 ddagrab 只能取到单屏，为避免「静默录错
+ * 屏幕」，Windows 多屏一律退回 gdigrab（保持录整片虚拟桌面的旧行为）。
+ */
+async function probeCapture(info) {
+  const key = `${info.path}|${info.version || ""}`;
+  if (captureProbeMem && captureProbeMem.key === key) return captureProbeMem;
+  const cached = readConfig().captureProbe;
+  if (cached && cached.key === key && cached.at && Date.now() - cached.at < PROBE_TTL_MS) {
+    captureProbeMem = cached;
+    return cached;
+  }
+
+  const res = { key, at: Date.now(), dda: false, singleMonitor: false, virtual: null, primary: null };
+  if (process.platform === "win32" && info.found) {
+    const dir = join(DATA_DIR, "probe");
+    const gdiPng = join(dir, "gdi.png");
+    const ddaPng = join(dir, "dda.png");
+    try {
+      mkdirSync(dir, { recursive: true });
+    } catch {}
+    try {
+      await runOnce(info.path, ["-y", "-f", "gdigrab", "-framerate", "5", "-i", "desktop", "-frames:v", "1", gdiPng], {
+        timeout: 25000,
+      });
+      res.virtual = pngSize(gdiPng);
+    } catch (e) {
+      sendLog("warn", "gdigrab 尺寸探测失败: " + String(e.message).slice(0, 200));
+    }
+    try {
+      await runOnce(
+        info.path,
+        ["-y", "-f", "lavfi", "-i", "ddagrab=framerate=5", "-vf", "hwdownload,format=bgra", "-frames:v", "1", ddaPng],
+        { timeout: 25000 }
+      );
+      res.primary = pngSize(ddaPng);
+      res.dda = !!res.primary;
+    } catch (e) {
+      sendLog("info", "ddagrab 不可用: " + String(e.message).slice(0, 200));
+    }
+    res.singleMonitor = !!(
+      res.virtual &&
+      res.primary &&
+      res.virtual.w === res.primary.w &&
+      res.virtual.h === res.primary.h
+    );
+    try {
+      if (existsSync(gdiPng)) unlinkSync(gdiPng);
+      if (existsSync(ddaPng)) unlinkSync(ddaPng);
+    } catch {}
+    writeConfig({ captureProbe: res });
+    sendLog(
+      "info",
+      `采集探测: ddagrab=${res.dda} 单屏=${res.singleMonitor}` +
+        (res.virtual ? ` 虚拟桌面=${res.virtual.w}x${res.virtual.h}` : "") +
+        (res.primary ? ` 主输出=${res.primary.w}x${res.primary.h}` : "")
+    );
+  }
+  captureProbeMem = res;
+  return res;
+}
+
+/**
+ * 选采集后端。`config.json` 里可写 `captureBackend`: "auto"(默认) | "gdi" | "dda"
+ * 作为逃生阀（比如某台机器 ddagrab 有兼容问题时强制回 GDI）。
+ */
+function resolveCaptureFormat(probe, cfg) {
+  if (process.platform !== "win32") return defaultFormat(process.platform);
+  if (cfg.captureBackend === "gdi") return "gdigrab";
+  if (cfg.captureBackend === "dda") return probe && probe.dda ? "ddagrab" : "gdigrab";
+  return probe && probe.dda && probe.singleMonitor ? "ddagrab" : "gdigrab";
+}
+
 async function startRecord(params = {}) {
   if (recording) throw new Error("已有录制在进行中，请先停止");
   const info = requireFfmpeg(await ensureFfmpeg(params.ffmpegPath));
@@ -270,10 +382,14 @@ async function startRecord(params = {}) {
   const spec = normalizeWatermark(params.watermark || DEFAULT_WATERMARK);
   const output = join(OUT_DIR, timestampName("rec") + ".mp4");
 
-  const { args, notes } = buildRecordArgs({
+  const cfg = readConfig();
+  const probe = await probeCapture(info);
+  const format = resolveCaptureFormat(probe, cfg);
+
+  const launch = {
     output,
     platform: process.platform,
-    format: params.format || defaultFormat(process.platform),
+    format,
     region,
     fps: params.fps,
     drawMouse: params.drawMouse,
@@ -281,24 +397,77 @@ async function startRecord(params = {}) {
     watermark: spec,
     encoder: params.encoder,
     crf: params.crf,
-  });
+    // 图片水印按主视频宽度做绝对缩放；全屏时用探测到的虚拟桌面宽
+    videoWidth: region ? region.width : probe && probe.virtual ? probe.virtual.w : undefined,
+  };
+  let { args, notes } = buildRecordArgs(launch);
+  if (format === "gdigrab" && process.platform === "win32" && cfg.captureBackend !== "gdi") {
+    notes = notes.concat(
+      probe && probe.dda && !probe.singleMonitor
+        ? "多屏下 ddagrab 只能取单屏，已用 GDI 采集（光标可能闪烁）"
+        : "ddagrab 不可用，已用 GDI 采集（光标可能闪烁）"
+    );
+  }
 
   sendLog("info", `开始录制: ${info.path} ${args.join(" ")}`);
 
-  const child = spawn(info.path, args, { windowsHide: true, stdio: ["pipe", "ignore", "pipe"] });
   const session = {
-    child,
     output,
     startedAt: Date.now(),
     paused: false,
+    /** 累计暂停时长；必须初始化——tick 里减去 undefined 会得到 NaN，
+     *  JSON.stringify(NaN) 又变成 null，界面于是永远显示 00:00:00 */
+    pausedMs: 0,
+    /** 进入暂停的时刻（paused=false 时无意义） */
+    pausedAt: null,
     endedAt: null,
     exitCode: null,
     lastError: "",
     notes,
     timer: null,
     ffmpeg: info.path,
+    /** 0 = 首次尝试（可能 ddagrab），1 = 已回退 gdigrab */
+    attempt: 0,
+    backend: format === "ddagrab" ? "ddagrab" : "gdigrab",
+    /** 用户显式停止：不再触发回退 */
+    stopping: false,
+    /** 回退重开时按同一份参数再拼一遍 */
+    launch,
   };
   recording = session;
+
+  const child = spawn(info.path, args, { windowsHide: true, stdio: ["pipe", "ignore", "pipe"] });
+  attachRecorderChild(session, child);
+
+  // 每 500ms 推一次时长，让界面计时器与后端一致（避免两边各算各的）
+  session.timer = setInterval(() => {
+    if (recording !== session) return;
+    const st = existsSync(output) ? statSync(output) : null;
+    notify("record:tick", {
+      elapsedMs: sessionElapsed(session),
+      paused: session.paused,
+      size: st ? st.size : 0,
+    });
+  }, 500);
+
+  // 区域录制：屏幕上留一个常驻边框，提示「正在录这一块」。
+  // 边框画在录制矩形**之外**（外扩 3px 的环），所以不会被录进视频。
+  if (region) startRegionBorder(region, params.showRegionFrame);
+
+  return {
+    ok: true,
+    output: relOf(output),
+    args,
+    notes,
+    backend: session.backend,
+    ffmpeg: info.path,
+    startedAt: session.startedAt,
+  };
+}
+
+/** 接线一个 ffmpeg 录制子进程（首次启动与回退重开共用） */
+function attachRecorderChild(session, child) {
+  session.child = child;
 
   child.stderr.on("data", (d) => {
     const s = String(d);
@@ -309,56 +478,228 @@ async function startRecord(params = {}) {
       if (/error|invalid|failed|no such/i.test(line)) sendLog("warn", "ffmpeg: " + line.trim());
     }
   });
+
   child.on("error", (e) => {
     sendLog("error", "启动 ffmpeg 失败: " + e.message);
     session.lastError += "\n" + e.message;
     session.exitCode = -1;
     session.endedAt = Date.now();
+    if (session.timer) clearInterval(session.timer);
+    stopRegionBorder();
     notify("record:ended", { ok: false, error: e.message, output: null });
     if (recording === session) recording = null;
   });
+
   child.on("close", (code) => {
+    // ddagrab 起不来（弹 UAC/锁屏、DDA 会话被占满、探测之后桌面状态变了…）：
+    // 1.5 秒内就退出、且不是用户点的停止 → 立刻换 gdigrab 重开，用户无感。
+    const early = Date.now() - session.startedAt < 1500;
+    if (
+      session.attempt === 0 &&
+      session.backend === "ddagrab" &&
+      early &&
+      !session.stopping &&
+      recording === session
+    ) {
+      sendLog("warn", `ddagrab 启动失败 (code=${code})，回退 gdigrab`);
+      restartWithGdigrab(session);
+      return;
+    }
+
     session.exitCode = code;
     session.endedAt = Date.now();
     if (session.timer) clearInterval(session.timer);
+    stopRegionBorder();
     const ok = code === 0 || code === 255; // 255 是 gdigrab 收到 'q' 后的正常退出码之一
-    const st = existsSync(output) ? statSync(output) : null;
+    const st = existsSync(session.output) ? statSync(session.output) : null;
     sendLog(ok ? "info" : "error", `录制结束 code=${code} size=${st ? st.size : 0}`);
     notify("record:ended", {
       ok: ok && !!st && st.size > 0,
       exitCode: code,
-      output: ok && st ? relOf(output) : null,
+      output: ok && st ? relOf(session.output) : null,
       size: st ? st.size : 0,
-      durationMs: (session.endedAt || Date.now()) - session.startedAt,
+      durationMs: sessionElapsed(session),
       error: ok ? null : lastLines(session.lastError),
     });
     if (recording === session) recording = null;
   });
+}
 
-  // 每 500ms 推一次时长，让界面计时器与后端一致（避免两边各算各的）
-  session.timer = setInterval(() => {
-    if (recording !== session) return;
-    const st = existsSync(output) ? statSync(output) : null;
-    notify("record:tick", {
-      elapsedMs: Date.now() - session.startedAt - session.pausedMs,
-      paused: session.paused,
-      size: st ? st.size : 0,
-    });
-  }, 500);
+/** ddagrab 早夭 → 同一会话改用 gdigrab 重开（时间轴清零，界面收到 tick 即恢复） */
+function restartWithGdigrab(session) {
+  const launch = { ...session.launch, format: "gdigrab" };
+  let built;
+  try {
+    built = buildRecordArgs(launch);
+  } catch (e) {
+    return failSession(session, "回退参数拼装失败: " + e.message);
+  }
+  // 失败尝试可能留下 0 字节的半成品，先清掉，别让它进作品库
+  try {
+    const st = existsSync(session.output) ? statSync(session.output) : null;
+    if (st && st.size === 0) unlinkSync(session.output);
+  } catch {}
 
+  let child;
+  try {
+    child = spawn(session.ffmpeg, built.args, { windowsHide: true, stdio: ["pipe", "ignore", "pipe"] });
+  } catch (e) {
+    return failSession(session, "回退启动失败: " + e.message);
+  }
+
+  session.attempt = 1;
+  session.backend = "gdigrab";
+  session.startedAt = Date.now();
+  session.lastError = "";
+  session.exitCode = null;
+  session.notes = built.notes.concat("ddagrab 启动失败，已回退 GDI 采集（光标可能闪烁）");
+  attachRecorderChild(session, child);
+  sendLog("info", `回退录制: ${session.ffmpeg} ${built.args.join(" ")}`);
+  notify("record:tick", {
+    elapsedMs: 0,
+    paused: session.paused,
+    note: "ddagrab 启动失败，已回退 GDI 采集",
+  });
+}
+
+function failSession(session, error) {
+  session.endedAt = session.endedAt || Date.now();
+  if (session.timer) clearInterval(session.timer);
+  stopRegionBorder();
+  notify("record:ended", { ok: false, error, output: null, durationMs: sessionElapsed(session) });
+  if (recording === session) recording = null;
+}
+
+/* -------------------- 区域常驻边框（Windows） -------------------- */
+
+/** 当前边框子进程；同一时刻只可能有一个（一个录制会话） */
+let regionBorder = null;
+
+/**
+ * 在录制区域外侧画一圈常驻边框。用独立的 PowerShell 窗口实现，理由见
+ * region-border.ps1 头注释（gdigrab 的 -show_region 在 6.x/7.x 会挂死、
+ * ddagrab 没有该选项、宿主侧开窗要动 App）。
+ * 进程带 -ParentPid：后端万一崩了，边框自己也会退出，不留悬空的置顶框。
+ */
+function startRegionBorder(region, enabled) {
+  if (process.platform !== "win32") return;
+  // 界面「录制时显示边框」开关关掉时不画（参数缺省 = 画）
+  if (enabled === false) return;
+  stopRegionBorder();
+  let child;
+  try {
+    child = spawn(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        join(HERE, "region-border.ps1"),
+        "-X",
+        String(region.x),
+        "-Y",
+        String(region.y),
+        "-Width",
+        String(region.width),
+        "-Height",
+        String(region.height),
+        "-ParentPid",
+        String(process.pid),
+      ],
+      { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }
+    );
+  } catch (e) {
+    sendLog("warn", "区域边框启动失败: " + (e?.message || e));
+    return;
+  }
+  const entry = { child };
+  regionBorder = entry;
+  let out = "";
+  child.stdout.on("data", (d) => {
+    out = (out + String(d)).slice(0, 4000);
+    const m = /rect=-?\d+,-?\d+,\d+,\d+/.exec(out);
+    if (m && !entry.ack) {
+      entry.ack = true;
+      sendLog("info", "区域边框已显示 " + m[0]);
+    }
+  });
+  let err = "";
+  child.stderr.on("data", (d) => {
+    err = (err + String(d)).slice(-1500);
+  });
+  child.on("error", (e) => {
+    sendLog("warn", "区域边框异常: " + (e?.message || e));
+    if (regionBorder === entry) regionBorder = null;
+  });
+  child.on("close", () => {
+    if (err && !entry.ack) sendLog("warn", "区域边框启动失败: " + lastLines(err));
+    if (regionBorder === entry) regionBorder = null;
+  });
+}
+
+function stopRegionBorder() {
+  const entry = regionBorder;
+  regionBorder = null;
+  if (!entry || !entry.child) return;
+  try {
+    entry.child.kill();
+  } catch {}
+}
+
+/* -------------------- 桌面冻结截图（区域框选用） -------------------- */
+
+/**
+ * 抓一张整虚拟桌面的 PNG + 它的物理原点/尺寸，供界面「拖拽框选录制区域」。
+ *
+ * 用 PowerShell 抓而不是 ffmpeg：不依赖 ffmpeg 已下载，且坐标由脚本在
+ * DPI-aware 之后读取（物理像素），与 gdigrab/ddagrab 的坐标口径一致。
+ */
+async function screenSnapshot() {
+  if (process.platform !== "win32") {
+    // 其它平台暂未实现脚本；报清楚，别让界面转圈
+    throw new Error("当前平台暂不支持界面框选区域，请手动填写 X/Y/宽/高");
+  }
+  const dir = join(DATA_DIR, "snapshot");
+  const png = join(dir, "snap.png");
+  try {
+    mkdirSync(dir, { recursive: true });
+    if (existsSync(png)) unlinkSync(png);
+  } catch {}
+
+  const script = join(HERE, "screen-snapshot.ps1");
+  let out = "";
+  try {
+    const r = await runOnce(
+      "powershell.exe",
+      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-Out", png],
+      { timeout: 30000 }
+    );
+    out = r.stdout || "";
+  } catch (e) {
+    throw new Error("截图失败: " + String(e.message).slice(0, 300));
+  }
+  const m = /bounds=(-?\d+),(-?\d+),(\d+),(\d+)/.exec(out);
+  if (!m || !existsSync(png)) throw new Error("截图失败（未返回画面尺寸）");
+  const base64 = readFileSync(png).toString("base64");
+  try {
+    unlinkSync(png);
+  } catch {}
   return {
-    ok: true,
-    output: relOf(output),
-    args,
-    notes,
-    ffmpeg: info.path,
-    startedAt: session.startedAt,
+    dataUrl: "data:image/png;base64," + base64,
+    originX: Number(m[1]),
+    originY: Number(m[2]),
+    width: Number(m[3]),
+    height: Number(m[4]),
   };
 }
 
 function stopRecord() {
   if (!recording) return { ok: false, error: "当前没有进行中的录制" };
   const session = recording;
+  // 用户显式停止：即使 ffmpeg 立刻退出也不再走 ddagrab→gdigrab 回退
+  session.stopping = true;
+  stopRegionBorder();
   return new Promise((resolve) => {
     const done = () => resolve({ ok: true, output: relOf(session.output) });
     // 先礼后兵：向 stdin 写 'q' 让 ffmpeg 收尾并写完 moov；3 秒没退再强杀
@@ -393,7 +734,7 @@ function pauseRecord(params = {}) {
     session.pausedMs = (session.pausedMs || 0) + (Date.now() - (session.pausedAt || Date.now()));
     session.paused = false;
   }
-  notify("record:tick", { elapsedMs: Date.now() - session.startedAt - (session.pausedMs || 0), paused: session.paused });
+  notify("record:tick", { elapsedMs: sessionElapsed(session), paused: session.paused });
   return { ok: true, paused: session.paused, note: "gdigrab 不支持真正暂停，时间戳已按暂停时长修正" };
 }
 
@@ -403,7 +744,7 @@ function recordStatus() {
   return {
     active: true,
     output: relOf(recording.output),
-    elapsedMs: Date.now() - recording.startedAt - (recording.pausedMs || 0),
+    elapsedMs: sessionElapsed(recording),
     paused: recording.paused,
     size: st ? st.size : 0,
   };
@@ -641,11 +982,23 @@ async function capabilities(params = {}) {
   const cfg = readConfig();
   const bundled = existingBundled(BIN_DIR);
   const sources = defaultSources();
+  // 采集后端探测：结果写进 config.json，只有首次/过期才真的跑（约 1~2s）
+  const probe = await probeCapture(info);
+  const captureFormat = resolveCaptureFormat(probe, cfg);
   return {
     platform: process.platform,
     dataDir: DATA_DIR,
     outDir: OUT_DIR,
     binDir: BIN_DIR,
+    /** 当前会用哪个采集后端（界面在设置页如实展示，含为什么降级） */
+    capture: {
+      backend: captureFormat === "ddagrab" ? "ddagrab" : "gdigrab",
+      dda: !!probe.dda,
+      singleMonitor: !!probe.singleMonitor,
+      virtual: probe.virtual || null,
+      primary: probe.primary || null,
+      configured: cfg.captureBackend || "auto",
+    },
     ffmpeg: {
       found: !!info.found,
       path: info.path,
@@ -787,6 +1140,11 @@ async function handleRequest(id, method, params) {
       sendResult(id, await startRecord(params || {}));
       return;
 
+    /** 冻结桌面截图 → 界面用来拖拽框选录制区域 */
+    case "screenSnapshot":
+      sendResult(id, await screenSnapshot());
+      return;
+
     case "stopRecord":
       sendResult(id, await stopRecord());
       return;
@@ -881,7 +1239,8 @@ rl.on("line", (line) => {
 
   if (method === "deactivate" && id == null) {
     sendLog("info", "收到 deactivate，正在退出…");
-    // 退出前收尾：正在录制的先停掉，避免留下损坏文件
+    // 退出前收尾：正在录制的先停掉，避免留下损坏文件；常驻边框一并撤掉
+    stopRegionBorder();
     if (recording) {
       try {
         recording.child.stdin.write("q");
@@ -903,7 +1262,8 @@ rl.on("line", (line) => {
 rl.on("close", () => process.exit(0));
 
 process.on("exit", () => {
-  // 进程消失时顺手杀掉 ffmpeg，别留孤儿（宿主的 Job Object 也会兜底）
+  // 进程消失时顺手杀掉 ffmpeg 与区域边框，别留孤儿（宿主的 Job Object 也会兜底）
+  stopRegionBorder();
   try {
     if (recording?.child?.pid && process.platform === "win32") {
       spawn("taskkill", ["/PID", String(recording.child.pid), "/T", "/F"]);

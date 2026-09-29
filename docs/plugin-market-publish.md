@@ -132,6 +132,10 @@ ms.log("info", "插件已加载");
 | `ms.store.get/set/remove/keys()` | `store` | 本地键值存储 |
 | `ms.input.readFile(path)` | `file.read` | 读文件（转 data URL） |
 | `ms.input.listFolder(path)` | `file.read` | 列目录 |
+| `ms.input.fileIcons(entries)` | `file.read` | 批量取系统文件图标（资源管理器同款；返回 `{路径: dataURL}`，取不到的条目不在结果里） |
+| `ms.input.open(path)` / `ms.input.reveal(path)` | `file.read` | 用默认程序打开 / 在资源管理器中定位 |
+| `ms.sync.status()` | `sync` | 读同步状态（`{ enabled, status, lastSyncAt, lastError }`；不含账号/密码信息） |
+| `ms.sync.trigger()` | `sync` | 发起一次数据同步，返回结束后的状态 |
 | `ms.net.fetch(url, opts)` | `net.fetch:<scope>` | 发 HTTP 请求 |
 | `ms.system.writeClipboard(t)` | `clipboard.write` | 写剪贴板 |
 | `ms.system.openExternal(url)` | `system.openExternal` | 用系统浏览器打开 |
@@ -139,6 +143,22 @@ ms.log("info", "插件已加载");
 | `ms.backend.call(m, p)` | `backend.spawn` | 调后台进程 |
 | `ms.log(level, ...)` | 无 | 打日志 |
 | `onSubKeyword(fn)` | 无 | 接收「关键词 : 子词」转发 |
+
+#### 关于数据同步（`sync`）
+
+`ms.sync.*` 触发的是**用户自己的云端备份**（当前实现为 WebDAV），同步单位是
+「整份可备份数据」——设置、订阅、已安装插件及其数据，**不是**你这个插件自己
+那一小块。因此：
+
+- 它只对**桌面端**可用；用户没在「设置 → 备份与同步」里配置并开启同步时，
+  `status().enabled` 为 `false`，`trigger()` 会抛错——请据此做能力降级。
+- `trigger()` 是**异步且可能较久**的（要传输整份备份），不要阻塞界面主流程；
+  同步失败以返回值的 `status: "error"` + `lastError` 表达，而不是抛异常。
+- 用户安装你的插件时会看到一条**专门的数据同步提醒**（说明波及范围），
+  所以请只在功能确实需要时才申请 `sync`，不要顺手加上。
+- 权限本身与数据源无关：宿主目前原生只实现了 WebDAV，以后接入其它同步源时
+  仍是这同一个 `sync` 权限、同一套 API，你无需改清单。
+
 
 ### 6. 完整示例
 
@@ -301,6 +321,7 @@ https://github.com/My-Search/my-search-plugin-market/blob/main/index.error.json
 | `store` | data | 低 | 否 |
 | `file.read` | data | 高 | 否 |
 | `env.read` | data | 高 | **是**（变量名） |
+| `sync` | data | 高 | 否 |
 | `clipboard.write` / `clipboard.read` | device | 低 / 高 | 否 |
 | `selection.read` | device | 高 | 否 |
 | `system.openExternal` | device | 中 | 否 |
@@ -313,6 +334,8 @@ https://github.com/My-Search/my-search-plugin-market/blob/main/index.error.json
 - `permissions` 与 `optionalPermissions` 不能重复
 - **极高风险**权限（`backend.spawn` / `secret.read` / `plugin.install`）或 scope 为 `*`
   的权限，用户安装时会被要求**逐条勾选**确认 —— 请只申请真正需要的权限
+- `sync` 虽为高风险但不需要逐条勾选；不过申请它的插件在安装确认框里会显示一条
+  **专门的数据同步提醒**（写明会触及用户云端的整份数据），请只在功能确实需要时申请
 
 ---
 

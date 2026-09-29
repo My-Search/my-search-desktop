@@ -127,6 +127,10 @@ Each API requires the matching permission in `permissions`, otherwise it throws.
 | `ms.store.get/set/remove/keys()` | `store` | local key-value storage |
 | `ms.input.readFile(path)` | `file.read` | read a file (as data URL) |
 | `ms.input.listFolder(path)` | `file.read` | list a folder |
+| `ms.input.fileIcons(entries)` | `file.read` | batch system file icons (Explorer-style; returns `{path: dataURL}`, misses omitted) |
+| `ms.input.open(path)` / `ms.input.reveal(path)` | `file.read` | open with default app / reveal in file manager |
+| `ms.sync.status()` | `sync` | read sync state (`{ enabled, status, lastSyncAt, lastError }`; no account/credential data) |
+| `ms.sync.trigger()` | `sync` | run a data sync, returns the state after it settles |
 | `ms.net.fetch(url, opts)` | `net.fetch:<scope>` | HTTP request |
 | `ms.system.writeClipboard(t)` | `clipboard.write` | write clipboard |
 | `ms.system.openExternal(url)` | `system.openExternal` | open in system browser |
@@ -134,6 +138,24 @@ Each API requires the matching permission in `permissions`, otherwise it throws.
 | `ms.backend.call(m, p)` | `backend.spawn` | call the backend process |
 | `ms.log(level, ...)` | — | logging |
 | `onSubKeyword(fn)` | — | receive `keyword : sub` forwarding |
+
+#### About data sync (`sync`)
+
+`ms.sync.*` drives **the user's own cloud backup** (WebDAV today), and the unit of
+sync is the *whole* backup — settings, subscriptions, every installed plugin and
+their data — **not** just your plugin's slice. So:
+
+- It is desktop-only. When the user has not configured and enabled sync in
+  *Settings → Backup & Sync*, `status().enabled` is `false` and `trigger()` throws —
+  degrade gracefully.
+- `trigger()` is **async and potentially slow** (it moves the whole backup); do not
+  block your UI on it. Failures come back as `status: "error"` + `lastError` in the
+  return value, **not** as a thrown exception.
+- Users see a **dedicated data-sync notice** when installing your plugin (spelling
+  out the blast radius), so request `sync` only when the feature truly needs it.
+- The permission is source-agnostic: the host natively implements WebDAV only, but
+  future sync backends reuse the same `sync` permission and APIs — your manifest
+  will not need to change.
 
 ### 2.6 Reference implementations
 
@@ -300,6 +322,7 @@ Only the following permissions may be declared:
 | `store` | data | low | no |
 | `file.read` | data | high | no |
 | `env.read` | data | high | **yes** (var name) |
+| `sync` | data | high | no |
 | `clipboard.write` / `clipboard.read` | device | low / high | no |
 | `selection.read` | device | high | no |
 | `system.openExternal` | device | medium | no |
@@ -312,6 +335,9 @@ Only the following permissions may be declared:
 - `permissions` and `optionalPermissions` must not overlap
 - **Critical** permissions or a `*` scope force the user to **check each one
   individually** — request only what you need
+- `sync` is high-risk but does not require individual checkboxes; plugins that
+  request it do get a **dedicated data-sync notice** in the install dialog (stating
+  that it touches the user's entire cloud backup) — request it only when truly needed
 
 ---
 
