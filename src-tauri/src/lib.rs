@@ -19,7 +19,23 @@ use tauri_plugin_autostart::{AutoLaunchManager, ManagerExt as AutostartManagerEx
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tauri_plugin_store::StoreExt;
 
+// Alt+点击带入是 Windows 资源管理器专属功能（低级鼠标钩子 + UIA/COM 解析），
+// 整个模块只依赖 Windows API，故按平台整体编入/剔除。
+#[cfg(windows)]
 mod alt_click;
+/// 非 Windows：同名的空实现，让 lib.rs 的调用点保持平台无关。
+/// 功能在 Windows 之外不存在，故 `is_enabled` 恒为 false。
+#[cfg(not(windows))]
+mod alt_click {
+    /// Windows 之外没有该功能，恒为关闭。
+    pub fn is_enabled() -> bool {
+        false
+    }
+    /// 空实现（无可启用的钩子）。
+    pub fn set_enabled(_enabled: bool) {}
+    /// 空实现（无钩子可装）。
+    pub fn install(_app: tauri::AppHandle) {}
+}
 mod attachments;
 mod backup;
 mod builtin;
@@ -106,6 +122,10 @@ const EVENT_SHORTCUT_CLIPBOARD: &str = "my-search://shortcut-clipboard";
 /// 资源管理器「Alt+点击文件」触发时向主窗口广播的事件名，
 /// payload = { paths: string[] }（前端并入附件，与粘贴/拖入同管线）。
 /// 必须在 show_main_window 的「窗口已显示」事件**之后**发出（见 alt_click.rs）。
+///
+/// 仅 Windows 有产生方（alt_click 整体按平台裁剪），故非 Windows 下一并省去，
+/// 否则会是一条「常量未使用」告警。前端监听端不受影响：事件名是两边约定的字符串。
+#[cfg(windows)]
 const EVENT_ATTACH_PATHS: &str = "my-search://attach-paths";
 
 /// 双击 `.mspp` 插件包（或把路径作为参数传给本程序）时广播的事件名，无 payload。
@@ -479,6 +499,9 @@ fn show_main_window(app: &tauri::AppHandle) {
     SUPPRESS_BLUR_UNTIL_MS.store(now_ms() + BLUR_SUPPRESS_MS, Ordering::Relaxed);
     // 强行带到前台：Alt+点击场景下点击已让资源管理器取得前台，单纯的
     // show()+set_focus() 会被 Windows 前台锁定拒绝（见 force_foreground 注释）。
+    // 该绕过依赖 Win32（AttachThreadInput/SetForegroundWindow），仅 Windows 需要：
+    // 其它平台没有前台锁定这套机制，show()+set_focus() 已经足够。
+    #[cfg(windows)]
     if let Ok(hwnd) = window.hwnd() {
         alt_click::force_foreground(windows::Win32::Foundation::HWND(hwnd.0 as *mut _));
     }

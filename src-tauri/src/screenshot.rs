@@ -1830,6 +1830,10 @@ mod perf {
     ///
     /// 这是「截图后位置偏移」的头号嫌疑：若抓屏拿到的是**逻辑像素**（DPI 不感知），
     /// 而遮罩窗口是**物理像素**，底图就会被拉伸，选区的坐标换算整体差一个缩放比。
+    ///
+    /// 仅 Windows：探针直接调 GDI（GetDC/GetDeviceCaps），其它平台没有这套 API；
+    /// 不加 cfg 会让非 Windows 上 `cargo test` 编译失败（抓屏本也只在 Windows 实现）。
+    #[cfg(windows)]
     #[test]
     #[ignore]
     fn measure_dpi_geometry() {
