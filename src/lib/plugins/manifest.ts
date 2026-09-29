@@ -15,6 +15,9 @@
 // 校验权限串需要区分「未知权限」与「缺 scope」两种错误，只看注入的
 // checkPermissions 回调无法区分（scoped 权限的基础 id 单查永远是 false）。
 import { getPermissionSpec } from "./permissions.ts";
+// shortcut-bindings.ts 同样是零依赖叶子模块：这里只取「宿主已知的插件动作」白名单，
+// 避免把动作名在两处各写一份（清单校验与设置面板必须用同一套口径）。
+import { PLUGIN_SHORTCUT_ACTIONS } from "../shortcut-bindings.ts";
 
 /** 插件 API 面版本：宿主支持的最高版本；插件清单里声明自己按哪版写的 */
 export const PLUGIN_API_VERSION = 1;
@@ -193,12 +196,36 @@ export interface PluginInputHandlersContribution {
   folders?: boolean;
 }
 
+/**
+ * 贡献点：全局快捷键作用类型。
+ *
+ * 插件声明「我提供一个可由全局快捷键触发的动作」。宿主只接受**已知的插件动作**
+ * （见 `PLUGIN_SHORTCUT_ACTIONS`：`screenshot` / `clipboard`）——执行器仍在宿主侧
+ * （截图开原生遮罩、剪贴板广播事件），插件清单只负责声明「提供这个动作」以及
+ * 它的展示标题与默认组合键。
+ *
+ * 可用性随插件安装状态动态变化：装了才在「设置 → 快捷键」的作用类型里出现，
+ * 卸载即从列表与系统热键中移除（见 `shortcut-actions.ts`）。
+ */
+export interface PluginShortcutContribution {
+  /** 宿主动作 id（目前仅 `screenshot` / `clipboard`） */
+  action: string;
+  /** 作用类型在下拉里的展示标题（如「截图（框选 + 标注）」） */
+  title: string;
+  /**
+   * 首次注入时使用的默认组合键（global-hotkey 形式，如 `"ctrl+alt+x"`）。
+   * 键被别的动作占用时会跳过注入（不静默抢键），用户可自行录入。
+   */
+  defaultShortcut?: string;
+}
+
 export interface PluginContributes {
   searchItem?: PluginSearchItemContribution | PluginSearchItemContribution[];
   command?: PluginCommandContribution[];
   detailView?: PluginDetailViewContribution;
   settingsPanel?: PluginSettingsPanelContribution;
   handlers?: PluginInputHandlersContribution;
+  shortcut?: PluginShortcutContribution | PluginShortcutContribution[];
 }
 
 /** 插件清单 */
@@ -562,6 +589,51 @@ function normalizeContributes(
     }
   }
 
+  // ---- shortcut（全局快捷键作用类型；单对象或数组） ----
+  const rawShortcuts =
+    src.shortcut == null ? [] : Array.isArray(src.shortcut) ? src.shortcut : [src.shortcut];
+  const seenActions = new Set<string>();
+  const shortcuts: PluginShortcutContribution[] = [];
+  for (const [i, it] of rawShortcuts.entries()) {
+    if (it == null || typeof it !== "object" || Array.isArray(it)) {
+      errors.push(`contributes.shortcut.invalid:${i}`);
+      continue;
+    }
+    const o = it as Record<string, unknown>;
+    const action = asString(o.action);
+    const title = asString(o.title);
+    if (!action) {
+      errors.push(`contributes.shortcut.action.missing:${i}`);
+      continue;
+    }
+    // 只接受宿主认识的插件动作：执行器在宿主侧，插件不能凭清单注册任意热键动作
+    if (!(PLUGIN_SHORTCUT_ACTIONS as readonly string[]).includes(action)) {
+      errors.push(`contributes.shortcut.action.unsupported:${action}`);
+      continue;
+    }
+    if (!title) {
+      errors.push(`contributes.shortcut.title.missing:${action}`);
+      continue;
+    }
+    if (seenActions.has(action)) {
+      errors.push(`contributes.shortcut.action.duplicated:${action}`);
+      continue;
+    }
+    const defaultShortcut = asString(o.defaultShortcut);
+    if (o.defaultShortcut != null && !defaultShortcut) {
+      errors.push(`contributes.shortcut.defaultShortcut.invalid:${action}`);
+      continue;
+    }
+    seenActions.add(action);
+    shortcuts.push({
+      action,
+      title,
+      defaultShortcut: defaultShortcut ?? undefined,
+    });
+  }
+  if (shortcuts.length === 1) out.shortcut = shortcuts[0];
+  else if (shortcuts.length > 1) out.shortcut = shortcuts;
+
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
@@ -684,6 +756,18 @@ export function describeManifestError(code: string): string {
       return "contributes.handlers.files 必须是布尔值";
     case "contributes.handlers.folders.invalid":
       return "contributes.handlers.folders 必须是布尔值";
+    case "contributes.shortcut.invalid":
+      return `第 ${arg} 个快捷键贡献不是合法对象`;
+    case "contributes.shortcut.action.missing":
+      return `第 ${arg} 个快捷键贡献缺少 action`;
+    case "contributes.shortcut.action.unsupported":
+      return `快捷键作用的动作不受支持：${arg}（仅支持 ${PLUGIN_SHORTCUT_ACTIONS.join(" / ")}）`;
+    case "contributes.shortcut.title.missing":
+      return `快捷键贡献「${arg}」缺少 title`;
+    case "contributes.shortcut.action.duplicated":
+      return `快捷键动作重复：${arg}`;
+    case "contributes.shortcut.defaultShortcut.invalid":
+      return `快捷键贡献「${arg}」的 defaultShortcut 必须是非空字符串`;
     case "backend.invalid":
       return "backend 必须是一个对象";
     case "backend.entry.missing":
@@ -945,6 +1029,18 @@ export function listSearchItems(m: PluginManifest): PluginSearchItemContribution
 /** 取插件声明的命令 */
 export function listCommands(m: PluginManifest): PluginCommandContribution[] {
   return m.contributes?.command ?? [];
+}
+
+/**
+ * 取插件声明的快捷键作用类型（统一成数组）。
+ *
+ * 只有**已安装且启用**的插件才会把这些动作带进「设置 → 快捷键」的作用类型列表
+ * （计算见 `shortcut-actions.ts`）；执行器始终在宿主侧。
+ */
+export function listShortcutActions(m: PluginManifest): PluginShortcutContribution[] {
+  const v = m.contributes?.shortcut;
+  if (!v) return [];
+  return Array.isArray(v) ? v : [v];
 }
 
 /**

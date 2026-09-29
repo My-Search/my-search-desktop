@@ -28,6 +28,21 @@ export type ShortcutAction =
   | "screenshot"
   | "clipboard";
 
+/**
+ * **插件动作**（由插件清单 `contributes.shortcut` 声明、宿主原生执行）。
+ *
+ * 与内置动作（toggle-window / open-plugin / quick-filter / quick-open）的区别：
+ * 这四个由宿主自身提供；而 screenshot / clipboard 是「某个插件提供能力」——
+ * 只有该插件**已安装**时才在设置里出现，卸载即移除（见 `availableShortcutActions`）。
+ * 执行器仍在宿主侧（截图开原生遮罩、剪贴板广播事件），插件清单只声明元数据。
+ */
+export const PLUGIN_SHORTCUT_ACTIONS = ["screenshot", "clipboard"] as const;
+
+/** 是否是插件动作（其可用性取决于对应插件是否已安装） */
+export function isPluginShortcutAction(v: unknown): v is ShortcutAction {
+  return (PLUGIN_SHORTCUT_ACTIONS as readonly unknown[]).includes(v);
+}
+
 /** 一条快捷键绑定 */
 export interface ShortcutBinding {
   /** 组合键字符串（小写、+ 连接、修饰键在前，如 "ctrl+alt+s"） */
@@ -202,11 +217,22 @@ export function validateBindings(bindings: readonly ShortcutBinding[]): { ok: bo
   return { ok: true };
 }
 
-/** 一条绑定的展示文案：作用类型 + 作用对象 */
-export function describeBinding(binding: ShortcutBinding, pluginNameOf?: (id: string) => string | null): string {
+/**
+ * 一条绑定的展示文案：作用类型 + 作用对象。
+ *
+ * @param actionLabelOf 可选的插件动作标题解析（来自插件清单 `contributes.shortcut.title`）。
+ *   截图 / 剪贴板历史这类**插件动作**在未安装插件时没有清单可读，此时退回
+ *   `SHORTCUT_ACTION_LABELS` 的内置兜底文案，保证任何时候都有可读标题。
+ */
+export function describeBinding(
+  binding: ShortcutBinding,
+  pluginNameOf?: (id: string) => string | null,
+  actionLabelOf?: (action: ShortcutAction) => string | null
+): string {
   if (binding.action === "toggle-window") return SHORTCUT_ACTION_LABELS["toggle-window"];
-  if (binding.action === "screenshot") return SHORTCUT_ACTION_LABELS["screenshot"];
-  if (binding.action === "clipboard") return SHORTCUT_ACTION_LABELS["clipboard"];
+  if (binding.action === "screenshot" || binding.action === "clipboard") {
+    return actionLabelOf?.(binding.action) ?? SHORTCUT_ACTION_LABELS[binding.action];
+  }
   if (binding.action === "quick-filter") {
     const header = normalizeQuickFilterHeader(binding.target);
     if (!header) return SHORTCUT_ACTION_LABELS["quick-filter"];

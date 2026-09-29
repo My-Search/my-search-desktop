@@ -29,7 +29,7 @@ import {
   watchPluginDir,
   type BackendStatus,
 } from "../../lib/plugins/ipc.ts";
-import { syncRecordGateway } from "../../lib/plugins/gateway.ts";
+import { syncRecordGateway, syncShortcutActions } from "../../lib/plugins/gateway.ts";
 import { parsePluginManifest, type PluginManifest } from "../../lib/plugins/manifest.ts";
 import { isKnownPermission } from "../../lib/plugins/permissions.ts";
 import { isFreshEvent, planReload } from "../../lib/plugins/dev-reload.ts";
@@ -90,6 +90,13 @@ export function usePluginRuntime() {
       await syncRecordGateway(rec);
     } catch (e) {
       console.warn("[插件] 网关同步失败:", e);
+    }
+    // 快捷键作用类型：装了提供 `contributes.shortcut` 的插件就可用、卸载即移除。
+    // 每次调和都尝试下发（内部按动作集合去重，无变化不会重复发 IPC）。
+    try {
+      await syncShortcutActions(registry);
+    } catch (e) {
+      console.warn("[插件] 快捷键动作同步失败:", e);
     }
     // 目录挂载：确保监听已登记（幂等；设置窗口与搜索窗口都会调，谁先到都行）
     if (rec.source.dev && rec.source.ref) {
@@ -300,6 +307,13 @@ export function usePluginRuntime() {
       removePlugin(registry, pluginId);
       persist();
       delete backends[pluginId];
+      // 卸载可能带走了某个快捷键作用类型（如「截图」）：立刻下发可用动作，
+      // 让宿主移除它的绑定并注销热键（卸载没有 reconcile，不能省这一步）。
+      try {
+        await syncShortcutActions(registry);
+      } catch (e) {
+        console.warn("[插件] 快捷键动作同步失败:", e);
+      }
     } finally {
       busy.value = false;
     }

@@ -269,6 +269,19 @@ export async function syncGateway(payload: {
   await invoke("plugin_gateway_sync", { spec: payload });
 }
 
+/**
+ * 下发「当前已安装插件提供的快捷键作用类型」给宿主。
+ *
+ * 宿主据此注入缺失的默认热键 / 移除已卸载动作的绑定（见 lib.rs
+ * `sync_plugin_shortcut_actions`）。浏览器调试环境无 Tauri，直接跳过。
+ */
+export async function syncPluginShortcutActions(
+  actions: Array<{ action: string; defaultShortcut: string }>
+): Promise<void> {
+  if (!isTauri) return;
+  await invoke("sync_plugin_shortcut_actions", { actions });
+}
+
 /** 启动插件后台进程 */
 export async function startPluginBackend(pluginId: string): Promise<BackendStatus> {
   if (!isTauri) throw new Error("后台进程仅在桌面端可用");

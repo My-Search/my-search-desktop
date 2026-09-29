@@ -1577,10 +1577,11 @@ pub fn screenshot_notify_saved(app: tauri::AppHandle, plugin_id: Option<String>,
 /// 插件前台要显示「当前快捷键」，而快捷键的权威存储是宿主的 settings.json
 /// （`shortcut_bindings`），插件不该自己存一份、否则两边会不一致。
 ///
-/// 返回空串的语义是「**没绑**」：宿主会把默认截图热键自愈补进绑定列表
-/// （见 lib.rs `ensure_screenshot_binding`），因此正常情况这里总能读到键；
-/// 读到空串只可能是用户主动解绑过——那种情况下如实返回，让前台显示「未设置」，
-/// 而不是再报一个并不能按下去用的默认值。
+/// 返回空串的语义是「**没绑**」：只要「截图」插件已安装，宿主就会按清单里的
+/// `contributes.shortcut.defaultShortcut` 自动注入一条默认热键
+/// （见 lib.rs `reconcile_plugin_actions`），因此正常情况这里总能读到键；
+/// 读到空串只可能是插件未安装或用户主动解绑过——那种情况下如实返回，让前台显示
+/// 「未设置」，而不是再报一个并不能按下去用的默认值。
 #[tauri::command]
 pub fn screenshot_get_shortcut(app: tauri::AppHandle) -> Result<String, String> {
     let bindings = crate::read_shortcut_bindings_for_plugin(&app);

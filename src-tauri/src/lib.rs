@@ -65,16 +65,16 @@ const SETTINGS_KEY_SHORTCUT_BINDINGS: &str = "shortcut_bindings";
 
 /// 设置存储里「截图热键已被用户主动解绑」的键名。
 ///
-/// 为什么要单独记一个标记：`read_shortcut_bindings` 会**自愈补齐**缺失的截图
-/// 绑定（老用户的列表里本来就没有它，而热键只有真的注册到系统才生效）。
-/// 但「列表里没有截图绑定」有两种含义——「从没配过」与「用户主动解绑了」。
-/// 前者要补齐，后者必须尊重，否则用户解绑后一重启它又回来，像个关不掉的开关。
+/// 为什么要单独记一个标记：插件动作（截图 / 剪贴板历史）在**插件已安装**时
+/// 会被宿主按清单声明自动注入一条默认热键（见 `reconcile_plugin_actions`）。
+/// 但「列表里没有该动作的绑定」有两种含义——「从没配过」与「用户主动解绑了」。
+/// 前者要注入，后者必须尊重，否则用户解绑后一重启它又回来，像个关不掉的开关。
 const SETTINGS_KEY_SCREENSHOT_UNBOUND: &str = "screenshot_unbound";
 
 /// 设置存储里「剪贴板历史热键已被用户主动解绑」的键名。
 ///
-/// 与 `SETTINGS_KEY_SCREENSHOT_UNBOUND` 同理：`read_shortcut_bindings` 会自愈补齐
-/// 缺失的剪贴板历史绑定，必须能区分「从没配过」（要补）与「用户主动解绑」（要尊重）。
+/// 与 `SETTINGS_KEY_SCREENSHOT_UNBOUND` 同理：自动注入必须能区分
+/// 「从没配过」（要注入）与「用户主动解绑」（要尊重）。
 const SETTINGS_KEY_CLIPBOARD_UNBOUND: &str = "clipboard_unbound";
 
 /// 快捷键作用类型：呼出/隐藏搜索窗（默认，仅允许一条）
@@ -87,27 +87,21 @@ const SHORTCUT_ACTION_QUICK_FILTER: &str = "quick-filter";
 /// 快捷键作用类型：快捷打开项（作用对象 = 匹配文本，如「百度翻译」；
 /// 前端按文本精确匹配数据项并直接打开，等价于点击结果项）
 const SHORTCUT_ACTION_QUICK_OPEN: &str = "quick-open";
-/// 快捷键作用类型：截图（抓屏 + 全屏框选，无需作用对象。
-/// 实现见 screenshot.rs；这是唯一「不经过前端」的动作——直接在 Rust 里开遮罩窗口，
-/// 因为遮罩必须是独立窗口，插件详情视图办不到）
+/// 快捷键作用类型：截图（抓屏 + 全屏框选，无需作用对象）。
+///
+/// 这是**插件动作**：由「截图」插件在清单里用 `contributes.shortcut` 声明，
+/// 只有该插件已安装时才在设置里出现（可用性计算在前端，见 `shortcut-actions.ts`）。
+/// 执行器仍在宿主侧——抓屏与遮罩必须是独立原生窗口，插件详情视图（inlay）办不到，
+/// 见 screenshot.rs。
 const SHORTCUT_ACTION_SCREENSHOT: &str = "screenshot";
-
-/// 「截图」动作的默认快捷键（首次安装 / 尚未绑定时使用）。
-/// 选 ctrl+alt+x：与微信 Alt+A、QQ Ctrl+Alt+A、Snipaste F1 都不冲突，
-/// 也不占用宿主自己的 ctrl+alt+s。
-const DEFAULT_SCREENSHOT_SHORTCUT: &str = "ctrl+alt+x";
 
 /// 快捷键作用类型：剪贴板历史（无需作用对象）。
 ///
-/// 与截图不同，它**走前端**：Rust 只负责把主窗口带到前台 + 广播事件
-/// （`EVENT_CLIPBOARD_UPDATED`），由前端打开内置插件 `com.mysearch.clipboard`
-/// 的详情视图（inlay 能在主 WebView 里开，无需独立窗口）。
+/// 同样是**插件动作**（由「剪贴板历史」插件声明）。与截图不同，它**走前端**：
+/// Rust 只负责把主窗口带到前台 + 广播事件（`EVENT_SHORTCUT_CLIPBOARD`），
+/// 由前端打开插件 `com.mysearch.clipboard` 的详情视图（inlay 能在主 WebView 里开，
+/// 无需独立窗口）。
 const SHORTCUT_ACTION_CLIPBOARD: &str = "clipboard";
-
-/// 「剪贴板历史」动作的默认快捷键。
-/// 选 ctrl+alt+v：贴近「粘贴」的直觉，且不与宿主 ctrl+alt+s（呼出）、
-/// ctrl+alt+x（截图）冲突。
-const DEFAULT_CLIPBOARD_SHORTCUT: &str = "ctrl+alt+v";
 
 /// 快捷键（open-plugin）触发时向主窗口广播的事件名，payload = { pluginId }
 const EVENT_SHORTCUT_OPEN_PLUGIN: &str = "my-search://shortcut-open-plugin";
@@ -953,6 +947,15 @@ fn is_known_shortcut_action(action: &str) -> bool {
         || action == SHORTCUT_ACTION_CLIPBOARD
 }
 
+/// 是否是**插件动作**（由插件清单 `contributes.shortcut` 声明，宿主原生执行）。
+///
+/// 与内置动作（toggle-window / open-plugin / quick-filter / quick-open）相对：
+/// 内置动作永远可用；插件动作只有对应插件**已安装**时才可用，由前端算出后经
+/// `sync_plugin_shortcut_actions` 下发（见 `reconcile_plugin_actions`）。
+fn is_plugin_shortcut_action(action: &str) -> bool {
+    action == SHORTCUT_ACTION_SCREENSHOT || action == SHORTCUT_ACTION_CLIPBOARD
+}
+
 /// 绑定列表长度上限（防止设置文件被写爆 / 注册过多全局热键）
 const MAX_SHORTCUT_BINDINGS: usize = 50;
 
@@ -1031,36 +1034,16 @@ pub(crate) fn set_screenshot_unbound(app: &tauri::AppHandle, unbound: bool) {
     }
 }
 
-
-///
-/// **为什么需要这一步**：截图热键由宿主注册，而宿主只注册 settings.json 里
-/// `shortcut_bindings` 列出的条目。老用户的列表里只有呼出/打开插件那几条，
-/// 若只把默认键当「没绑定时返回的展示值」，插件前台会显示 Ctrl+Alt+X 而系统里
-/// 根本没注册这个热键——按下去毫无反应（真实踩到过的故障）。
-///
-/// 自愈补齐后「显示的热键」与「已注册的热键」必然一致。三种情况不补：
-///   - 已经有了（用户自己绑的，或上次已补过）；
-///   - 用户**主动解绑**过（`screenshot_unbound` 标记，见插件前台「解绑」按钮）；
-///   - 默认键已被列表里别的动作占用（改动过设置的极小概率）——宁可暂时没有
-///     截图热键（插件前台显示「未设置」，用户可自行绑一个），也不能悄悄抢键。
-fn ensure_screenshot_binding(bindings: &mut Vec<ShortcutBinding>, unbound: bool) {
-    if unbound {
-        return;
-    }
-    if bindings.iter().any(|b| b.action == SHORTCUT_ACTION_SCREENSHOT) {
-        return;
-    }
-    if bindings
-        .iter()
-        .any(|b| b.shortcut == DEFAULT_SCREENSHOT_SHORTCUT)
-    {
-        return;
-    }
-    bindings.push(ShortcutBinding {
-        shortcut: DEFAULT_SCREENSHOT_SHORTCUT.to_string(),
-        action: SHORTCUT_ACTION_SCREENSHOT.to_string(),
-        target: None,
-    });
+/// 读取某个插件动作是否被用户主动解绑过（截图 / 剪贴板历史各一个标记）。
+fn is_plugin_action_unbound(app: &tauri::AppHandle, action: &str) -> bool {
+    let key = match action {
+        SHORTCUT_ACTION_SCREENSHOT => SETTINGS_KEY_SCREENSHOT_UNBOUND,
+        SHORTCUT_ACTION_CLIPBOARD => SETTINGS_KEY_CLIPBOARD_UNBOUND,
+        _ => return false,
+    };
+    settings_store(app)
+        .and_then(|store| store.get(key).and_then(|v| v.as_bool()))
+        .unwrap_or(false)
 }
 
 /// 记录/清除「用户主动解绑剪贴板历史热键」标记（与截图版同构）。
@@ -1073,29 +1056,68 @@ pub(crate) fn set_clipboard_unbound(app: &tauri::AppHandle, unbound: bool) {
     }
 }
 
-/// 自愈补齐缺失的「剪贴板历史」绑定（与 `ensure_screenshot_binding` 同构）。
+/// 前端下发的「某插件动作可用」声明（`sync_plugin_shortcut_actions` 的载荷）。
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PluginShortcutAction {
+    /// 宿主动作 id（目前仅 screenshot / clipboard）
+    pub(crate) action: String,
+    /// 首次注入用的默认组合键（空串 = 不自动注入）
+    #[serde(default)]
+    pub(crate) default_shortcut: String,
+}
+
+/// 按「当前可用的插件动作」调和绑定列表（纯函数，便于单测）。
 ///
-/// 理由完全一致：剪贴板历史热键由宿主注册，只把默认键当「展示值」是不够的——
-/// 老用户的 settings.json 里没有这一条，插件前台却会显示 Ctrl+Alt+V，按下去没反应。
-/// 三种情况不补：已有、用户主动解绑过、默认键已被别的动作占用。
-fn ensure_clipboard_binding(bindings: &mut Vec<ShortcutBinding>, unbound: bool) {
-    if unbound {
-        return;
+/// 规则（顺序即结果，不做重复注册）：
+///   1. 内置动作（toggle / open-plugin / quick-*）的绑定**原样保留**；
+///   2. 插件动作：action 仍在 `available` 里的保留；**已不可用（插件被卸载）的移除**；
+///   3. 对每个可用、当前没有绑定、未被用户主动解绑、且默认键没被占用的动作，
+///      按 `default` 注入一条 —— 这就是「装了插件才会出现这个快捷键」的落点；
+///   4. 默认键为空 / 已被别的绑定占用时跳过注入（不静默抢键）。
+///
+/// `available` = (action, default_shortcut) 列表；`unbound` 判定某动作是否被用户主动解绑。
+fn reconcile_plugin_actions(
+    bindings: Vec<ShortcutBinding>,
+    available: &[PluginShortcutAction],
+    unbound: &dyn Fn(&str) -> bool,
+) -> Vec<ShortcutBinding> {
+    let available_actions: Vec<&str> = available.iter().map(|a| a.action.as_str()).collect();
+
+    // 1+2) 过滤：内置动作全留；插件动作只留 action 仍可用的
+    let mut out: Vec<ShortcutBinding> = bindings
+        .into_iter()
+        .filter(|b| {
+            if !is_plugin_shortcut_action(&b.action) {
+                true
+            } else {
+                available_actions.contains(&b.action.as_str())
+            }
+        })
+        .collect();
+
+    // 3) 注入缺失的插件动作（用户主动解绑过的、默认键被占用的、无默认键的跳过）
+    for a in available {
+        let default = a.default_shortcut.trim();
+        if default.is_empty() {
+            continue;
+        }
+        if unbound(&a.action) {
+            continue;
+        }
+        if out.iter().any(|b| b.action == a.action) {
+            continue;
+        }
+        if out.iter().any(|b| b.shortcut == default) {
+            continue;
+        }
+        out.push(ShortcutBinding {
+            shortcut: default.to_string(),
+            action: a.action.clone(),
+            target: None,
+        });
     }
-    if bindings.iter().any(|b| b.action == SHORTCUT_ACTION_CLIPBOARD) {
-        return;
-    }
-    if bindings
-        .iter()
-        .any(|b| b.shortcut == DEFAULT_CLIPBOARD_SHORTCUT)
-    {
-        return;
-    }
-    bindings.push(ShortcutBinding {
-        shortcut: DEFAULT_CLIPBOARD_SHORTCUT.to_string(),
-        action: SHORTCUT_ACTION_CLIPBOARD.to_string(),
-        target: None,
-    });
+    out
 }
 
 /// 读「呼出/隐藏」快捷键（从绑定列表里找；列表里没有时回落到默认值）。
@@ -1110,60 +1132,38 @@ fn read_toggle_shortcut(app: &tauri::AppHandle) -> String {
     DEFAULT_TOGGLE_SHORTCUT.to_string()
 }
 
-/// 从 settings store 读取全部快捷键绑定。
+/// 从 settings store 读取全部快捷键绑定（**纯解析**，不做任何动作注入）。
 ///
-/// 四种情况：
-///   1. 存了绑定列表 → 原样解析，再补上缺失的截图绑定（见 `ensure_screenshot_binding`）；
+/// 三种情况：
+///   1. 存了绑定列表 → 宽容解析（脏数据跳过）；
 ///   2. 没存过绑定列表、但存过旧版单键 → 迁移成一条 toggle-window（只读，不写回）；
-///   3. 什么都没存（首次运行）→ 一条默认的 toggle-window，再补截图绑定；
-///   4. 存了列表但**少了截图绑定** → 补一条默认截图热键（用户主动解绑过则不补）。
+///   3. 什么都没存（首次运行）→ 一条默认的 toggle-window。
 ///
-/// 第 4 条为什么必需：截图热键是宿主的 `screenshot` 动作，动作要生效必须**真的
-/// 注册到系统**。只把 `DEFAULT_SCREENSHOT_SHORTCUT` 当作「没绑定时返回的展示值」
-/// 是不够的——老用户的 settings.json 里没有这一条，插件前台却会显示 Ctrl+Alt+X，
-/// 用户按下去毫无反应（真实踩到过的故障）。
-///
-/// 补齐只作用于**返回值**（本函数是纯读）；下次任何一次 `apply_shortcut_bindings`
-/// 落盘时自然写回，无需在此处额外写文件。
+/// **插件动作的注入不在这里**：截图 / 剪贴板历史这类动作是否可用取决于插件是否安装，
+/// 而插件注册表在前端（Rust 不持有）。因此由前端算出可用动作后经
+/// `sync_plugin_shortcut_actions` 下发、在 `apply_shortcut_bindings` 前调和注入
+/// （见 `reconcile_plugin_actions`）。
 fn read_shortcut_bindings(app: &tauri::AppHandle) -> Vec<ShortcutBinding> {
     let Some(store) = settings_store(app) else {
-        let mut bindings = vec![ShortcutBinding {
+        return vec![ShortcutBinding {
             shortcut: DEFAULT_TOGGLE_SHORTCUT.to_string(),
             action: SHORTCUT_ACTION_TOGGLE_WINDOW.to_string(),
             target: None,
         }];
-        ensure_screenshot_binding(&mut bindings, false);
-        ensure_clipboard_binding(&mut bindings, false);
-        return bindings;
     };
-    let unbound = store
-        .get(SETTINGS_KEY_SCREENSHOT_UNBOUND)
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let clipboard_unbound = store
-        .get(SETTINGS_KEY_CLIPBOARD_UNBOUND)
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
     if let Some(value) = store.get(SETTINGS_KEY_SHORTCUT_BINDINGS) {
-        let mut bindings = parse_shortcut_bindings(&value);
-        ensure_screenshot_binding(&mut bindings, unbound);
-        ensure_clipboard_binding(&mut bindings, clipboard_unbound);
-        return bindings;
+        return parse_shortcut_bindings(&value);
     }
-    // 旧版单键迁移：把「呼出/隐藏」变成一条绑定（同样补上截图/剪贴板绑定：
-    // 迁移期的用户也该拿到可用的热键）
+    // 旧版单键迁移：把「呼出/隐藏」变成一条绑定
     let legacy = store
         .get(SETTINGS_KEY_TOGGLE_SHORTCUT)
         .and_then(|v| v.as_str().map(|s| s.trim().to_string()))
         .filter(|s| !s.is_empty());
-    let mut bindings = vec![ShortcutBinding {
+    vec![ShortcutBinding {
         shortcut: legacy.unwrap_or_else(|| DEFAULT_TOGGLE_SHORTCUT.to_string()),
         action: SHORTCUT_ACTION_TOGGLE_WINDOW.to_string(),
         target: None,
-    }];
-    ensure_screenshot_binding(&mut bindings, unbound);
-    ensure_clipboard_binding(&mut bindings, clipboard_unbound);
-    bindings
+    }]
 }
 
 /// 写入绑定列表到 settings store（写失败只记日志：本次已生效，重启后回落旧值）。
@@ -2267,30 +2267,102 @@ fn set_toggle_shortcut(app: tauri::AppHandle, shortcut: String) -> Result<(), St
 /// 校验通过后整体重新注册；任一条注册失败（被其它程序占用等）会回滚到
 /// 改动前的状态且**不落盘**，并返回错误信息。
 ///
-/// 与插件前台的解绑保持同一口径：面板里删掉截图绑定时也要记「用户主动解绑」，
-/// 否则读绑定时的自愈补齐会在下次启动把它加回来（**两个入口的行为必须一致**，
-/// 否则用户会发现「面板里删了、插件里还在」）。
+/// 与插件前台的解绑保持同一口径：面板里删掉截图 / 剪贴板历史绑定时也要记
+/// 「用户主动解绑」，否则它是**已安装插件**的动作，下次 `sync_plugin_shortcut_actions`
+/// 调和时会被自动加回来（**两个入口的行为必须一致**，否则用户会发现「面板里删了、
+/// 插件里还在」）。
 #[tauri::command]
 fn set_shortcut_bindings(
     app: tauri::AppHandle,
     bindings: Vec<serde_json::Value>,
 ) -> Result<(), String> {
     let parsed = parse_shortcut_bindings_strict(&serde_json::Value::Array(bindings))?;
+    let current = read_shortcut_bindings(&app);
     // 与当前生效值完全一致：无需重注册，直接成功（避免平白打断）
-    if parsed == read_shortcut_bindings(&app) {
+    if parsed == current {
         return Ok(());
     }
-    let has_screenshot = parsed
-        .iter()
-        .any(|b| b.action == SHORTCUT_ACTION_SCREENSHOT);
-    let has_clipboard = parsed
-        .iter()
-        .any(|b| b.action == SHORTCUT_ACTION_CLIPBOARD);
-    apply_shortcut_bindings(&app, &parsed)?;
-    // 只有注册+落盘都成功后，才把「解绑」意图记下来
-    set_screenshot_unbound(&app, !has_screenshot);
-    set_clipboard_unbound(&app, !has_clipboard);
+    // 「用户主动解绑」标记：只有「上一版列表里有、这次列表里没有」才置 true；
+    // 用户重新加上则清 false。**不能**用「本次列表里有没有」来直接赋值——否则
+    // 插件未安装时用户随手保存一次设置，就会把所有插件动作标记成「已解绑」，
+    // 日后装了插件也不再自动注入默认热键。
+    let touched = update_unbound_flags(&app, &current, &parsed);
+    if let Err(e) = apply_shortcut_bindings(&app, &parsed) {
+        // 注册/落盘失败：把刚改过的解绑标记回滚，避免「改动没生效却记成已解绑」
+        for (action, was) in touched {
+            set_plugin_action_unbound(&app, &action, was);
+        }
+        return Err(e);
+    }
     Ok(())
+}
+
+/// 按「上一版 vs 新版」更新各插件动作的「主动解绑」标记，返回被改动过的旧值（供失败回滚）。
+///
+/// 规则：插件动作若「旧列表有、新列表无」→ 置 true（用户主动删了）；
+/// 「新列表有」→ 置 false（用户重新加了）；两边都没有 → 不动（保持原状）。
+fn update_unbound_flags(
+    app: &tauri::AppHandle,
+    old: &[ShortcutBinding],
+    new: &[ShortcutBinding],
+) -> Vec<(String, bool)> {
+    let mut changed = Vec::new();
+    for action in [SHORTCUT_ACTION_SCREENSHOT, SHORTCUT_ACTION_CLIPBOARD] {
+        let was_bound = old.iter().any(|b| b.action == action);
+        let is_bound = new.iter().any(|b| b.action == action);
+        let next = if is_bound {
+            Some(false)
+        } else if was_bound {
+            Some(true)
+        } else {
+            None // 两边都没有：从没配过，保持原状（不污染标记）
+        };
+        let Some(next) = next else { continue };
+        let prev = is_plugin_action_unbound(app, action);
+        if prev != next {
+            set_plugin_action_unbound(app, action, next);
+            changed.push((action.to_string(), prev));
+        }
+    }
+    changed
+}
+
+/// 写入某个插件动作的「主动解绑」标记（写失败只记日志）。
+fn set_plugin_action_unbound(app: &tauri::AppHandle, action: &str, unbound: bool) {
+    match action {
+        SHORTCUT_ACTION_SCREENSHOT => set_screenshot_unbound(app, unbound),
+        SHORTCUT_ACTION_CLIPBOARD => set_clipboard_unbound(app, unbound),
+        _ => {}
+    }
+}
+
+/// 前端下发的「当前已安装插件提供了哪些快捷键动作」同步入口。
+///
+/// 插件注册表在前端（localStorage），Rust 不持有；因此「哪些插件动作可用」由前端
+/// 计算（见 `shortcut-actions.ts`）后下发，宿主据此：
+///   1. **注入**新可用动作的默认热键（用户没主动解绑、默认键没被占用时）；
+///   2. **移除**已不可用动作（提供它的插件被卸载了）的绑定，并注销其热键。
+///
+/// 幂等：无变化时（调和结果 == 当前列表）直接返回，不重注册、不落盘。
+#[tauri::command]
+fn sync_plugin_shortcut_actions(
+    app: tauri::AppHandle,
+    actions: Vec<PluginShortcutAction>,
+) -> Result<(), String> {
+    // 只接受宿主认识的插件动作，且 action 非空（防止前端被绕过时塞进非法动作）
+    for a in &actions {
+        if !is_plugin_shortcut_action(&a.action) {
+            return Err(format!("未知的插件快捷键动作：{}", a.action));
+        }
+    }
+    let current = read_shortcut_bindings(&app);
+    let reconciled = reconcile_plugin_actions(current.clone(), &actions, &|action| {
+        is_plugin_action_unbound(&app, action)
+    });
+    if reconciled == current {
+        return Ok(());
+    }
+    apply_shortcut_bindings(&app, &reconciled)
 }
 
 /// 注册整套绑定并持久化（注册失败时回滚且不落盘）。
@@ -2708,6 +2780,7 @@ pub fn run() {
             set_toggle_shortcut,
             get_shortcut_bindings,
             set_shortcut_bindings,
+            sync_plugin_shortcut_actions,
             get_autostart_enabled,
             set_autostart_enabled_cmd,
             get_alt_click_enabled,
@@ -3086,84 +3159,116 @@ mod tests {
         .is_err());
     }
 
-    /// 截图动作：无作用对象，且默认键不能与宿主默认的呼出键冲突。
-    ///
-    /// 这两条都是「注册得上去但用户按了没反应」类故障的防线：
-    /// 缺作用对象本应被判非法（但它不需要），默认键撞车则会让 toggle 注册失败。
+    /// 截图动作：无作用对象（与 open-plugin / quick-* 相反，它不需要作用对象）。
     #[test]
     fn screenshot_action_needs_no_target() {
         use super::{
-            is_known_shortcut_action, parse_shortcut_bindings_strict, DEFAULT_SCREENSHOT_SHORTCUT,
-            DEFAULT_TOGGLE_SHORTCUT, SHORTCUT_ACTION_SCREENSHOT, SHORTCUT_ACTION_TOGGLE_WINDOW,
+            is_known_shortcut_action, parse_shortcut_bindings_strict, DEFAULT_TOGGLE_SHORTCUT,
+            SHORTCUT_ACTION_SCREENSHOT, SHORTCUT_ACTION_TOGGLE_WINDOW,
         };
 
         assert!(is_known_shortcut_action(SHORTCUT_ACTION_SCREENSHOT));
 
-        // 没有 target 也合法（与 open-plugin / quick-* 相反）
+        // 没有 target 也合法
         let parsed = parse_shortcut_bindings_strict(&serde_json::json!([
             { "shortcut": DEFAULT_TOGGLE_SHORTCUT, "action": SHORTCUT_ACTION_TOGGLE_WINDOW },
-            { "shortcut": DEFAULT_SCREENSHOT_SHORTCUT, "action": SHORTCUT_ACTION_SCREENSHOT }
+            { "shortcut": "ctrl+alt+x", "action": SHORTCUT_ACTION_SCREENSHOT }
         ]))
         .unwrap();
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[1].action, SHORTCUT_ACTION_SCREENSHOT);
         assert_eq!(parsed[1].target, None);
-
-        // 默认截图键必须与默认呼出键不同，否则开箱即用就会注册冲突
-        assert_ne!(DEFAULT_SCREENSHOT_SHORTCUT, DEFAULT_TOGGLE_SHORTCUT);
     }
 
-    /// 截图绑定自愈补齐：老用户的列表里没有它，必须被补上才能真正注册。
+    /// 插件动作调和：装了插件才注入默认键、卸载即移除、用户解绑不注入、不抢占用中的键。
     ///
-    /// 这是「插件前台显示 Ctrl+Alt+X，按下去没反应」那个故障的根因防线：
-    /// 热键只有进了绑定列表才会被 `register_binding_handlers` 注册到系统。
+    /// 这是「连插件都没装就有这个快捷键类型」故障的根因防线：注入必须以
+    /// **前端下发的可用动作列表**为准，而不是无条件补齐。
     #[test]
-    fn ensure_screenshot_binding_self_heals() {
+    fn reconcile_plugin_actions_injects_and_removes() {
         use super::{
-            ensure_screenshot_binding, parse_shortcut_bindings, DEFAULT_SCREENSHOT_SHORTCUT,
-            SHORTCUT_ACTION_SCREENSHOT, SHORTCUT_ACTION_TOGGLE_WINDOW,
+            parse_shortcut_bindings, reconcile_plugin_actions, PluginShortcutAction,
+            SHORTCUT_ACTION_CLIPBOARD, SHORTCUT_ACTION_SCREENSHOT, SHORTCUT_ACTION_TOGGLE_WINDOW,
         };
 
-        // 老用户的列表（只有呼出键、没有截图）→ 补上
-        let mut old = parse_shortcut_bindings(&serde_json::json!([
+        let screenshot = || PluginShortcutAction {
+            action: SHORTCUT_ACTION_SCREENSHOT.into(),
+            default_shortcut: "ctrl+alt+x".into(),
+        };
+        let clipboard = || PluginShortcutAction {
+            action: SHORTCUT_ACTION_CLIPBOARD.into(),
+            default_shortcut: "ctrl+alt+v".into(),
+        };
+
+        // 1) 什么都没装（可用动作列表为空）→ 结果里**没有**插件动作（不在列表里出现）
+        let base = parse_shortcut_bindings(&serde_json::json!([
             { "shortcut": "ctrl+alt+s", "action": SHORTCUT_ACTION_TOGGLE_WINDOW }
         ]));
-        assert_eq!(old.len(), 1);
-        ensure_screenshot_binding(&mut old, false);
-        assert_eq!(old.len(), 2);
-        assert_eq!(old[1].action, SHORTCUT_ACTION_SCREENSHOT);
-        assert_eq!(old[1].shortcut, DEFAULT_SCREENSHOT_SHORTCUT);
-        assert_eq!(old[1].target, None);
+        let none = reconcile_plugin_actions(base.clone(), &[], &|_| false);
+        assert_eq!(none.len(), 1);
+        assert!(!none.iter().any(|b| b.action == SHORTCUT_ACTION_SCREENSHOT));
 
-        // 幂等：已经有就不再补（重复补会因「组合键重复」导致整体注册失败）
-        ensure_screenshot_binding(&mut old, false);
-        assert_eq!(old.len(), 2);
+        // 2) 装了截图插件 → 注入默认截图键
+        let with_one = reconcile_plugin_actions(base.clone(), &[screenshot()], &|_| false);
+        assert_eq!(with_one.len(), 2);
+        assert_eq!(with_one[1].action, SHORTCUT_ACTION_SCREENSHOT);
+        assert_eq!(with_one[1].shortcut, "ctrl+alt+x");
 
-        // 用户主动解绑过 → 尊重，不补
-        let mut unbound = parse_shortcut_bindings(&serde_json::json!([
-            { "shortcut": "ctrl+alt+s", "action": SHORTCUT_ACTION_TOGGLE_WINDOW }
-        ]));
-        ensure_screenshot_binding(&mut unbound, true);
+        // 幂等：已有就不再补（重复补会因「组合键重复」整体注册失败）
+        let again = reconcile_plugin_actions(with_one.clone(), &[screenshot()], &|_| false);
+        assert_eq!(again.len(), 2);
+
+        // 3) 卸载截图插件（可用列表变空）→ 移除该动作绑定，内置动作原样保留
+        let removed = reconcile_plugin_actions(with_one.clone(), &[], &|_| false);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].action, SHORTCUT_ACTION_TOGGLE_WINDOW);
+
+        // 4) 用户主动解绑过 → 尊重，不注入
+        let unbound = reconcile_plugin_actions(base.clone(), &[screenshot()], &|a| {
+            a == SHORTCUT_ACTION_SCREENSHOT
+        });
         assert_eq!(unbound.len(), 1);
 
-        // 默认截图键已被别的动作占用 → 跳过（宁可没有，也不静默抢键）
-        let mut taken = parse_shortcut_bindings(&serde_json::json!([
+        // 5) 默认键已被别的动作占用 → 跳过，不静默抢键
+        let taken = parse_shortcut_bindings(&serde_json::json!([
             { "shortcut": "ctrl+alt+s", "action": SHORTCUT_ACTION_TOGGLE_WINDOW },
-            { "shortcut": DEFAULT_SCREENSHOT_SHORTCUT, "action": "quick-open", "target": "某常用头" }
+            { "shortcut": "ctrl+alt+x", "action": "quick-open", "target": "某常用头" }
         ]));
-        ensure_screenshot_binding(&mut taken, false);
-        assert_eq!(taken.len(), 2, "不抢已被占用的键");
-        assert!(!taken
+        let guarded = reconcile_plugin_actions(taken, &[screenshot()], &|_| false);
+        assert_eq!(guarded.len(), 2, "不抢已被占用的键");
+        assert!(!guarded.iter().any(|b| b.action == SHORTCUT_ACTION_SCREENSHOT));
+
+        // 6) 两个插件都在 → 各注入一条；用户的 open-plugin 绑定（带 target）原样保留
+        let with_plugin_binding = parse_shortcut_bindings(&serde_json::json!([
+            { "shortcut": "ctrl+alt+s", "action": SHORTCUT_ACTION_TOGGLE_WINDOW },
+            { "shortcut": "ctrl+alt+1", "action": "open-plugin", "target": "com.a.b" }
+        ]));
+        let both = reconcile_plugin_actions(
+            with_plugin_binding,
+            &[screenshot(), clipboard()],
+            &|_| false,
+        );
+        assert_eq!(both.len(), 4);
+        assert!(both.iter().any(|b| b.action == SHORTCUT_ACTION_SCREENSHOT));
+        assert!(both.iter().any(|b| b.action == SHORTCUT_ACTION_CLIPBOARD));
+        assert!(both
             .iter()
-            .any(|b| b.action == SHORTCUT_ACTION_SCREENSHOT));
+            .any(|b| b.action == "open-plugin" && b.target.as_deref() == Some("com.a.b")));
+
+        // 7) 清单没给默认键（空串）→ 不自动注入（用户自行录入）
+        let no_default = PluginShortcutAction {
+            action: SHORTCUT_ACTION_SCREENSHOT.into(),
+            default_shortcut: "".into(),
+        };
+        let nod = reconcile_plugin_actions(base, &[no_default], &|_| false);
+        assert_eq!(nod.len(), 1);
     }
 
-    /// 剪贴板历史动作：无作用对象，默认键与宿主其它默认键都不冲突。
+    /// 剪贴板历史动作：无作用对象。
     #[test]
     fn clipboard_action_needs_no_target() {
         use super::{
-            is_known_shortcut_action, parse_shortcut_bindings_strict,
-            DEFAULT_CLIPBOARD_SHORTCUT, DEFAULT_SCREENSHOT_SHORTCUT, DEFAULT_TOGGLE_SHORTCUT,
+            is_known_shortcut_action, parse_shortcut_bindings_strict, DEFAULT_TOGGLE_SHORTCUT,
             SHORTCUT_ACTION_CLIPBOARD, SHORTCUT_ACTION_TOGGLE_WINDOW,
         };
 
@@ -3172,57 +3277,12 @@ mod tests {
         // 没有 target 也合法
         let parsed = parse_shortcut_bindings_strict(&serde_json::json!([
             { "shortcut": DEFAULT_TOGGLE_SHORTCUT, "action": SHORTCUT_ACTION_TOGGLE_WINDOW },
-            { "shortcut": DEFAULT_CLIPBOARD_SHORTCUT, "action": SHORTCUT_ACTION_CLIPBOARD }
+            { "shortcut": "ctrl+alt+v", "action": SHORTCUT_ACTION_CLIPBOARD }
         ]))
         .unwrap();
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[1].action, SHORTCUT_ACTION_CLIPBOARD);
         assert_eq!(parsed[1].target, None);
-
-        // 三个默认键两两不同，否则开箱即用就会注册冲突
-        assert_ne!(DEFAULT_CLIPBOARD_SHORTCUT, DEFAULT_TOGGLE_SHORTCUT);
-        assert_ne!(DEFAULT_CLIPBOARD_SHORTCUT, DEFAULT_SCREENSHOT_SHORTCUT);
-        assert_ne!(DEFAULT_SCREENSHOT_SHORTCUT, DEFAULT_TOGGLE_SHORTCUT);
-    }
-
-    /// 剪贴板历史绑定自愈补齐（与截图版同构，故障场景也一样）。
-    #[test]
-    fn ensure_clipboard_binding_self_heals() {
-        use super::{
-            ensure_clipboard_binding, parse_shortcut_bindings, DEFAULT_CLIPBOARD_SHORTCUT,
-            SHORTCUT_ACTION_CLIPBOARD, SHORTCUT_ACTION_TOGGLE_WINDOW,
-        };
-
-        // 老用户的列表（只有呼出键）→ 补上
-        let mut old = parse_shortcut_bindings(&serde_json::json!([
-            { "shortcut": "ctrl+alt+s", "action": SHORTCUT_ACTION_TOGGLE_WINDOW }
-        ]));
-        assert_eq!(old.len(), 1);
-        ensure_clipboard_binding(&mut old, false);
-        assert_eq!(old.len(), 2);
-        assert_eq!(old[1].action, SHORTCUT_ACTION_CLIPBOARD);
-        assert_eq!(old[1].shortcut, DEFAULT_CLIPBOARD_SHORTCUT);
-        assert_eq!(old[1].target, None);
-
-        // 幂等
-        ensure_clipboard_binding(&mut old, false);
-        assert_eq!(old.len(), 2);
-
-        // 用户主动解绑过 → 尊重，不补
-        let mut unbound = parse_shortcut_bindings(&serde_json::json!([
-            { "shortcut": "ctrl+alt+s", "action": SHORTCUT_ACTION_TOGGLE_WINDOW }
-        ]));
-        ensure_clipboard_binding(&mut unbound, true);
-        assert_eq!(unbound.len(), 1);
-
-        // 默认键已被别的动作占用 → 跳过，不静默抢键
-        let mut taken = parse_shortcut_bindings(&serde_json::json!([
-            { "shortcut": "ctrl+alt+s", "action": SHORTCUT_ACTION_TOGGLE_WINDOW },
-            { "shortcut": DEFAULT_CLIPBOARD_SHORTCUT, "action": "quick-open", "target": "某常用头" }
-        ]));
-        ensure_clipboard_binding(&mut taken, false);
-        assert_eq!(taken.len(), 2, "不抢已被占用的键");
-        assert!(!taken.iter().any(|b| b.action == SHORTCUT_ACTION_CLIPBOARD));
     }
 
     /// 桥接读写**必须保留每条绑定的作用对象**。

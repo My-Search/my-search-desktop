@@ -81,6 +81,27 @@ my-plugin/
 - Length <= 128; `core` / `host` / `system` are reserved
 - **`com.mysearch.` and `mysearch.` are reserved official prefixes** — use your own domain
 
+#### (Optional) Declare a global shortcut action `contributes.shortcut`
+
+If your plugin corresponds to a **host action** (currently `screenshot` / `clipboard`),
+declare `contributes.shortcut` so it appears as an "action type" in Settings → Shortcuts.
+It shows up **only while your plugin is installed** and is removed on uninstall, so users
+never have to hunt for the hotkey in code:
+
+```jsonc
+"contributes": {
+  "shortcut": {                        // single object or array (same as searchItem)
+    "action": "screenshot",            // host action id (currently screenshot / clipboard)
+    "title": "Screenshot (select + annotate)", // label shown in the action-type dropdown
+    "defaultShortcut": "ctrl+alt+x"    // optional: default combo added when installed (skipped if taken)
+  }
+}
+```
+
+> The executor is provided by the host: the plugin only declares "I provide this action"
+> plus its title / default key. `action` is validated against a host allowlist, so an
+> unknown action, a missing title or an empty `defaultShortcut` is rejected at install time.
+
 ### 2.3 The UI `ui/detail.html`
 
 ```html

@@ -25,7 +25,7 @@ import {
   type PluginSyncState,
 } from "../../lib/plugins/host.ts";
 import { permissionBaseId } from "../../lib/plugins/permissions.ts";
-import { syncRecordGateway } from "../../lib/plugins/gateway.ts";
+import { syncRecordGateway, syncShortcutActions } from "../../lib/plugins/gateway.ts";
 import { envGrantsOf, envPermissionOf } from "../../lib/plugins/env-store.ts";
 import type { EnvPickResult } from "../../composables/useEnvPicker.ts";
 import {
@@ -265,6 +265,13 @@ export function usePluginHost(opts: PluginHostRuntimeOptions) {
       }
     }
     opts.onItemsChanged?.();
+    // 快捷键作用类型同步：搜索窗口也可能先于设置窗口感知注册表变化（如启动、
+    // 呼出时的 reload）。同上，内部按动作集合去重，无变化不重复发 IPC。
+    try {
+      await syncShortcutActions(registry);
+    } catch (e) {
+      console.warn("[插件] 快捷键动作同步失败:", e);
+    }
   }
 
   /** 取插件记录 */

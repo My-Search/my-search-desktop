@@ -26,6 +26,8 @@ import {
   isBindingComplete,
   normalizeQuickFilterHeader,
   actionRequiresTarget,
+  isPluginShortcutAction,
+  PLUGIN_SHORTCUT_ACTIONS,
   DEFAULT_TOGGLE_SHORTCUT,
   SEARCH_BOUNDARY,
 } from "../src/lib/shortcut-bindings.ts";
@@ -462,6 +464,23 @@ check(
   "快捷打开项绑定可删除",
   canRemoveBinding({ shortcut: "alt+o", action: "quick-open", target: "百度翻译" }),
   true
+);
+
+// ---- 插件动作：isPluginShortcutAction / describeBinding 的标题解析 ----
+check("截图是插件动作", isPluginShortcutAction("screenshot"), true);
+check("剪贴板历史是插件动作", isPluginShortcutAction("clipboard"), true);
+check("呼出/隐藏不是插件动作", isPluginShortcutAction("toggle-window"), false);
+check("打开插件不是插件动作", isPluginShortcutAction("open-plugin"), false);
+check("PLUGIN_SHORTCUT_ACTIONS 收录两个动作", [...PLUGIN_SHORTCUT_ACTIONS], ["screenshot", "clipboard"]);
+check(
+  "插件动作标题解析优先于内置兜底",
+  describeBinding({ shortcut: "ctrl+alt+x", action: "screenshot", target: null }, undefined, () => "截图（自定义标题）"),
+  "截图（自定义标题）"
+);
+check(
+  "无标题解析器时退回内置兜底文案",
+  describeBinding({ shortcut: "ctrl+alt+v", action: "clipboard", target: null }, undefined, () => null),
+  "剪贴板历史"
 );
 
 console.log("");

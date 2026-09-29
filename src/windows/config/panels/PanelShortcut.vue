@@ -25,15 +25,18 @@ import { comboToString, interpretKeydown, shortcutToCaps, validateCombo } from "
 import {
   canRemoveBinding,
   isBindingComplete,
+  isPluginShortcutAction,
   MAX_SHORTCUT_BINDINGS,
   nextFreeShortcut,
   normalizeQuickFilterHeader,
   parseBindings,
   SEARCH_BOUNDARY,
+  SHORTCUT_ACTION_LABELS,
   validateBindings,
   type ShortcutAction,
   type ShortcutBinding,
 } from "../../../lib/shortcut-bindings";
+import type { AvailableShortcutAction } from "../../../lib/plugins/shortcut-actions";
 import CfgHint from "./CfgHint.vue";
 
 const props = defineProps<{
@@ -78,6 +81,13 @@ interface PluginOption {
 }
 
 const plugins = ref<PluginOption[]>([]);
+/**
+ * 当前**已安装插件**提供的快捷键作用类型（截图 / 剪贴板历史这类）。
+ *
+ * 不写死：装了对应插件才有、卸载即消失（见 `availableShortcutActions`）。
+ * 同一份数据也用于把「刚被卸载、但绑定还在（等宿主同步清理）」的动作标注出来。
+ */
+const pluginActions = ref<AvailableShortcutAction[]>([]);
 
 /**
  * 读取已安装插件（仅取面板需要的字段）。
@@ -85,7 +95,10 @@ const plugins = ref<PluginOption[]>([]);
  */
 async function loadPlugins(): Promise<void> {
   try {
-    const { loadRegistry } = await import("../../../lib/plugins/registry");
+    const [{ loadRegistry }, { availableShortcutActions }] = await Promise.all([
+      import("../../../lib/plugins/registry"),
+      import("../../../lib/plugins/shortcut-actions"),
+    ]);
     const reg = loadRegistry();
     plugins.value = reg.plugins
       .filter((p) => p.source.kind !== "legacy")
@@ -99,10 +112,47 @@ async function loadPlugins(): Promise<void> {
           note: !p.enabled ? "已禁用" : !hasView ? "无界面" : "",
         };
       });
+    pluginActions.value = availableShortcutActions(reg);
   } catch (e) {
     console.warn("读取插件列表失败（快捷键面板）:", e);
     plugins.value = [];
+    pluginActions.value = [];
   }
+}
+
+/**
+ * 作用类型下拉的候选：内置四项 + 当前可用的插件动作。
+ *
+ * 插件动作只列**已安装**的（`pluginActions`）；若某条绑定引用了刚被卸载的动作
+ * （宿主同步尚未跑完），把绑定自身的动作补进来展示，避免下拉「当前值不在选项里」
+ * 而显示成空白（与插件下拉的「已卸载」兜底同一思路）。
+ */
+interface ActionOption {
+  value: ShortcutAction;
+  label: string;
+}
+
+function actionOptionsFor(row: ShortcutBinding | null): ActionOption[] {
+  const opts: ActionOption[] = [
+    { value: "toggle-window", label: "呼出 / 隐藏搜索框" },
+    { value: "open-plugin", label: "打开插件" },
+    { value: "quick-filter", label: "快速过滤" },
+    { value: "quick-open", label: "快捷打开项" },
+  ];
+  const seen = new Set<string>(opts.map((o) => o.value));
+  for (const a of pluginActions.value) {
+    if (seen.has(a.action)) continue;
+    seen.add(a.action);
+    opts.push({ value: a.action as ShortcutAction, label: a.title });
+  }
+  // 行引用的插件动作当前不可用（插件已卸载）→ 补一条，标明「已卸载」
+  if (row && isPluginShortcutAction(row.action) && !seen.has(row.action)) {
+    opts.push({
+      value: row.action,
+      label: `${SHORTCUT_ACTION_LABELS[row.action]}（插件已卸载）`,
+    });
+  }
+  return opts;
 }
 
 /** 某一行插件下拉的候选项：已知插件 + 当前值（可能已卸载，保留展示以便删除） */
@@ -281,17 +331,13 @@ function onActionChange(row: Row, value: string): void {
   } else if (action === "quick-filter" || action === "quick-open") {
     // 文本型：保留原值（空值等用户填写，非空值等用户修改），避免切完就报校验错误
     row.action = action;
-  } else if (action === "screenshot") {
-    // 截图：无作用对象，Rust 侧就地开遮罩窗口
-    row.action = "screenshot";
-    row.target = null;
-  } else if (action === "clipboard") {
-    // 剪贴板历史：无作用对象，Rust 侧广播事件、前端打开内置插件详情视图
-    row.action = "clipboard";
-    row.target = null;
-  } else {
+  } else if (action === "open-plugin") {
     row.action = "open-plugin";
     // 默认不选中插件，等用户手动选择
+    row.target = null;
+  } else {
+    // 插件动作（截图 / 剪贴板历史）：无作用对象，执行器在宿主侧
+    row.action = action;
     row.target = null;
   }
   void persist({ errorKey: row.key });
@@ -414,15 +460,34 @@ onBeforeUnmount(() => {
 
 defineExpose({ isCapturing: () => capturingKey.value !== null });
 
-/** 「作用类型」说明（卡片标题旁的疑问 icon 气泡）：用户对新类型不一定懂，逐条讲清 */
-const ACTION_TYPES_HELP = [
-  "呼出 / 隐藏搜索框：全局呼出或收起搜索窗（必需，只能一条）。",
-  "打开插件：直接打开指定插件的界面，无需先搜关键词。",
-  "快速过滤：把「常用头 + 空格冒号空格」填入搜索框并立即搜索，光标停在末尾，接着输入子关键词即可（如常用头「百度翻译」→ 填入「百度翻译 : 」）。",
-  "快捷打开项：按填写的文本精确匹配数据项（标题 / 描述 / 内容，多个词用空格分隔、都要命中；不用模糊搜索），匹配到一项就直接打开，多项则列出结果，没有则提示。",
-  "截图：按快捷键框选屏幕区域并标注，完成后可复制到剪贴板（需已安装「截图」插件）。",
-  "剪贴板历史：按快捷键呼出剪贴板历史，查看 / 搜索 / 复制最近复制过的文本与图片（需已安装「剪贴板历史」插件）。",
-].join("\n");
+/**
+ * 「作用类型」说明（卡片标题旁的疑问 icon 气泡）：用户对新类型不一定懂，逐条讲清。
+ *
+ * 截图 / 剪贴板历史这类**插件动作**的说明只在对应插件已安装时出现（随下拉一起
+ * 动态增减），避免解释一堆「当前用不了」的类型。
+ */
+const ACTION_TYPES_HELP = computed(() => {
+  const lines = [
+    "呼出 / 隐藏搜索框：全局呼出或收起搜索窗（必需，只能一条）。",
+    "打开插件：直接打开指定插件的界面，无需先搜关键词。",
+    "快速过滤：把「常用头 + 空格冒号空格」填入搜索框并立即搜索，光标停在末尾，接着输入子关键词即可（如常用头「百度翻译」→ 填入「百度翻译 : 」）。",
+    "快捷打开项：按填写的文本精确匹配数据项（标题 / 描述 / 内容，多个词用空格分隔、都要命中；不用模糊搜索），匹配到一项就直接打开，多项则列出结果，没有则提示。",
+  ];
+  for (const a of pluginActions.value) {
+    if (a.action === "screenshot") {
+      lines.push(
+        "截图：按快捷键框选屏幕区域并标注，完成后可复制到剪贴板（由「截图」插件提供）。"
+      );
+    } else if (a.action === "clipboard") {
+      lines.push(
+        "剪贴板历史：按快捷键呼出剪贴板历史，查看 / 搜索 / 复制最近复制过的文本与图片（由「剪贴板历史」插件提供）。"
+      );
+    } else {
+      lines.push(`${a.title}：由插件「${a.pluginId}」提供的动作。`);
+    }
+  }
+  return lines.join("\n");
+});
 
 /** 没有可打开插件时的引导文案（此时「+ 添加快捷键」会新增一条「快速过滤」） */
 const emptyPluginHint = computed(() =>
@@ -465,13 +530,16 @@ const emptyPluginHint = computed(() =>
             :title="row.action === 'toggle-window' ? '呼出 / 隐藏搜索框是必需能力，只能改键、不能改类型' : '选择这条快捷键的作用类型'"
             @change="onActionChange(row, ($event.target as HTMLSelectElement).value)"
           >
-            <!-- 呼出/隐藏全局只允许一条：别的行已占用时本项不可选 -->
-            <option value="toggle-window" :disabled="hasOtherToggle(row)">呼出 / 隐藏搜索框</option>
-            <option value="open-plugin">打开插件</option>
-            <option value="quick-filter">快速过滤</option>
-            <option value="quick-open">快捷打开项</option>
-            <option value="screenshot">截图（框选 + 标注）</option>
-            <option value="clipboard">剪贴板历史</option>
+            <!-- 内置四项固定；插件动作（截图 / 剪贴板历史）随已安装插件动态增减；
+                 行引用的是刚被卸载的插件动作时也补一条并标注「已卸载」 -->
+            <option
+              v-for="opt in actionOptionsFor(row)"
+              :key="opt.value"
+              :value="opt.value"
+              :disabled="opt.value === 'toggle-window' && hasOtherToggle(row)"
+            >
+              {{ opt.label }}
+            </option>
           </select>
           <!-- 作用对象（仅「打开插件」） -->
           <select

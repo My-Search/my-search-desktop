@@ -66,13 +66,17 @@ await ms.screenshot.setShortcut("");
 
 **热键为什么可能「前台显示了、按下去却没反应」——一个容易踩的坑。**
 截图热键只存在于宿主的绑定列表里是不够的：**只有列表里的条目才真的被注册到系统**。
-宿主为此做了两件事（见 `src-tauri/src/lib.rs`）：
+本插件通过清单里的 `contributes.shortcut` 声明「提供截图这个宿主动作」
+（见 `plugin.json`）：
 
-- `ensure_screenshot_binding`：读绑定时若列表里没有 `screenshot` 条目，就补上默认键。
-  老用户的 `settings.json` 里本来就没有这一条，不补的话插件前台会显示
-  `Ctrl+Alt+X`、按下去却毫无反应。
-- `screenshot_unbound` 标记：区分「从没配过」（要补）与「用户主动解绑了」
-  （不能补，否则解绑后一重启它又回来了）。
+```jsonc
+"shortcut": { "action": "screenshot", "title": "截图（框选 + 标注）", "defaultShortcut": "ctrl+alt+x" }
+```
+
+- **装了本插件**（清单带这段声明）后，宿主会把 `Ctrl+Alt+X` 自动加进绑定列表并注册到系统；
+- 未安装时列表里没有这一条，设置面板里也不会出现「截图」这个作用类型；
+- `screenshot_unbound` 标记：区分「从没配过」（要自动加）与「用户主动解绑了」
+  （不能加，否则解绑后一重启它又回来了）。
 
 插件侧对应的约定：**`getShortcut()` 返回空串就表示没绑**（前台显示「未设置」），
 不要用默认值兜底——兜底出来的键可能根本没注册到系统。
@@ -174,11 +178,23 @@ const dataUrl = await ms.screenshot.readShot(item.relPath);
 它逐条说明了协议约定与常见坑（尤其是「别用 `console.log` 打日志，
 stdout 是协议通道」）。
 
-### 「开机自启」是怎么生效的（清单里的 `autostart` 只是请求）
+### 「按需启动 + 关闭即退出」是怎么生效的（清单里的策略只是请求）
 
-清单里写的是**作者的建议**，真正执行的是记录里的 `autoStart` 字段
-（用户可在「设置 → 插件」改，用户的选择永远优先）。这里声明了
-`"autostart": "always"`，表示作者建议这个插件常驻后台。
+截图能力（热键注册、抓屏、落盘）**全部由宿主 Rust 侧完成**，本插件的后台进程
+只是可选示例，**不需要常驻**。因此这里把它配成「按需启动、关闭界面即退出」：
+
+```jsonc
+"backend": {
+  "autostart": "on-demand",   // 不要开机自启：只有真正用到后台进程时才拉起
+  "closeBehavior": "exit"      // 关闭插件界面即停止后台进程
+},
+"contributes": {
+  "detailView": { "closeBehavior": "exit" }  // 与上面同义（同一个开关的两处声明）
+}
+```
+
+清单里写的是**作者的建议**，真正执行的是记录里的 `autoStart` / `closeBehavior`
+字段（用户可在「设置 → 插件」改，用户的选择永远优先）。
 
 有一个容易踩的坑值得说明，因为它表现为「改了清单却毫无反应」：
 
@@ -189,6 +205,10 @@ stdout 是协议通道」）。
   作者在应用关闭时改了 `plugin.json`，重启后没有事件来触发重载，
   记录里还是旧清单——所以宿主在启动时会主动重读一遍
   （`refreshDevManifests`，见 `src/lib/plugins/install-builtin.ts`）。
+
+> 说明：`autostart` 与 `closeBehavior` 影响的是**后台进程**的生命周期。
+> 截图热键由宿主注册，与后台进程无关——即使进程没在跑，按 `Ctrl+Alt+X`
+> 也照样能框选截图（宿主直接完成）。
 
 另外注意 `backend.spawn` 在本插件里是 `optionalPermissions`。宿主只启动
 **已授权**的后台进程：没授予时进程不会被拉起，上面的三条能力也照常可用。

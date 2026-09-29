@@ -1,7 +1,7 @@
 {
   "id": "com.mysearch.clipboard",
   "name": "剪贴板历史",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "apiVersion": 1,
   "minAppVersion": "7.9.15",
   "author": "zhuangjie",
@@ -28,6 +28,11 @@
       "mode": "inlay",
       "closeBehavior": "minimize",
       "theme": "inherit"
+    },
+    "shortcut": {
+      "action": "clipboard",
+      "title": "剪贴板历史",
+      "defaultShortcut": "ctrl+alt+v"
     }
   }
 }

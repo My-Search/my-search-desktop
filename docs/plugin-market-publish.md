@@ -80,6 +80,25 @@ my-plugin/
 - 长度 ≤128；`core` / `host` / `system` 是保留 id
 - **`com.mysearch.` 与 `mysearch.` 是官方保留前缀**，第三方请用自己的域名
 
+#### （可选）声明全局快捷键作用类型 `contributes.shortcut`
+
+若你的插件对应一个**宿主动作**（目前仅 `screenshot` 截图 / `clipboard` 剪贴板历史），
+可用 `contributes.shortcut` 让它以「作用类型」出现在「设置 → 快捷键」——**装了你的插件
+才出现、卸载即移除**，用户无需自己去代码里找热键：
+
+```jsonc
+"contributes": {
+  "shortcut": {                        // 单个对象或数组（与 searchItem 一致）
+    "action": "screenshot",            // 宿主动作 id（当前仅 screenshot / clipboard）
+    "title": "截图（框选 + 标注）",      // 该作用类型在下拉里的展示标题
+    "defaultShortcut": "ctrl+alt+x"    // 可选：装了本插件后自动添加的默认组合键（被占用则跳过）
+  }
+}
+```
+
+> 执行器由宿主提供：插件只声明「提供这个动作」及标题 / 默认键；`action` 受宿主白名单
+> 约束，写错（未知 action、缺 title、defaultShortcut 为空）会在安装校验阶段被拒绝。
+
 ### 3. 写界面 `ui/detail.html`
 
 ```html

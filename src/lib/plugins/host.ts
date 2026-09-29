@@ -1766,6 +1766,13 @@ function createMarketApi(
     });
     upsertPlugin(reg, record, { preserveUserChoices: false });
     saveRegistry(reg);
+    // 市场里可能装了提供快捷键动作的插件（如剪贴板历史）：立刻把可用动作下发给宿主
+    try {
+      const { syncShortcutActions } = await import("./gateway.ts");
+      await syncShortcutActions(reg);
+    } catch (e) {
+      console.warn("[插件市场] 快捷键动作同步失败:", e);
+    }
     return { ok: true as const, version: mf.version };
   }
 
@@ -1792,6 +1799,13 @@ function createMarketApi(
     const reg = loadRegistry();
     removePlugin(reg, id);
     saveRegistry(reg);
+    // 卸载可能带走了某个快捷键作用类型：立刻下发，让宿主移除绑定并注销热键
+    try {
+      const { syncShortcutActions } = await import("./gateway.ts");
+      await syncShortcutActions(reg);
+    } catch (e) {
+      console.warn("[插件市场] 快捷键动作同步失败:", e);
+    }
     return { ok: true };
   });
   self.checkUpdates = () => guarded("checkUpdates", async () => {

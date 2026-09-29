@@ -31,7 +31,7 @@ import {
   isValidIconRef,
 } from "../src/lib/plugins/manifest.ts";
 import { buildPluginItems, isInlineIconRef } from "../src/lib/plugins/plugin-items.ts";
-import { listSearchItems } from "../src/lib/plugins/manifest.ts";
+import { listSearchItems, listShortcutActions } from "../src/lib/plugins/manifest.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const enc = new TextEncoder();
@@ -349,6 +349,109 @@ const ok = (cond, name, extra = "") => {
     isKnownPermission
   );
   ok(!unsafeEntry.ok, "detailView 入口路径穿越 → 拒绝");
+
+  // 贡献点：shortcut（插件动作——截图 / 剪贴板历史这类）
+  const shortcutOk = parsePluginManifest(
+    JSON.stringify({
+      id: "com.example.x8",
+      name: "x",
+      version: "1.0.0",
+      apiVersion: 1,
+      contributes: {
+        shortcut: { action: "screenshot", title: "截图（框选 + 标注）", defaultShortcut: "ctrl+alt+x" },
+      },
+    }),
+    isKnownPermission
+  );
+  ok(shortcutOk.ok, "含 shortcut 贡献的清单通过", shortcutOk.ok ? "" : shortcutOk.errors.join(","));
+  ok(
+    shortcutOk.ok && shortcutOk.manifest.contributes?.shortcut?.action === "screenshot",
+    "shortcut 保留 action"
+  );
+  ok(
+    shortcutOk.ok &&
+      listShortcutActions(shortcutOk.manifest).length === 1 &&
+      listShortcutActions(shortcutOk.manifest)[0].defaultShortcut === "ctrl+alt+x",
+    "listShortcutActions 归一为数组并保留默认键"
+  );
+
+  const shortcutArray = parsePluginManifest(
+    JSON.stringify({
+      id: "com.example.x9",
+      name: "x",
+      version: "1.0.0",
+      apiVersion: 1,
+      contributes: {
+        shortcut: [
+          { action: "screenshot", title: "截图" },
+          { action: "clipboard", title: "剪贴板历史", defaultShortcut: "ctrl+alt+v" },
+        ],
+      },
+    }),
+    isKnownPermission
+  );
+  ok(
+    shortcutArray.ok && listShortcutActions(shortcutArray.manifest).length === 2,
+    "shortcut 支持数组形态"
+  );
+
+  // 未知 action / 缺 title / action 重复 / 非法 defaultShortcut 都要拒绝
+  const badShortcutAction = parsePluginManifest(
+    JSON.stringify({
+      id: "com.example.xa",
+      name: "x",
+      version: "1.0.0",
+      apiVersion: 1,
+      contributes: { shortcut: { action: "run-shell", title: "乱来" } },
+    }),
+    isKnownPermission
+  );
+  ok(!badShortcutAction.ok, "未知 shortcut.action → 拒绝");
+  ok(
+    describeManifestErrors(badShortcutAction.errors).some((m) => m.includes("不受支持")),
+    "未知 action 文案可读"
+  );
+
+  const missingTitle = parsePluginManifest(
+    JSON.stringify({
+      id: "com.example.xb",
+      name: "x",
+      version: "1.0.0",
+      apiVersion: 1,
+      contributes: { shortcut: { action: "clipboard" } },
+    }),
+    isKnownPermission
+  );
+  ok(!missingTitle.ok, "缺 shortcut.title → 拒绝");
+
+  const badDefault = parsePluginManifest(
+    JSON.stringify({
+      id: "com.example.xc",
+      name: "x",
+      version: "1.0.0",
+      apiVersion: 1,
+      contributes: { shortcut: { action: "clipboard", title: "剪贴板", defaultShortcut: "" } },
+    }),
+    isKnownPermission
+  );
+  ok(!badDefault.ok, "空的 defaultShortcut → 拒绝（要么不写，要么给非空键）");
+
+  const dupAction = parsePluginManifest(
+    JSON.stringify({
+      id: "com.example.xd",
+      name: "x",
+      version: "1.0.0",
+      apiVersion: 1,
+      contributes: {
+        shortcut: [
+          { action: "clipboard", title: "剪贴板 A" },
+          { action: "clipboard", title: "剪贴板 B" },
+        ],
+      },
+    }),
+    isKnownPermission
+  );
+  ok(!dupAction.ok, "重复的 shortcut.action → 拒绝");
 
   // 数值字段夹紧（写错不让插件装不上）
   const clamped = parsePluginManifest(

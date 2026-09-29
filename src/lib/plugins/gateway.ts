@@ -8,9 +8,9 @@
  * Rust 侧只持有镜像：`GATEWAY` 是进程内表，前端才是唯一真相源。
  */
 
-import { syncGateway } from "./ipc.ts";
+import { syncGateway, syncPluginShortcutActions } from "./ipc.ts";
 import { buildPluginEnv } from "./env-store.ts";
-import type { PluginRecord } from "./registry.ts";
+import type { PluginRecord, PluginRegistryFile } from "./registry.ts";
 
 /** 由插件记录生成下发给 Rust 的网关配置 */
 export function gatewaySpecOf(rec: PluginRecord): {
@@ -51,4 +51,30 @@ export function gatewaySpecOf(rec: PluginRecord): {
 /** 同步单个插件的网关配置 */
 export async function syncRecordGateway(rec: PluginRecord): Promise<void> {
   await syncGateway(gatewaySpecOf(rec));
+}
+
+/**
+ * 把「当前已安装插件提供的快捷键作用类型」下发给 Rust。
+ *
+ * 截图 / 剪贴板历史这类插件动作是否可用取决于**插件是否安装**，而注册表在前端
+ * （Rust 不持有）。安装 / 卸载 / 启用禁用 / 热重载后调用本函数，宿主据此注入
+ * 缺失的默认热键、移除已卸载动作的绑定（幂等，无变化时不重注册）。
+ *
+ * 这里再做一层前端记忆：算出的动作集合与上次相同就跳过 IPC（reconcile 会按
+ * 插件逐条调用，避免同一次注册表变化反复发同一条报文）。
+ *
+ * @param reg 当前注册表；缺省时现场读一次 localStorage
+ */
+let lastShortcutActionsJson: string | null = null;
+export async function syncShortcutActions(reg?: PluginRegistryFile): Promise<void> {
+  const { availableShortcutActions } = await import("./shortcut-actions.ts");
+  const registry = reg ?? (await import("./registry.ts")).loadRegistry();
+  const actions = availableShortcutActions(registry).map((a) => ({
+    action: a.action,
+    defaultShortcut: a.defaultShortcut,
+  }));
+  const json = JSON.stringify(actions);
+  if (json === lastShortcutActionsJson) return;
+  await syncPluginShortcutActions(actions);
+  lastShortcutActionsJson = json;
 }
