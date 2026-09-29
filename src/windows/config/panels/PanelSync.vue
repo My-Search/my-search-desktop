@@ -7,6 +7,7 @@
  * 下方是 WebDAV 同步配置。
  */
 import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
+import CfgHint from "./CfgHint.vue";
 import {
   syncGetConfig,
   syncSetConfig,
@@ -178,7 +179,6 @@ function fmt(ts: number): string {
   <!-- ====== 导出面板 ====== -->
   <div v-if="tab === 'export'" class="cfg-card sync-tab-pane">
     <div class="cfg-card-head"><h3>导出备份</h3></div>
-    <p class="cfg-description">将当前的全部配置、插件与数据打包成一个 <code>.msbackup</code> 文件。</p>
     <div class="sync-actions-row">
       <button class="cfg-btn primary" :disabled="exporting" @click="doExport">
         {{ exporting ? '导出中…' : '保存到…' }}
@@ -188,16 +188,11 @@ function fmt(ts: number): string {
       </button>
       <button class="cfg-btn" @click="backupOpenDir">打开备份目录</button>
     </div>
-    <div class="cfg-note" style="margin-top:10px">
-      导出包含：订阅原文 / 标签偏好 / 权重与历史 / 插件注册表与文件 / 快捷键设置。
-      不包含：GitHub Token、WebDAV 密码、本地数据缓存。
-    </div>
   </div>
 
   <!-- ====== 导入面板 ====== -->
   <div v-if="tab === 'import'" class="cfg-card sync-tab-pane">
     <div class="cfg-card-head"><h3>从备份导入</h3></div>
-    <p class="cfg-description">选择之前导出的 <code>.msbackup</code> 文件，预览内容后选择性还原。</p>
 
     <!-- 文件选择 -->
     <div class="sync-actions-row">
@@ -228,7 +223,6 @@ function fmt(ts: number): string {
         <button class="cfg-btn" :disabled="restoring" @click="doRestore(['plugins', 'pluginData', 'settings'])">仅插件与设置</button>
         <button class="cfg-btn" :disabled="restoring" @click="doRestore(['localStorage', 'settings'])">仅配置</button>
       </div>
-      <div class="cfg-note">还原前自动留底，误操作可在备份目录手动恢复。</div>
     </div>
   </div>
 
@@ -280,7 +274,7 @@ function fmt(ts: number): string {
         <input class="cfg-input" type="text" v-model="config.remoteFile" placeholder="my-search-backup.msbackup" />
       </div>
       <div class="cfg-row">
-        <label class="cfg-row-label">冲突策略</label>
+        <label class="cfg-row-label">冲突策略<CfgHint text="当远端与本机都有改动时，按所选策略决定保留哪份数据。" /></label>
         <select v-model="config.conflict" class="cfg-select">
           <option value="newer">按修改时间</option>
           <option value="local">本机覆盖远端</option>
@@ -289,7 +283,7 @@ function fmt(ts: number): string {
         </select>
       </div>
       <div class="cfg-row">
-        <label class="cfg-row-label">兜底间隔</label>
+        <label class="cfg-row-label">兜底间隔<CfgHint text="即使数据无变化，也会按此间隔主动检查一次远端，防止漏同步。" /></label>
         <select v-model="config.intervalMinutes" class="cfg-select cfg-select-narrow">
           <option :value="5">5 分钟</option>
           <option :value="10">10 分钟</option>
@@ -304,10 +298,6 @@ function fmt(ts: number): string {
         <button class="cfg-btn primary" @click="saveConfig">保存</button>
       </div>
     </template>
-
-    <div v-if="!config.enabled" class="cfg-note" style="padding-top:6px">
-      开启后数据变化会自动同步到 WebDAV 服务器，同时每 30 分钟兜底检查一次。
-    </div>
   </div>
 </section>
 </template>

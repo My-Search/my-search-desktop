@@ -93,9 +93,16 @@ const failed = resolvePlaceholder({ loading: false, count: 400, failed: 2 });
 ok(failed.text.includes("400条") && failed.text.includes("2 个订阅加载失败"), "失败提示内容");
 ok(failed.restoreMs === 1200, "失败提示自动恢复");
 
-const cache = resolvePlaceholder({ loading: false, count: 417, fromCache: true });
-ok(cache.text.includes("本地缓存") && cache.text.includes("417条"), "缓存提示内容");
-ok(cache.restoreMs === 1200, "缓存提示自动恢复");
+// 注意：resolvePlaceholder 没有 fromCache 分支（PlaceholderState 只含
+// loading/preparing/count/failed/restoreMs/prepareMs，见 src/lib/util.ts）。
+// 复用缓存时同样走「数据库更新到 N条」——缓存复用与否由调用方决定是否发起网络，
+// 不改变提示文案。这里锁定该契约，避免测试断言不存在的 fromCache 行为。
+const fromCacheIgnored = resolvePlaceholder({ loading: false, count: 417, fromCache: true });
+ok(
+  fromCacheIgnored.text === "🔁 数据库更新到 417条",
+  "fromCache 不是契约参数：复用缓存仍显示更新条数"
+);
+ok(fromCacheIgnored.restoreMs === 1200, "缓存提示自动恢复");
 
 const normal = resolvePlaceholder({ loading: false, count: 417 });
 ok(normal.text === "🔁 数据库更新到 417条", "正常更新提示");

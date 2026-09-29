@@ -28,13 +28,18 @@ for (const [k, v] of Object.entries(a)) {
 
 const q = (s) => JSON.stringify(s);
 
-// ICON_LOADING_PLACEHOLDER 不来自油猴脚本，是手工设计的资源（四叶风车）。
+// ICON_LOADING_PLACEHOLDER 不来自油猴脚本，是手工设计的资源（12 条辐条的转圈）。
 // 它不是从原脚本提取的，所以「保留现有值」而不是每次重新生成——
 // 否则重新运行本脚本会把已调好的图标覆盖回旧版。
+//
+// 透明底（原先是自带白底的 JPEG，深色主题下会显示成白方块）。
+// 深浅两套配色由 SVG **内部的** @media (prefers-color-scheme: dark) 提供，
+// 它在 <img> 里同样生效——比宿主 CSS 的 filter:invert() 更可靠：
+// invert 会把「亮头」翻成暗色，深底上反而更糊（实测最弱仅 1.14:1）。
 const DEFAULT_LOADING_ICON =
   "data:image/svg+xml;base64," +
   Buffer.from(
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24"><rect x="1" y="1" width="22" height="22" rx="4" fill="#e8eaed"/><circle cx="12" cy="12" r="4" fill="none" stroke="#9aa0a6" stroke-width="2" stroke-dasharray="4 2"><animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="1s" repeatCount="indefinite"/></circle></svg>'
+    "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\" width=\"100\" height=\"100\">\n  <defs>\n    <rect id=\"bar\" x=\"46\" y=\"10\" width=\"8\" height=\"20\" rx=\"4\" />\n  </defs>\n  <use href=\"#bar\" transform=\"rotate(0 50 50)\" fill=\"#000000\" />\n  <use href=\"#bar\" transform=\"rotate(30 50 50)\" fill=\"#C0C0C0\" />\n  <use href=\"#bar\" transform=\"rotate(60 50 50)\" fill=\"#A0A0A0\" />\n  <use href=\"#bar\" transform=\"rotate(90 50 50)\" fill=\"#808080\" />\n  <use href=\"#bar\" transform=\"rotate(120 50 50)\" fill=\"#808080\" />\n  <use href=\"#bar\" transform=\"rotate(150 50 50)\" fill=\"#606060\" />\n  <use href=\"#bar\" transform=\"rotate(180 50 50)\" fill=\"#606060\" />\n  <use href=\"#bar\" transform=\"rotate(210 50 50)\" fill=\"#404040\" />\n  <use href=\"#bar\" transform=\"rotate(240 50 50)\" fill=\"#404040\" />\n  <use href=\"#bar\" transform=\"rotate(270 50 50)\" fill=\"#303030\" />\n  <use href=\"#bar\" transform=\"rotate(300 50 50)\" fill=\"#303030\" />\n  <use href=\"#bar\" transform=\"rotate(330 50 50)\" fill=\"#101010\" />\n  <style>\n    /* 深色主题：整圈改为浅色档，保证在深色底板上清晰可见。\n       取值以「对比度不低于浅色档」为准（最弱 2.27:1 vs 浅色档 1.82:1）。 */\n    @media (prefers-color-scheme: dark) {\n      use[transform=\"rotate(0 50 50)\"]{fill:#ffffff}\n      use[transform=\"rotate(30 50 50)\"]{fill:#ececec}\n      use[transform=\"rotate(60 50 50)\"]{fill:#dcdcdc}\n      use[transform=\"rotate(90 50 50)\"]{fill:#cacaca}\n      use[transform=\"rotate(120 50 50)\"]{fill:#cacaca}\n      use[transform=\"rotate(150 50 50)\"]{fill:#b8b8b8}\n      use[transform=\"rotate(180 50 50)\"]{fill:#b8b8b8}\n      use[transform=\"rotate(210 50 50)\"]{fill:#a8a8a8}\n      use[transform=\"rotate(240 50 50)\"]{fill:#a8a8a8}\n      use[transform=\"rotate(270 50 50)\"]{fill:#9c9c9c}\n      use[transform=\"rotate(300 50 50)\"]{fill:#9c9c9c}\n      use[transform=\"rotate(330 50 50)\"]{fill:#909090}\n    }\n  </style>\n</svg>"
   ).toString("base64");
 
 let loadingIcon = DEFAULT_LOADING_ICON;

@@ -78,11 +78,16 @@ const sessDir = path.join(tmp, ".pi", "agent", "sessions", encodeDir(np));
 await mkdir(sessDir, { recursive: true });
 const mk = (id, ts, text) => {
   const header = { type: "session", version: 3, id, timestamp: ts, cwd: np };
-  const entryOf = (role, t) => ({
-    type: "message", id: `${id}-${role}`, parentId: null, timestamp: t,
-    message: { role, content: [{ type: "text", text: t }], timestamp: t },
+  const userOf = (t) => ({
+    type: "message", id: `${id}-user`, parentId: null, timestamp: t,
+    message: { role: "user", content: [{ type: "text", text: t }], timestamp: t },
   });
-  return [header, entryOf("user", ts), entryOf("assistant", ts)].map((l) => JSON.stringify(l)).join("\n") + "\n";
+  // assistant 带 stopReason:"stop" 才算顺利完成（否则会被判为「处理失败」）
+  const assistOf = (t) => ({
+    type: "message", id: `${id}-assistant`, parentId: null, timestamp: t,
+    message: { role: "assistant", content: [{ type: "text", text: t }], stopReason: "stop", timestamp: t },
+  });
+  return [header, userOf(ts), assistOf(ts)].map((l) => JSON.stringify(l)).join("\n") + "\n";
 };
 const fileA = path.join(sessDir, "2026-09-17T01-00-00-000Z_aaa.jsonl");
 const fileB = path.join(sessDir, "2026-09-17T02-00-00-000Z_bbb.jsonl");
@@ -108,7 +113,7 @@ check("基线建立后：历史会话不算未查看（否则角标一上来就�
 const later = new Date(Date.now() + 1500).toISOString();
 const extra = JSON.stringify({
   type: "message", id: "bbb-late", parentId: null, timestamp: later,
-  message: { role: "assistant", content: [{ type: "text", text: "刚跑完的新回答" }], timestamp: later },
+  message: { role: "assistant", content: [{ type: "text", text: "刚跑完的新回答" }], stopReason: "stop", timestamp: later },
 });
 await appendFile(fileB, extra + "\n");
 const second = await flagsOf();
@@ -130,5 +135,73 @@ check("listProjects 的 badgeCount 与 listSessions 一致",
   projInfo?.badgeCount === third.badgeCount, `${projInfo?.badgeCount} vs ${third.badgeCount}`);
 check("listProjects 仍提供 sessionCount（历史总数，供调试）",
   projInfo?.sessionCount === 2, `sessionCount=${projInfo?.sessionCount}`);
+
+/* 5. 状态圆点口径：badgeCount = runningCount + unseenCount */
+check("listProjects 返回 runningCount / unseenCount（供图标状态圆点）",
+  Number.isFinite(projInfo?.runningCount) && Number.isFinite(projInfo?.unseenCount),
+  `running=${projInfo?.runningCount} unseen=${projInfo?.unseenCount}`);
+check("runningCount + unseenCount 恒等于 badgeCount",
+  (projInfo?.runningCount || 0) + (projInfo?.unseenCount || 0) === (projInfo?.badgeCount || 0),
+  `${projInfo?.runningCount} + ${projInfo?.unseenCount} vs ${projInfo?.badgeCount}`);
+check("标记已查看后各类别都归零（无圆点可画）",
+  projInfo?.runningCount === 0 && projInfo?.unseenCount === 0,
+  `running=${projInfo?.runningCount} unseen=${projInfo?.unseenCount}`);
+
+/* 6. 又有新回答 → 只归到 unseenCount（「单个绿点」场景） */
+const later2 = new Date(Date.now() + 1500).toISOString();
+await appendFile(fileB, JSON.stringify({
+  type: "message", id: "bbb-late2", parentId: null, timestamp: later2,
+  message: { role: "assistant", content: [{ type: "text", text: "又跑完一条" }], stopReason: "stop", timestamp: later2 },
+}) + "\n");
+const projAgain = (await call("listProjects")).result?.projects?.find((p) => p.path === np);
+check("新回答后 unseenCount=1、runningCount=0（画单个绿点）",
+  projAgain?.unseenCount === 1 && projAgain?.runningCount === 0,
+  `running=${projAgain?.runningCount} unseen=${projAgain?.unseenCount}`);
+
+/* 7. 回归：会话「边写边看」不再粘着未读。
+      —— 这是本次修复的核心：
+      之前用 modified(消息时间戳) <= seenAt 判已读，只要会话还在被追加，已读
+      秒后就失效、绿角标反复冒出来，右键「全部已读」也压不住。
+      现在按 messageCount 记已读水位：标记后只要不新增消息就一直是已读。 */
+// 先标已读
+await new Promise((r) => setTimeout(r, 1600));
+await call("markViewed", { projectPath: np, sessionId: "bbb" });
+check("markViewed 后 bbb 为已读，无角标", (await flagsOf()).badgeCount === 0);
+
+// 模拟「会话仍在被写」：追加一条**不改变已完成状态**的行（toolResult），
+// 消息时间戳推后——旧逻辑会因此重新判为 unseen，新逻辑仍应为已读。
+const streamAt = new Date(Date.now() + 1500).toISOString();
+await appendFile(fileB, JSON.stringify({
+  type: "message", id: "bbb-stream", parentId: null, timestamp: streamAt,
+  message: { role: "assistant", content: [{ type: "text", text: "继续输出…" }], stopReason: "stop", timestamp: streamAt },
+}) + "\n");
+// 注意：这条是真正的新 assistant 消息，消息条数+1，按新口径应重新算未读（合理：确实有新内容）
+const flagsNew = await flagsOf();
+check("新增一条真正的新消息 → 重新算未读（内容变了）", flagsNew.map.bbb === "unseen", JSON.stringify(flagsNew.map));
+
+/* 7b. 「全部标为已读」后即使会话继续被追加（内容不变），也不应再冒未读 */
+await call("markAllViewed", { projectPath: np });
+const afterAll = await flagsOf();
+check("markAllViewed 后角标归零", afterAll.badgeCount === 0, `badgeCount=${afterAll.badgeCount} flags=${JSON.stringify(afterAll.map)}`);
+// 再追加一条新消息：确实有新内容 → 应该变未读（说明 markAllViewed 只是消水位，没把机制弄死）
+const later3 = new Date(Date.now() + 1500).toISOString();
+await appendFile(fileB, JSON.stringify({
+  type: "message", id: "bbb-late3", parentId: null, timestamp: later3,
+  message: { role: "assistant", content: [{ type: "text", text: "又来一条" }], stopReason: "stop", timestamp: later3 },
+}) + "\n");
+check("标已读后又有**新**消息 → 变回未读（机制未失效）", (await flagsOf()).map.bbb === "unseen");
+
+/* 7c. 当前打开的会话（activeView）即便有新消息也不算未读 */
+await call("markAllViewed", { projectPath: np });
+await call("setActiveSession", { projectPath: np, sessionId: "bbb" });
+const activeAt = new Date(Date.now() + 1500).toISOString();
+await appendFile(fileB, JSON.stringify({
+  type: "message", id: "bbb-active", parentId: null, timestamp: activeAt,
+  message: { role: "assistant", content: [{ type: "text", text: "正在看的会话又输出" }], stopReason: "stop", timestamp: activeAt },
+}) + "\n");
+check("正在打开的会话有新消息也不算未读（activeView）", (await flagsOf()).map.bbb === null);
+// 离开它之后（清空 activeView）→ 应重新算未读
+await call("setActiveSession", {});
+check("离开后同一会话恢复为未读", (await flagsOf()).map.bbb === "unseen");
 
 await finish(fail === 0 ? 0 : 1);

@@ -33,7 +33,14 @@ const resolveInitialLogLevel = (): LogLevel => {
 
 const currentLevel = resolveInitialLogLevel();
 
-/** 检查某个级别是否应该输出 */
+/** 检查某个级别是否应该输出
+ *
+ * 判据是「**不低于**当前级别」：`warn` 级别只放行 warn/error，
+ * 不放行 info/debug/verbose —— 这才与文件头「生产环境默认关闭 debug/verbose」
+ * 及 `resolveInitialLogLevel` 的注释一致。原实现写的是 `<=`，方向整个反了：
+ * 生产(默认 warn) 下 error(4) <= warn(3) 为假 → **报错一条都不打**，
+ * 反而 debug/verbose 全放行（开发环境同理，warn/error 也被吞）。
+ */
 function shouldLog(level: LogLevel): boolean {
   const levelOrder: Record<LogLevel, number> = {
     verbose: 0,
@@ -42,7 +49,7 @@ function shouldLog(level: LogLevel): boolean {
     warn: 3,
     error: 4,
   };
-  return levelOrder[level] <= levelOrder[currentLevel];
+  return levelOrder[level] >= levelOrder[currentLevel];
 }
 
 /** 敏感信息模式（自动脱敏 URL、密钥等） */
@@ -62,41 +69,58 @@ function sanitize(msg: string): string {
   return result;
 }
 
+/**
+ * 参数脱敏：只有字符串需要（且能够）走正则脱敏。
+ *
+ * 日志方法签名是 `(...args: unknown[])`，历史上直接 `args.map(sanitize)`：
+ * ① 类型上 string 参数接不住 unknown（vue-tsc 报 6 处 TS2345）；
+ * ② 运行期传入 Error/对象时 `result.replace(...` 会抛 TypeError，反而把调用方打崩。
+ * 现在非字符串原样透传给 console（由 console 自行格式化），字符串照常脱敏。
+ */
+function sanitizeArgs(args: readonly unknown[]): unknown[] {
+  return args.map((a) => (typeof a === "string" ? sanitize(a) : a));
+}
+
 // ==================== 公共日志方法 ====================
 
 /** Error 日志 */
 export function error(...args: unknown[]): void {
   if (!shouldLog("error")) return;
-  console.error("[我的搜索] ", ...args.map(sanitize));
+  console.error("[我的搜索] ", ...sanitizeArgs(args));
 }
 
 /** Warn 日志 */
 export function warn(...args: unknown[]): void {
   if (!shouldLog("warn")) return;
-  console.warn("[我的搜索] ", ...args.map(sanitize));
+  console.warn("[我的搜索] ", ...sanitizeArgs(args));
 }
 
 /** Info 日志 */
 export function info(...args: unknown[]): void {
   if (!shouldLog("info")) return;
-  console.log("[我的搜索] ", ...args.map(sanitize));
+  console.log("[我的搜索] ", ...sanitizeArgs(args));
 }
 
 /** Debug 日志 */
 export function debug(...args: unknown[]): void {
   if (!shouldLog("debug")) return;
-  console.debug("[我的搜索]", ...args.map(sanitize));
+  console.debug("[我的搜索]", ...sanitizeArgs(args));
 }
 
 /** Verbose 日志（详细调试） */
 export function verbose(...args: unknown[]): void {
   if (!shouldLog("verbose")) return;
-  console.debug("[我的搜索::V]", ...args.map(sanitize));
+  console.debug("[我的搜索::V]", ...sanitizeArgs(args));
 }
 
-/** 带错误上下文的 error */
-export function errorWithContext(context: string, error: unknown): void {
-  error(`${context}:`, error);
+/**
+ * 带错误上下文的 error
+ *
+ * 注意形参不能叫 `error`：会把同名的模块级日志函数遮蔽，
+ * 函数体里的 `error(...)` 就变成「调用传进来的那个错误对象」→ 运行期必炸。
+ */
+export function errorWithContext(context: string, err: unknown): void {
+  error(`${context}:`, err);
 }
 
 /** 警告并降级处理 */

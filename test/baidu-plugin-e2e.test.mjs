@@ -127,6 +127,18 @@ const evalJs = async (expr) => {
   return r.result?.result?.value;
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** 轮询等待条件成立（返回真值即返回），超时抛错——避免用固定 sleep 赌渲染时机 */
+const waitFor = async (expr, desc, timeoutMs = 8000, stepMs = 150) => {
+  const deadline = Date.now() + timeoutMs;
+  let last;
+  while (Date.now() < deadline) {
+    last = await evalJs(expr);
+    if (last) return last;
+    await sleep(stepMs);
+  }
+  throw new Error(`等待超时（${desc}）：${JSON.stringify(last)?.slice(0, 200)}`);
+};
 let pass = 0;
 let fail = 0;
 const check = (name, cond, extra = "") => {
@@ -187,18 +199,19 @@ await S(
         }
         if (cmd === 'plugin_gateway_sync') return Promise.resolve(null);
         if (cmd === 'plugin_backend_list') return Promise.resolve([]);
+        // 内置插件通道：宿主启动会拉一次「内置清单」并做权限修补，必须返回数组，
+        // 否则前端展开 entries 时会抛 “s is not iterable”，配置窗初始化中断、面板渲染不出来。
+        if (cmd === 'builtin_list') return Promise.resolve([]);
+        if (cmd === 'builtin_removed_list') return Promise.resolve([]);
+        if (cmd === 'builtin_resource_path') return Promise.resolve('');
+        if (cmd === 'builtin_mark_removed' || cmd === 'builtin_clear_removed') return Promise.resolve(null);
         if (cmd === 'get_default_subscribe_text') return Promise.resolve('');
         if (cmd === 'get_toggle_shortcut') return Promise.resolve('ctrl+alt+s');
         if (cmd === 'get_autostart_enabled') return Promise.resolve(false);
         return Promise.resolve(null);
       },
-      transformCallback(cb, once) {
-        const cbId = Math.random().toString(36).slice(2);
-        window.__cbIds = window.__cbIds || {};
-        window.__cbIds[cbId] = cb;
-        return cbId;
-      },
-      unregisterCallback(cbId) { delete (window.__cbIds || {})[cbId]; },
+      transformCallback(cb) { return cb; },
+      unregisterCallback() {},
       metadata: { currentWindow: { label: 'main' }, currentWebview: { label: 'main' } },
       plugins: {},
     };
@@ -215,19 +228,37 @@ await evalJs(`localStorage.clear(); 1`);
 await S("Page.navigate", { url: base + "/config.html" }, sessionId);
 await sleep(1500);
 
+await waitFor(`!!document.querySelector('.cfg-nav .nav-item[data-pane="plugins"]')`, "设置窗口导航栏出现");
 await evalJs(`document.querySelector('.cfg-nav .nav-item[data-pane="plugins"]').click()`);
-await sleep(600);
+await waitFor(
+  `[...document.querySelectorAll('.page.plugins button')].some(b => b.textContent.includes('从文件安装'))`,
+  "插件面板渲染出「从文件安装」按钮"
+);
 
 await evalJs(`
   [...document.querySelectorAll('.page.plugins button')]
     .find(b => b.textContent.includes('从文件安装')).click()
 `);
-await sleep(800);
-const dialogText = await evalJs(`document.querySelector('#msgText')?.textContent || ''`);
+// 安装确认已从纯文本 MessageDialog(#msgText/#msgOk) 换成富内容 PluginInstallDialog：
+// 名称在 .plugin-install-name，确认按钮是 .plugin-install-actions 里的 primary（文案 安装/重新安装/升级）。
+await waitFor(
+  `!!document.querySelector('.plugin-install-overlay .plugin-install-dialog')`,
+  "插件安装确认弹窗出现"
+);
+await waitFor(
+  `(document.querySelector('.plugin-install-name')?.textContent || '').includes('百度翻译')`,
+  "确认弹窗里认出「百度翻译」"
+);
+const dialogText = await evalJs(`document.querySelector('.plugin-install-name')?.textContent || ''`);
 check("安装确认弹窗出现（认出百度翻译）", dialogText.includes("百度翻译"), dialogText.slice(0, 80));
 
-await evalJs(`document.querySelector('#msgOk').click()`);
-await sleep(1000);
+await evalJs(
+  `[...document.querySelectorAll('.plugin-install-actions button')].find(b => b.classList.contains('primary'))?.click()`
+);
+await waitFor(
+  `(document.querySelector('.page.plugins .plugins-list')?.textContent || '').includes('百度翻译')`,
+  "插件面板列出「百度翻译」"
+);
 
 const listText = await evalJs(`document.querySelector('.page.plugins .plugins-list')?.textContent || ''`);
 check("插件面板出现「百度翻译」", listText.includes("百度翻译"), listText.slice(0, 60));
@@ -241,12 +272,12 @@ check(
 await S("Page.navigate", { url: base + "/index.html" }, sessionId);
 await sleep(1600);
 
-// 输入插件声明的关键词（百度翻译 → "翻译"）
+// 输入插件声明的关键词（百度翻译 → "百度"；"翻译" 亦可，因标题「百度翻译」含该子串）
 await evalJs(`
   (() => {
     const el = document.getElementById('my_search_input');
     el.focus();
-    el.value = '翻译';
+    el.value = '百度';
     el.dispatchEvent(new Event('input', { bubbles: true }));
   })();
   1
@@ -341,6 +372,62 @@ if (li) {
     m.writeFile(shotPath, Buffer.from(shot.result.data, "base64"))
   );
   console.log("      截图:", shotPath);
+}
+
+/* ================= 3. 二次搜索（PRO 模式）：「百度 : 子词」条目保留 + 预填 ================= */
+// subSearch: true 的插件项在输入含 " : " 后不会被过滤掉（标题带 [可搜索] 标记进 PRO 候选）；
+// 回车/点击打开视图时，宿主把分隔符后的子关键词推给 onSubKeyword → iframe 顶层导航预填。
+await evalJs(`
+  (() => {
+    const el = document.getElementById('my_search_input');
+    el.focus();
+    el.value = '百度 : hello';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  })();
+  1
+`);
+
+let proKept = true;
+try {
+  await waitFor(
+    `[...document.querySelectorAll('#matchItems .resultItem')].some(el => (el.textContent || '').includes('百度翻译'))`,
+    "PRO 模式下百度翻译条目保留",
+    5000
+  );
+} catch (e) {
+  proKept = false;
+}
+check("PRO 模式（百度 : hello）下条目保留（subSearch 生效）", proKept, proKept ? "" : "条目被过滤掉了");
+
+if (proKept) {
+  await evalJs(`
+    (() => {
+      const li = [...document.querySelectorAll('#matchItems .resultItem')]
+        .find(el => (el.textContent || '').includes('百度翻译'));
+      li?.querySelector('a[data-open]')?.click();
+    })();
+    1
+  `);
+  // 挂载完成 → pushCurrentSubKeyword 推 "hello" → setQuery 改 iframe src 顶层导航预填
+  let prefilled = true;
+  try {
+    await waitFor(
+      `(document.querySelector('.plugin-view #bt-frame')?.src || '').includes('query=hello')`,
+      "插件视图 iframe 预填子关键词",
+      10000
+    );
+  } catch (e) {
+    prefilled = false;
+  }
+  const frameSrc = await evalJs(`document.querySelector('.plugin-view #bt-frame')?.src || ''`);
+  check(
+    "子关键词预填进百度翻译 iframe（query=hello + 语言对）",
+    prefilled &&
+      frameSrc.includes("mtpe-individual/transText") &&
+      frameSrc.includes("query=hello") &&
+      /lang=(en2zh|zh2en)/.test(frameSrc),
+    frameSrc || "(无 iframe)"
+  );
 }
 
 check("全程无页面异常", pageErrors.length === 0, pageErrors.slice(0, 3).join(" | "));

@@ -20,6 +20,49 @@
         </div>
       </div>
     </div>
+    <script>
+      // 在模块脚本加载前立即应用主题，避免骨架屏闪错底色。
+      // 注意：主题值由 storageSet 以 JSON 写入（如 "light" 带引号），必须 JSON.parse；
+      // 早期版本直接比较裸字符串（raw === "dark" 永假），导致强制主题时
+      // 首帧既不挂主题类、也不适配骨架屏底色。
+      (function () {
+        try {
+          var theme = "system";
+          var raw = localStorage.getItem("my-search-desktop:theme");
+          if (raw != null) {
+            var parsed = JSON.parse(raw);
+            if (parsed === "light" || parsed === "dark" || parsed === "system") {
+              theme = parsed;
+            }
+          }
+          var dark =
+            theme === "dark" ||
+            (theme === "system" &&
+              window.matchMedia &&
+              window.matchMedia("(prefers-color-scheme: dark)").matches);
+          if (dark) {
+            document.documentElement.classList.add("theme-dark");
+            var sk = document.getElementById("ms-skeleton");
+            if (sk) {
+              sk.style.background = "#17191d";
+              var box = sk.firstElementChild;
+              if (box) {
+                box.style.background = "#17191d";
+                box.style.borderColor = "#33363d";
+                // 叶子占位圆：深色时也改暗，避免浅灰圆在深色背景上白闪
+                var flexRow = box.firstElementChild;
+                if (flexRow) {
+                  var leafCircle = flexRow.lastElementChild;
+                  if (leafCircle) leafCircle.style.background = "#33363d";
+                }
+              }
+            }
+          } else {
+            document.documentElement.classList.add("theme-light");
+          }
+        } catch (e) {}
+      })();
+    </script>
 
     <!-- 宿主挂载点。刻意不用最通用的 id="app"：插件以 inlay 形态运行在**同一个
          document** 里（不是 iframe / Shadow DOM），插件脚本里一个

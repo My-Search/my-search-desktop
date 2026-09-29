@@ -46,3 +46,19 @@ test/_fix-*.mjs
 /index.dist.json
 /index.error.json
 /error-item.txt
+
+# 根目录调试残留（评审期间产生，不入库；文件本身保留在工作区）
+/nul
+/_capture.ps1
+/style.diff
+/pi-agent-seen.json
+/下载.jpg
+
+# test/ 下的评审/诊断临时产物（跑分、抓包、补丁试验与浏览器 profile 快照）
+# 注意：正式用例 test/*.test.mjs 与可复用脚本（_check-doc-sync / _verify-market-publish）不在此列
+/test/_rev-*
+/test/_out-*
+/test/_o-*.txt
+/test/_patch*.mjs
+/test/_chrome_probe*/
+/test/_diag-tags*

@@ -192,9 +192,11 @@ pub struct RemoteMeta {
 }
 
 fn build_client(timeout_secs: u64) -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
+    // 跟随系统代理：每次构建现场读取（与 lib.rs 的 build_client 同源）。
+    let builder = reqwest::Client::builder()
         .user_agent(crate::UA)
-        .timeout(Duration::from_secs(timeout_secs))
+        .timeout(Duration::from_secs(timeout_secs));
+    crate::system_proxy::apply_system_proxy(builder)
         .build()
         .map_err(|e| e.to_string())
 }

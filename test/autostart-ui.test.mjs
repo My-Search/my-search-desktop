@@ -238,11 +238,20 @@ const footerShown = await evalJs(`document.querySelector('.cfg-footer').classLis
 check("常规面板不显示底栏保存按钮", footerShown === false, `show=${footerShown}`);
 
 // 7. 说明文案点明「默认开启」与「可在设置关闭」
-const noteText = await evalJs(`document.querySelector('#ms-config-view .page.general .cfg-note').textContent`);
+// 注：.cfg-note 块已随面板改版移除；同等信息现由两道文案承载——
+//   开关 title（"开机自启动（默认开启，可随时关闭）"）+ 行内 .general-desc。
+const noteText = await evalJs(`(() => {
+  const row = [...document.querySelectorAll('#ms-config-view .page.general .general-row')]
+    .find(r => r.textContent.includes('开机自启动'));
+  if (!row) return '';
+  const desc = row.querySelector('.general-desc')?.textContent || '';
+  const title = row.querySelector('.switch')?.getAttribute('title') || '';
+  return desc + ' ' + title;
+})()`);
 check(
   "面板说明点明默认开启+可关闭",
   noteText.includes("默认") && noteText.includes("关闭"),
-  noteText.replace(/\s+/g, " ").trim().slice(0, 60)
+  noteText.replace(/\s+/g, " ").trim().slice(0, 80)
 );
 
 check("无未捕获页面异常", pageErrors.length === 0, JSON.stringify(pageErrors.slice(0, 2)));

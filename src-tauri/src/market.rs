@@ -312,12 +312,14 @@ pub(crate) async fn market_fetch_raw(
     // 不跟随重定向：白名单只约束了首跳，若自动跟随，302 的终点可以落到任意
     // 地址（SSRF）。这里手动逐跳校验，每跳都要求仍是不在受控前缀内且
     // host 合法的地址。
-    let client = reqwest::Client::builder()
-        .user_agent(crate::UA)
-        .timeout(std::time::Duration::from_secs(120))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| format!("构建下载客户端失败: {e}"))?;
+    let client = crate::system_proxy::apply_system_proxy(
+        reqwest::Client::builder()
+            .user_agent(crate::UA)
+            .timeout(std::time::Duration::from_secs(120))
+            .redirect(reqwest::redirect::Policy::none()),
+    )
+    .build()
+    .map_err(|e| format!("构建下载客户端失败: {e}"))?;
     let mut current = url.clone();
     let mut resp = None;
     for _ in 0..5 {

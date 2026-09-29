@@ -33,11 +33,29 @@ export function overlapMatchingDegreeForObjectArray<T>(
   const scopeForData = objArr.map((item) => overlapMatchingDegree(keyword, fun(item), sort));
   sortAndSync(scopeForData, objArr, sort);
 
-  if (Array.isArray(scopeForObjArrContainer)) {
-    scopeForObjArrContainer.push(...scopeForData);
+  if (!onlyHasScope) {
+    // 未过滤：objArr 与 scopeForData 保持一一对应，直接把分数交给调用方
+    if (Array.isArray(scopeForObjArrContainer)) {
+      scopeForObjArrContainer.push(...scopeForData);
+    }
+    return objArr;
   }
 
-  return onlyHasScope ? objArr.filter((_, index) => scopeForData[index] !== 0) : objArr;
+  // onlyHasScope：丢弃零分项。历史实现在此**只过滤 objArr、不过滤分数**，
+  // 而 scoreList 是过滤前 push 的，导致调用方 `matched[i]` ↔ `scoreList[i]`
+  // 整体错位（分数张冠李戴、污染排序）。这里同步过滤，保证两者严格同源。
+  const matched: T[] = [];
+  const matchedScope: number[] = [];
+  for (let i = 0; i < objArr.length; i++) {
+    if (scopeForData[i] !== 0) {
+      matched.push(objArr[i]);
+      matchedScope.push(scopeForData[i]);
+    }
+  }
+  if (Array.isArray(scopeForObjArrContainer)) {
+    scopeForObjArrContainer.push(...matchedScope);
+  }
+  return matched;
 }
 
 /**

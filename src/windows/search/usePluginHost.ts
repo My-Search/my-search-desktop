@@ -17,8 +17,17 @@
  */
 
 import { ref } from "vue";
-import { auditDenied, createHostApi, type PluginHostContext } from "../../lib/plugins/host.ts";
+import {
+  auditDenied,
+  createHostApi,
+  type PluginHostContext,
+  type PluginInstallConfirmRequest,
+  type PluginSyncState,
+} from "../../lib/plugins/host.ts";
+import { permissionBaseId } from "../../lib/plugins/permissions.ts";
 import { syncRecordGateway } from "../../lib/plugins/gateway.ts";
+import { envGrantsOf, envPermissionOf } from "../../lib/plugins/env-store.ts";
+import type { EnvPickResult } from "../../composables/useEnvPicker.ts";
 import {
   callPluginBackend,
   listPluginBackends,
@@ -26,6 +35,32 @@ import {
   readPluginText,
   readPluginBinary,
   restartPluginBackend,
+  screenshotCloseOverlay,
+  screenshotCopyImage,
+  screenshotCrop,
+  screenshotDeleteShot,
+  screenshotListShots,
+  screenshotNotifySaved,
+  screenshotOpenOverlay,
+  screenshotOverlayImage,
+  screenshotPickRegion,
+  screenshotPruneShots,
+  screenshotReadShot,
+  screenshotSaveShot,
+  screenshotSaveShotAs,
+  screenshotShotsDir,
+  screenshotGetShortcut,
+  screenshotSetShortcut,
+  screenshotCapture,
+  clipboardHistoryList,
+  clipboardHistoryPage,
+  clipboardHistoryReadImage,
+  clipboardHistoryDelete,
+  clipboardHistoryClear,
+  clipboardHistoryCopy,
+  clipboardHistorySetFavorite,
+  clipboardHistoryGetShortcut,
+  clipboardHistorySetShortcut,
   stopPluginBackend,
   watchPluginDir,
 } from "../../lib/plugins/ipc.ts";
@@ -45,6 +80,7 @@ import {
   planReload,
 } from "../../lib/plugins/dev-reload.ts";
 import { loadRegistry, saveRegistry, type PluginRecord, type PluginRegistryFile } from "../../lib/plugins/registry.ts";
+import type { AttachedEntry } from "../../lib/plugins/attachments.ts";
 import type { SearchItem } from "../../types/index.ts";
 
 /** 注册表在 localStorage 里的键（与 registry.ts 保持一致） */
@@ -74,8 +110,33 @@ export interface PluginHostRuntimeOptions {
   confirm: (text: string) => Promise<boolean>;
   /** 读取系统选中文本 */
   getSelectedText: (hint?: string) => Promise<string>;
+  /**
+   * 打开宿主的「选择环境变量」授权弹层（插件的 `ms.env.pick` 用）。
+   *
+   * 由 App.vue 注入：弹层是宿主 UI（EnvPicker.vue），插件运行时不该知道它的存在。
+   * `grant` 由宿主在用户点「允许」时回调（本模块已把写授权 + 重启进程的逻辑
+   * 包在 onEnvGrant 里，注入方只需负责画界面）。返回 null 表示用户取消。
+   */
+  openEnvPicker?: (req: {
+    pluginId: string;
+    pluginName: string;
+    title?: string;
+    purpose?: string;
+    granted: string[];
+    grant: (name: string) => Promise<boolean>;
+  }) => Promise<EnvPickResult | null>;
+  /**
+   * 打开宿主的「插件安装确认」弹窗（插件的 `ms.market.install` / `update` 用）。
+   *
+   * 由 App.vue 注入：弹窗是宿主 UI（PluginInstallDialog.vue），插件运行时不该知道
+   * 它的存在。返回 `true` = 用户点了「安装」；`false` = 取消（宿主不落盘）。
+   * 不注入时市场安装会被拒绝（fail-closed，见 host.ts 的 createMarketApi）。
+   */
+  confirmPluginInstall?: (req: PluginInstallConfirmRequest) => Promise<boolean>;
   /** 插件视图挂载完成后通知宿主（重算窗口高度） */
   onItemsChanged?: () => void;
+  /** 当前附加在搜索框里的文件/文件夹（由 App.vue 注入，ms.input.attachments 用） */
+  getAttachments?: () => readonly AttachedEntry[];
   /**
    * 开发插件（目录挂载）在磁盘上发生变化、且注册表已被更新后回调。
    *
@@ -84,6 +145,23 @@ export interface PluginHostRuntimeOptions {
    * 不注入则只更新注册表与搜索项。
    */
   onDevPluginReloaded?: (info: DevReloadInfo) => void;
+  /**
+   * 让视图宿主重新求解并应用一次前台插件的主题。
+   *
+   * 由 App.vue 注入（转发到 `pluginViewHost.refreshActiveTheme`）：插件在界面内
+   * 改主题（`ms.ui.applyTheme`）时，需要由视图宿主去切整个呼出窗口的主题。
+   * 本模块只负责把插件的调用转达出去，不碰视图 DOM。
+   */
+  refreshPluginTheme?: () => void;
+  /**
+   * 数据同步（插件的 `ms.sync.status` / `ms.sync.trigger`）。
+   *
+   * 由 App.vue 注入（`useSyncBridge`）：同步引擎的创建/销毁、以及「只在有插件
+   * 申请该权限时才建」的判定都在那边，本模块只把调用转达出去。
+   * 不注入时两个 API 退化为「未开启」与「抛错」。
+   */
+  syncNow?: () => Promise<PluginSyncState>;
+  syncStatus?: () => PluginSyncState;
 }
 
 /** 一次开发插件重载的结果（供宿主决定重挂视图 / 提示用户） */
@@ -107,6 +185,25 @@ export function usePluginHost(opts: PluginHostRuntimeOptions) {
   let syncedFingerprint = "";
   /** 是否已加载（首次加载完成前不合成插件项） */
   const loaded = ref(false);
+
+  /**
+   * 「已启用且已授予 `sync`」的插件数（响应式）。
+   *
+   * 单独出一个计数而不是让调用方去遍历 `activePlugins()`：那是个普通函数，
+   * 读它不会建立依赖，装了插件也不会重算。搜索窗口据此决定要不要为插件
+   * 起一份同步引擎（没有插件申请就完全不建，省掉一个后台定时器）。
+   */
+  const syncConsumerCount = ref(0);
+
+  /** 重算 `syncConsumerCount`（注册表任何变动后都要调） */
+  function refreshSyncConsumers(): void {
+    syncConsumerCount.value = registry.plugins.filter(
+      (p) =>
+        p.enabled &&
+        p.source.kind !== "legacy" &&
+        p.grants.some((g) => permissionBaseId(g.permission) === "sync")
+    ).length;
+  }
 
   /**
    * 插件图标缓存：`<插件id>/<图标引用>` → 可直接用于 `<img src>` 的 data URL。
@@ -147,6 +244,7 @@ export function usePluginHost(opts: PluginHostRuntimeOptions) {
     registry = loadRegistry();
     syncedFingerprint = fp;
     loaded.value = true;
+    refreshSyncConsumers();
     // 网关同步：Rust 侧按「已授予权限」做第二道拦截，必须先把权限镜像过去
     for (const rec of registry.plugins) {
       if (rec.source.kind === "legacy") continue;
@@ -231,6 +329,7 @@ export function usePluginHost(opts: PluginHostRuntimeOptions) {
     // 就地替换（保持列表顺序：插件在面板与搜索结果里的次序不该因改了个文件而变）
     registry.plugins = registry.plugins.map((p) => (p.id === rec.id ? plan.record : p));
     registry = { version: registry.version, plugins: [...registry.plugins] };
+    refreshSyncConsumers();
     if (plan.newPermissions.length > 0) {
       console.warn(
         `[插件] 「${plan.record.name}」新增权限待确认：${plan.newPermissions.join(", ")}`
@@ -399,6 +498,7 @@ export function usePluginHost(opts: PluginHostRuntimeOptions) {
     }
     rec.denied = rec.denied.filter((p) => p !== permission);
     if (rec.pendingPermission && rec.pendingPermission.split(":")[0] === base) rec.pendingPermission = null;
+    refreshSyncConsumers();
     persist();
     try {
       await syncRecordGateway(rec);
@@ -434,6 +534,11 @@ export function usePluginHost(opts: PluginHostRuntimeOptions) {
       toast: (text, type) => opts.toast(text, type),
       confirm: (text) => opts.confirm(text),
       getSelectedText: (hint) => opts.getSelectedText(hint),
+      getAttachments: () => opts.getAttachments?.() ?? [],
+      // 插件界面内改主题（ms.ui.applyTheme）→ 视图宿主重算呼出窗口主题
+      refreshPluginTheme: () => opts.refreshPluginTheme?.(),
+      // 市场安装/更新的用户确认闸门（ms.market.install）：弹宿主安装确认框
+      confirmPluginInstall: opts.confirmPluginInstall,
       // 详情视图里的运行期授权：直接改注册表并同步网关
       requestPermission: async (id, permission) => {
         const rec = get(id);
@@ -458,10 +563,74 @@ export function usePluginHost(opts: PluginHostRuntimeOptions) {
         }
         return callPluginBackend(id, method, params);
       },
+      /**
+       * `ms.env.pick`：打开宿主的授权选择器。
+       *
+       * 授权动作由弹层的「允许」按钮触发（回调 `grant`），走权限网关同一条链路：
+       * 改记录 → persist → 下发网关。env 只在 spawn 时进进程，所以授权后若该插件
+       * 后台在跑，立即重启一次（否则用户会以为「授权了却没生效」）。
+       */
+      pickEnvVar: async (id, o) => {
+        if (!opts.openEnvPicker) return null;
+        const rec = get(id);
+        return await opts.openEnvPicker({
+          pluginId: id,
+          pluginName: rec?.name ?? "",
+          title: o.title,
+          purpose: o.purpose,
+          granted: rec ? [...envGrantsOf(rec)] : [],
+          grant: async (name: string) => {
+            const ok = await grantPermission(id, envPermissionOf(name));
+            if (!ok) return false;
+            try {
+              const list = await listPluginBackends();
+              const st = list.find((s) => s.pluginId === id)?.status ?? "stopped";
+              if (st === "running" || st === "starting") await restartPluginBackend(id);
+            } catch (e) {
+              /* 浏览器调试 / 查询失败：不动进程 */
+            }
+            opts.onItemsChanged?.();
+            return true;
+          },
+        });
+      },
       log: (id, level, text) => {
         const fn = level === "error" ? console.error : level === "warn" ? console.warn : console.log;
         fn(`[插件 ${id}] ${text}`);
       },
+      // ===== 截图能力：直接转发到 ipc 的 screenshot_* 命令（Rust 侧再校验一次）=====
+      screenshotCapture: () => screenshotCapture(),
+      screenshotOpenOverlay: () => screenshotOpenOverlay(),
+      screenshotCloseOverlay: () => screenshotCloseOverlay(),
+      screenshotOverlayImage: (monitorIndex) => screenshotOverlayImage(monitorIndex),
+      screenshotCrop: (monitorIndex, x, y, width, height) =>
+        screenshotCrop(monitorIndex, x, y, width, height),
+      screenshotPickRegion: () => screenshotPickRegion(),
+      screenshotCopyImage: (dataUrl) => screenshotCopyImage(dataUrl),
+      screenshotSaveShot: (pluginId, dataUrl) => screenshotSaveShot(pluginId, dataUrl),
+      screenshotSaveShotAs: (pluginId, dataUrl, parentDir) =>
+        screenshotSaveShotAs(pluginId, dataUrl, parentDir),
+      screenshotShotsDir: (pluginId) => screenshotShotsDir(pluginId),
+      screenshotNotifySaved: (pluginId, relPath) => screenshotNotifySaved(pluginId, relPath),
+      screenshotListShots: (pluginId) => screenshotListShots(pluginId),
+      screenshotReadShot: (pluginId, relPath) => screenshotReadShot(pluginId, relPath),
+      screenshotDeleteShot: (pluginId, relPath) => screenshotDeleteShot(pluginId, relPath),
+      screenshotPruneShots: (pluginId, days) => screenshotPruneShots(pluginId, days),
+      screenshotGetShortcut: () => screenshotGetShortcut(),
+      screenshotSetShortcut: (shortcut) => screenshotSetShortcut(shortcut),
+      // ===== 剪贴板历史：转发到宿主原生能力（监听在 Rust 侧，这里只做数据通道）=====
+      clipboardHistoryList: (query) => clipboardHistoryList(query),
+      clipboardHistoryPage: (opts) => clipboardHistoryPage(opts),
+      clipboardHistoryReadImage: (relPath) => clipboardHistoryReadImage(relPath),
+      clipboardHistoryDelete: (id) => clipboardHistoryDelete(id),
+      clipboardHistoryClear: (keepFavorites) => clipboardHistoryClear(keepFavorites),
+      clipboardHistoryCopy: (id) => clipboardHistoryCopy(id),
+      clipboardHistorySetFavorite: (id, favorite) => clipboardHistorySetFavorite(id, favorite),
+      clipboardHistoryGetShortcut: () => clipboardHistoryGetShortcut(),
+      clipboardHistorySetShortcut: (shortcut) => clipboardHistorySetShortcut(shortcut),
+      // ===== 数据同步：转发到 App.vue 注入的桥（那边负责引擎生命周期）=====
+      syncNow: opts.syncNow,
+      syncStatus: opts.syncStatus,
     };
   }
 
@@ -497,6 +666,8 @@ export function usePluginHost(opts: PluginHostRuntimeOptions) {
   return {
     loaded,
     reload,
+    /** 「已启用且已授予 sync」的插件数（搜索窗口据此决定要不要起同步引擎） */
+    syncConsumerCount,
     get,
     activePlugins,
     pluginItems,

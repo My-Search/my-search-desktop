@@ -4,8 +4,8 @@
  * 覆盖官方说明 3.1 的完整路径：「呼出搜索框直接按 tab 键，输入问题再回车即可体现
  * AI 简单问答功能」——也就是系统的「[脚本]问AI」应用：
  *
- *   1. 空内容按 Tab  →  输入框变为「 : 」→ 引擎特殊路由把它转发成「问AI : 」
- *      （searchableSpecialRouting["^\\s*$"] → "问AI"）；
+ *   1. 空内容按 Tab  →  输入框**直接停在「 : 」」（父词为空 = 不过滤，
+ *      列出全部可搜索项；旧版的「自动转发成问AI : 」已按新交互要求移除）；
  *   2. 输入问题（如「你好」）→ 不重搜、脚本会话不被销毁；
  *   3. 回车 → 打开「问AI」脚本应用；应用**挂载完成后自动**把「你好」推给
  *      MS_SCRIPT_ENV.event.sendListener（原版 view.mount → waitViewRenderingComplete
@@ -232,12 +232,16 @@ const key = async (k) => {
 const pushed = () => evalJs(`JSON.stringify(window.__pushedMsgs || null)`).then(JSON.parse);
 const scriptViewOpen = () => evalJs(`!!document.querySelector('#text_show .script-view')`);
 
-// ---- 1. 空内容按 Tab → 特殊路由转发为「问AI : 」----
+// ---- 1. 空内容按 Tab → 直接停在「 : 」（不跳转问AI；父词为空不过滤） ----
 await setInput("");
 await sleep(150);
 await key("Tab");
-await sleep(1200); // 防抖 + PRO 路由 + 转发重搜
-check("空内容按 Tab：输入框被转发为「问AI : 」", (await inputVal()) === "问AI : ", JSON.stringify(await inputVal()));
+await sleep(1200); // 防抖 + PRO 路由（空父词 → 列出全部可搜索项，不重定向）
+check(
+  "空内容按 Tab：输入框直接停在「 : 」（不再跳转为「问AI : 」）",
+  (await inputVal()) === " : ",
+  JSON.stringify(await inputVal())
+);
 
 // ---- 2. 输入问题「你好」→ 不重搜、会话未开也无妨（结果仍是问AI应用） ----
 await setInput("问AI : 你好");

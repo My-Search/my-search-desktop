@@ -46,7 +46,8 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "resources/plugins/"
+      "resources/plugins/",
+      "resources/mspp.ico"
     ]
   }
 }

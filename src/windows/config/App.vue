@@ -14,7 +14,13 @@
  * 面板按需渲染（不保活）：<component :is> 切换，等价原 setPane() 的 innerHTML 替换。
  */
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, shallowRef } from "vue";
-import { getDefaultSubscribeText, getShortcutBindings, openExternal } from "../../lib/tauri-bridge";
+import {
+  getDefaultSubscribeText,
+  getShortcutBindings,
+  openExternal,
+  onOpenPluginPackage,
+  takePendingPluginOpen,
+} from "../../lib/tauri-bridge";
 import { defaultToggleBinding, type ShortcutBinding } from "../../lib/shortcut-bindings";
 import { storageGet, storageSet } from "../../lib/util";
 import { subscribeItemsToText } from "../../lib/subscribe-parser";
@@ -37,6 +43,11 @@ import PanelSync from "./panels/PanelSync.vue";
 // 从 ~1.7s 涨到 ~6.9s，逼近 config.html 里 8 秒的兜底计时器，
 // 慢机器上就会看到「页面加载失败，请重启应用」。面板本身只在用户点「插件」时才需要。
 const PanelPlugins = defineAsyncComponent(() => import("./panels/PanelPlugins.vue"));
+// 环境变量面板同样**延迟加载**：它要读注册表做「已授权几个插件」的展示，
+// 而注册表/插件运行时（usePluginRuntime → ipc/registry…）是本窗口最重的依赖，
+// 静态引入会把它们拖进首屏模块图（实测 config chunk 72KB → 88KB）。
+// 与 PanelPlugins 同理：面板只在用户点「环境变量」时才需要。
+const PanelEnv = defineAsyncComponent(() => import("./panels/PanelEnv.vue"));
 import { SUBSCRIBES_KEY } from "./configShared";
 import { useSubscribeDraft } from "./useSubscribeDraft";
 import { useTagsChecked } from "./useTagsChecked";
@@ -55,6 +66,7 @@ type PaneName =
   | "about"
   | "tis-hub"
   | "plugins"
+  | "env"
   | "sync";
 
 /** 有内容需要保存的页面：只有这两个页面显示底栏的「保存并应用」按钮 */
@@ -92,6 +104,35 @@ const shortcutCapturing = ref(false);
 const tokenVisible = ref(false);
 let tokenResolver: ((value: string | null) => void) | null = null;
 
+/**
+ * 双击 .mspp 插件包时由 Rust 叫醒的待安装路径。
+ * 切到插件面板后传给 PanelPlugins，由它弹出安装确认并清空。
+ */
+const pendingPluginPath = ref<string | null>(null);
+/** 「双击 .mspp 插件包」事件监听器（Rust 端 my-search://open-plugin-package） */
+let unlistenPluginOpen: (() => void) | null = null;
+
+/**
+ * 处理「从外部打开插件包」：双击 .mspp / 命令行传入路径时由 Rust 叫醒。
+ *
+ * 路径从 Rust 的待处理槽**拉取**（幂等，取出即清空），因此本函数可以安全地
+ * 被重复调用（事件到达一次 + 挂载时兜底一次）。拿到路径后：
+ *   1. 切到「插件」面板（用户双击的意图就是装插件）；
+ *   2. 把路径交给 PanelPlugins，由它弹出该面板的安装确认弹框。
+ */
+async function handleExternalPluginOpen(): Promise<void> {
+  let path: string | null = null;
+  try {
+    path = await takePendingPluginOpen();
+  } catch (e) {
+    console.warn("[插件] 读取待打开插件包失败:", e);
+    return;
+  }
+  if (!path) return;
+  switchPane("plugins");
+  pendingPluginPath.value = path;
+}
+
 function askToken(): Promise<string | null> {
   return new Promise((resolve) => {
     tokenResolver = resolve;
@@ -116,6 +157,7 @@ const PANES = {
   about: PanelAbout,
   "tis-hub": PanelTisHub,
   plugins: PanelPlugins,
+  env: PanelEnv,
   sync: PanelSync,
 } as const;
 
@@ -249,6 +291,15 @@ onMounted(async () => {
   } catch (e) {
     console.error("[我的搜索-设置] 初始化失败:", e);
   }
+
+  // 双击 .mspp 插件包 / 命令行传入路径：Rust 叫醒 → 拉取路径 → 切插件面板。
+  // 这里**必须**同时注册监听与主动拉一次：冷启动双击时 Rust 的广播可能早于本
+  // 监听注册（setup 阶段 WebView 尚未加载），只有主动拉取才兜得住；而运行中
+  // 双击（单实例回调路径）则靠事件即时到达。两条路径都指向同一个幂等命令。
+  unlistenPluginOpen = await onOpenPluginPackage(() => {
+    void handleExternalPluginOpen();
+  });
+  void handleExternalPluginOpen();
 });
 
 type SubscribesArray = Array<{ url: string; title?: string; describe?: string }>;
@@ -257,6 +308,7 @@ onBeforeUnmount(() => {
   document.removeEventListener("keydown", onGlobalKeydown);
   document.removeEventListener("visibilitychange", onVisibilityChange);
   window.removeEventListener("focus", onFocusRefresh);
+  unlistenPluginOpen?.();
   toast.disposeToast();
 });
 
@@ -276,6 +328,11 @@ const commonProps = computed(() => ({
   saved: shortcutBindings.value,
   onSaved: (v: ShortcutBinding[]) => (shortcutBindings.value = v),
   goPlugins: () => switchPane("plugins"),
+  /** 双击 .mspp 待安装路径（插件面板消费后置空） */
+  pendingPluginPath: pendingPluginPath.value,
+  onPendingPluginPathConsumed: () => {
+    pendingPluginPath.value = null;
+  },
   onChange: () => {
     /* 订阅文本变化：主窗口下次呼出时会检测并重载 */
   },
@@ -364,6 +421,14 @@ const commonProps = computed(() => ({
           </svg>
           <span>插件</span>
         </button>
+        <button class="nav-item" :class="{ on: navPane === 'env' }" data-pane="env" @click="switchPane('env')">
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" width="17" height="17">
+            <rect x="2.5" y="4" width="15" height="12" rx="2.2" />
+            <path d="M6 8.2l1.8 2-1.8 2" />
+            <path d="M10.2 12.2h3.8" />
+          </svg>
+          <span>环境变量</span>
+        </button>
         <button class="nav-item" :class="{ on: navPane === 'general' }" data-pane="general" @click="switchPane('general')">
           <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" width="17" height="17">
             <circle cx="10" cy="10" r="2.6" />
@@ -372,9 +437,10 @@ const commonProps = computed(() => ({
           <span>基础配置</span>
         </button>
         <button class="nav-item" :class="{ on: navPane === 'sync' }" data-pane="sync" @click="switchPane('sync')">
-          <svg viewBox="0 0 20 20" fill="currentColor" width="17" height="17">
-            <path d="M9.5 2a7.5 7.5 0 0 1 7.49 7.36A5 5 0 0 1 16.5 19H5A4 4 0 0 1 5 11a5.5 5.5 0 0 1 4.5-9zm0 1.5a4 4 0 0 0-3.95 4.6l.15.78-.72.3A3 3 0 0 0 5 17h11.5a3.5 3.5 0 0 0 .48-6.96l-.74-.12-.07-.77A6 6 0 0 0 9.5 3.5z"/>
-            <path d="M10.5 8.5V11h2a.5.5 0 0 1 0 1H10a.5.5 0 0 1-.5-.5V8.5a.5.5 0 0 1 1 0z"/>
+          <svg viewBox="0 0 1024 1024" fill="currentColor" width="17" height="17">
+            <path d="M646 1024H100A100 100 0 0 1 0 924V258a100 100 0 0 1 100-100h546a100 100 0 0 1 100 100v31a40 40 0 1 1-80 0v-31a20 20 0 0 0-20-20H100a20 20 0 0 0-20 20v666a20 20 0 0 0 20 20h546a20 20 0 0 0 20-20V713a40 40 0 0 1 80 0v211a100 100 0 0 1-100 100z"/>
+            <path d="M924 866H806a40 40 0 0 1 0-80h118a20 20 0 0 0 20-20V100a20 20 0 0 0-20-20H378a20 20 0 0 0-20 20v8a40 40 0 0 1-80 0v-8A100 100 0 0 1 378 0h546a100 100 0 0 1 100 100v666a100 100 0 0 1-100 100z"/>
+            <path d="M469 887a40 40 0 0 1-27-10L152 618a40 40 0 0 1 1-60l290-248a40 40 0 0 1 66 30v128a367 367 0 0 0 241-128l94-111a40 40 0 0 1 70 35l-26 109a430 430 0 0 1-379 332v142a40 40 0 0 1-40 40zM240 589l189 169v-91a40 40 0 0 1 40-40c144 0 269-85 323-214a447 447 0 0 1-323 137 40 40 0 0 1-40-40v-83z"/>
           </svg>
           <span>备份与同步</span>
         </button>

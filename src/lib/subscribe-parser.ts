@@ -11,7 +11,7 @@
 
 import { parseTag, parseTags, captureRegEx } from "./tags.ts";
 import type { SearchItem, SubscribeItem } from "../types/index.ts";
-import { warn, debug } from "./logger";
+import { warn, debug } from "./logger.ts";
 
 export { parseTag, parseTags };
 
@@ -267,6 +267,10 @@ export function mLineFetchFun(pageText: string | null | undefined): SearchItem[]
   let current_build_search_item_links: LinkInfo[] = [];
   let point = 0;
   let inCode = false;
+  // 脏数据统计：解析出的「只有标题没有正文」等半成品项。历史实现会静默产出
+  // 既无描述也无资源的空壳项，混进结果集后与真实项难以区分（展示层表现为
+  // 图标/URL/标题对不上）。这里显式计数并告警，便于定位订阅数据问题。
+  let titleOnlyCount = 0;
   const default_desc = "--无描述--";
 
   function getTitleLineData(titleLine: string): { title: string; desc: string } | null {
@@ -328,6 +332,15 @@ export function mLineFetchFun(pageText: string | null | undefined): SearchItem[]
       if (current_build_search_item_links.length > 0) {
         current_build_search_item.links = current_build_search_item_links;
       }
+      // 半成品项判定：正文（resource）为空且无附加内容/链接时，只剩一个标题。
+      // 这通常意味着订阅数据缺了正文行，属于解析层面的「不稳定项」。
+      if (
+        isBlank(current_build_search_item_resource) &&
+        isBlank(current_build_search_item_vassal) &&
+        current_build_search_item_links.length === 0
+      ) {
+        titleOnlyCount++;
+      }
       search_data_lines.push(current_build_search_item);
       appendTarget = "resource";
       current_build_search_item_resource = "";
@@ -336,6 +349,9 @@ export function mLineFetchFun(pageText: string | null | undefined): SearchItem[]
     }
   }
 
+  if (titleOnlyCount > 0) {
+    console.warn(`[我的搜索] 内容源解析：发现 ${titleOnlyCount} 条「只有标题、无正文」的数据项（可能是订阅数据缺失）`);
+  }
   for (const line of search_data_lines) {
     line.type = type;
   }

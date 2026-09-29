@@ -188,7 +188,9 @@ const mkManifest = (id, name, closeBehavior) => ({
   description: `closeBehavior=${closeBehavior}`,
   permissions: ["ui.inlay"],
   contributes: {
-    searchItem: { title: name, desc: `关键词 ${name}`, keyword: name, visible: true },
+    // subSearch:true —— 本测试的 view.js 注册了 onSubKeyword，且用
+    // 「保活插件 : 你好」走恢复路径验证子关键词转发，必须进入二次搜索候选
+    searchItem: { title: name, desc: `关键词 ${name}`, keyword: name, visible: true, subSearch: true },
     detailView: { entry: "ui/view.html", script: "ui/view.js", mode: "inlay", closeBehavior },
   },
 });
@@ -221,7 +223,7 @@ const mkRecord = (mf) => ({
   description: mf.description,
   manifest: mf,
   dir: `plugins/${mf.id}`,
-  source: { kind: "file", ref: "x.msplugin" },
+  source: { kind: "file", ref: "x.mspp" },
   installedAt: now,
   updatedAt: now,
   enabled: true,

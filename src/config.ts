@@ -18,6 +18,9 @@
 import "./css/style.css";
 import { createApp } from "vue";
 import App from "./windows/config/App.vue";
+import { initTheme, setThemeReporter } from "./lib/theme";
+import { setThemeOverrideReporter } from "./lib/theme-override";
+import { applyAppTheme } from "./lib/tauri-bridge";
 
 // 全局错误捕获：防止模块加载/初始化异常导致白屏
 window.addEventListener("error", (event) => {
@@ -30,6 +33,18 @@ window.addEventListener("unhandledrejection", (event) => {
 // 配置窗口的 html/body 需要可滚动 + 可选中文本（覆盖共享样式）
 document.documentElement.classList.add("ms-config-root");
 document.body.classList.add("ms-config-body");
+
+// 初始化主题（在 Vue 挂载前应用，避免首帧闪烁）
+initTheme();
+// 上报主题偏好（含 system）与已解析的深浅色到 Rust 原生层：同步本窗口原生
+// 标题栏 / 底色，并让后续创建窗口时按同色铺底（注册时立即回调一次）
+setThemeReporter((theme, resolved) => {
+  void applyAppTheme(theme, resolved);
+});
+// 设置窗口不承载插件视图，但保留同一通道：主题覆盖层的上报口径与上面一致
+setThemeOverrideReporter((theme, resolved) => {
+  void applyAppTheme(theme, resolved);
+});
 
 const app = createApp(App);
 app.config.errorHandler = (err, _instance, info) => {

@@ -9,6 +9,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { storageGet, storageRemove, formatCacheCountText } from "../../../lib/util";
 import { formatBytes } from "../configShared";
+import CfgHint from "./CfgHint.vue";
 import {
   CACHE_BLUEPRINT,
   CACHE_CLEAR_KEYS,
@@ -142,7 +143,7 @@ defineExpose({ stopCountdown, startCountdown });
       </div>
       <div class="cache-summary">
         <div class="cache-summary-main">
-          <span class="cache-summary-label">本地缓存总占用</span>
+          <span class="cache-summary-label">本地缓存总占用<CfgHint text="订阅数据缓存与订阅指纹可由订阅重新生成；其余为用户数据，仅统计占用、不在此处清理。" /></span>
           <span id="cacheTotalSize" class="cache-summary-value">{{ totalText }}</span>
         </div>
         <button id="clearDataCache" class="cfg-btn" @click="clearDataCache">清理可重建缓存</button>
@@ -168,10 +169,7 @@ defineExpose({ stopCountdown, startCountdown });
           </div>
         </div>
       </div>
-      <div class="cfg-note">
-        「订阅数据缓存 / 订阅指纹」可由订阅重新生成，清理后主窗口会在下次唤出时重新加载；
-        其余为用户数据（订阅原文、关注标签、权重、历史等），仅统计占用、不在此处清理。
-      </div>
+
     </div>
   </section>
 </template>

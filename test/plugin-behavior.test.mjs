@@ -20,6 +20,7 @@ import {
   createPluginRecord,
   defaultCloseBehaviorFrom,
   loadRegistry,
+  resolveAutoStartOnUpgrade,
   shouldStopBackendOnClose,
   upsertPlugin,
 } from "../src/lib/plugins/registry.ts";
@@ -133,7 +134,7 @@ const recOf = (backend = {}, now = 1000) =>
   createPluginRecord({
     manifest: parse(manifestOf(backend)).manifest,
     dir: "plugins/com.example.behavior",
-    source: { kind: "file", ref: "x.msplugin" },
+    source: { kind: "file", ref: "x.mspp" },
     grants: ["ui.inlay", "backend.spawn"],
     now,
   });
@@ -166,7 +167,7 @@ const recOf = (backend = {}, now = 1000) =>
   const v2 = createPluginRecord({
     manifest: { ...parse(manifestOf({ closeBehavior: "minimize", autostart: "always" })).manifest, version: "2.0.0" },
     dir: "plugins/com.example.behavior",
-    source: { kind: "file", ref: "x.msplugin" },
+    source: { kind: "file", ref: "x.mspp" },
     grants: ["ui.inlay", "backend.spawn"],
     now: 2000,
   });
@@ -192,6 +193,93 @@ const recOf = (backend = {}, now = 1000) =>
   upsertPlugin(reg, legacyRec);
   const merged = upsertPlugin(reg, recOf({ closeBehavior: "exit" }));
   ok(merged.closeBehavior === "exit", "缺字段的老记录经 upsert 后补齐（取新清单建议）", String(merged.closeBehavior));
+}
+
+/* ============ 6.5 自启策略：用户没改过时跟随新清单的建议 ============ *
+ *
+ * 这条是「插件作者把自己的 autostart 从 on-demand 改成 always，已装用户却一直
+ * 不自启」的防线：`requestedAutoStart` 只写不读时，作者的改动永远到不了老记录。
+ * 判据是「当前值 == 旧清单建议值」→ 认定用户没动过 → 采用新建议。
+ */
+{
+  const reg = { version: 1, plugins: [] };
+  // 旧清单建议 on-demand（用户没动过，记录值就是 on-demand）
+  const v1 = recOf({ autostart: "on-demand" });
+  upsertPlugin(reg, v1);
+  ok(reg.plugins[0].autoStart === "on-demand", "旧清单建议 on-demand → 记录 on-demand");
+
+  // 作者改成 always 发新版：用户没动过 → 跟随
+  const v2 = createPluginRecord({
+    manifest: {
+      ...parse(manifestOf({ autostart: "always" })).manifest,
+      version: "2.0.0",
+    },
+    dir: "plugins/com.example.behavior",
+    source: { kind: "file", ref: "x.mspp" },
+    grants: ["ui.inlay", "backend.spawn"],
+    now: 2000,
+  });
+  const followed = upsertPlugin(reg, v2);
+  ok(followed.autoStart === "always", "用户没改过 → 自启策略跟随新清单的建议", followed.autoStart);
+  ok(followed.requestedAutoStart === "always", "requestedAutoStart 同步更新", followed.requestedAutoStart);
+}
+{
+  // 用户改过（当前值与旧建议不同）→ 绝不跟随
+  const reg = { version: 1, plugins: [] };
+  const v1 = recOf({ autostart: "on-demand" });
+  upsertPlugin(reg, v1);
+  reg.plugins[0].autoStart = "never"; // 用户手动改成「从不」
+
+  const v2 = createPluginRecord({
+    manifest: {
+      ...parse(manifestOf({ autostart: "always" })).manifest,
+      version: "2.0.0",
+    },
+    dir: "plugins/com.example.behavior",
+    source: { kind: "file", ref: "x.mspp" },
+    grants: ["ui.inlay", "backend.spawn"],
+    now: 2000,
+  });
+  const kept = upsertPlugin(reg, v2);
+  ok(kept.autoStart === "never", "用户改过 → 自启策略保持用户选择（不被插件发版改回）", kept.autoStart);
+}
+{
+  // 旧清单建议 on-demand、用户手动选了 always → 新清单建议 on-demand 也不该改
+  const reg = { version: 1, plugins: [] };
+  upsertPlugin(reg, recOf({ autostart: "on-demand" }));
+  reg.plugins[0].autoStart = "always"; // 用户主动开自启
+
+  const v2 = createPluginRecord({
+    manifest: {
+      ...parse(manifestOf({ autostart: "on-demand" })).manifest,
+      version: "2.0.0",
+    },
+    dir: "plugins/com.example.behavior",
+    source: { kind: "file", ref: "x.mspp" },
+    grants: ["ui.inlay", "backend.spawn"],
+    now: 2000,
+  });
+  const kept = upsertPlugin(reg, v2);
+  ok(kept.autoStart === "always", "用户主动开的自启不被新清单的 on-demand 关掉", kept.autoStart);
+}
+{
+  // 纯函数直测（两条路径共用，dev-reload 也走它）
+  ok(
+    resolveAutoStartOnUpgrade({
+      current: "on-demand",
+      prevManifest: parse(manifestOf({ autostart: "on-demand" })).manifest,
+      nextManifest: parse(manifestOf({ autostart: "always" })).manifest,
+    }) === "always",
+    "resolveAutoStartOnUpgrade：没改过 → 跟随"
+  );
+  ok(
+    resolveAutoStartOnUpgrade({
+      current: "never",
+      prevManifest: parse(manifestOf({ autostart: "on-demand" })).manifest,
+      nextManifest: parse(manifestOf({ autostart: "always" })).manifest,
+    }) === "never",
+    "resolveAutoStartOnUpgrade：改过 → 保留"
+  );
 }
 
 /* ============ 7. 老注册表的读时迁移（loadRegistry 的 hydrate） ============ */

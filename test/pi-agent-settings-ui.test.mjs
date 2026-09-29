@@ -350,7 +350,8 @@ const panel = JSON.parse(await evalJs(`JSON.stringify((() => {
 
 check("点设置按钮后设置面板打开", panel.hidden === false);
 check("左侧有菜单栏", panel.navWidth > 100, `宽度 ${panel.navWidth}px`);
-check("左菜单只有「模型配置」一项", panel.items.length === 1 && panel.items[0].includes("模型配置"),
+check("左菜单含「模型配置」与「外观」两项",
+  panel.items.length === 2 && panel.items[0].includes("模型配置") && panel.items[1].includes("外观"),
   JSON.stringify(panel.items));
 check("「模型配置」为当前选中项", panel.active.includes("模型配置"), panel.active);
 check("右侧标题为「模型配置」", panel.title === "模型配置", panel.title);

@@ -1,16 +1,15 @@
 /**
- * pi-agent 聊天区「动作可展开」回归测试（真实浏览器 + 真实插件 UI 文件 + mock 后端）。
+ * pi-agent 聊天区「ZCode 行模型」回归测试（真实浏览器 + 真实插件 UI 文件 + mock 后端）。
  *
- * 覆盖需求：聊天区不管是否完成，都应能展开查看此前的动作信息（思考 + 各种工具调用）。
- *   A. 历史会话（已完成轮次）：
- *      - 思考与工具调用收进折叠区，默认收起、标题带动作计数，点击可展开；
- *      - 工具结果按 toolCallId 回填（成功 ✓ / 失败 ✗ / 中断残留标「已停止」）；
- *      - 纯动作无正文的回答不显示空气泡。
- *   B. 运行中轮次（实时事件）：
- *      - 思考实时出现、增量合并；工具调用后思考另起一段；
- *      - 工具卡片「执行中…」→「✓ 完成」并回填结果；
- *      - 同名工具二次调用按 toolCallId 配对，结果不串台；
- *      - 轮次结束后折叠区收起但动作完整保留，可再次展开回看。
+ * 对齐参考实现 ZCode 前端（packages/ui/src/v4/ConversationRowView.tsx、
+ * ToolCallBlocks/ToolSummaryRow.tsx、components/ai-elements/reasoning.tsx）：
+ *   A. 一轮的工作分组（.turn-work）：运行中「工作中 N 秒」默认展开；
+ *      结束「已工作 N 秒」/「已处理」；中止「已停止」；结束后收起但仍可展开回看。
+ *   B. 思考是独立行（.reasoning-row）：标题「正在思考」/「思考 · 持续了 N 秒」，
+ *      默认收起；流式期间标题右侧有一行摘要。
+ *   C. 工具调用是单行内联摘要（.tool-row）：类别词 + 主文本 + 变更量 + 次文本；
+ *      展开才看参数与结果；状态词随状态改写（正在读取 → 已读取 / 读取失败 / 已停止）。
+ *   D. 既有修复不回归：toolCallId 配对不串台、纯动作无空气泡、发送按钮回「发送」态。
  *
  * 夹具是自包含生成的（test/_tmp/pi-chat-actions-harness.html），不依赖其它测试的产物。
  * 用法: node test/pi-agent-chat-actions.test.mjs
@@ -68,17 +67,21 @@ const emit = (method, params) => {
   for (const fn of notifications.get(method) || []) fn(params);
 };
 
-/* 会话 s1：已完成的历史轮次，含思考 / 工具调用 / 工具结果（含一条中断残留 tc3） */
+/* 会话 s1：已完成的历史轮次，含思考 / 工具调用 / 工具结果（含一条中断残留 tc3）。
+   字段与后端新协议一致：assistant 带 durationMs，toolCalls 带结构化摘要。 */
 const transcripts = {
   s1: [
     { role: "user", content: "帮我看看项目" },
-    { role: "assistant", content: "", thinking: "先看目录结构", toolCalls: [
-      { id: "tc1", name: "read_file", label: "📖 读取文件", detail: "📄 src/index.js" },
+    { role: "assistant", content: "", thinking: "先看目录结构", durationMs: 4200, toolCalls: [
+      { id: "tc1", name: "read_file", label: "📖 读取文件", detail: "📄 src/index.js",
+        kind: "read", primaryText: "src/index.js", secondaryText: "", changeStat: "", inputJson: '{\\n  "file_path": "src/index.js"\\n}' },
     ] },
     { role: "toolResult", toolCallId: "tc1", toolName: "read_file", isError: false, content: "文件内容 123" },
-    { role: "assistant", content: "看完了，这是回答", thinking: "总结一下", toolCalls: [
-      { id: "tc2", name: "bash", label: "🖥️ 执行命令", detail: "npm test" },
-      { id: "tc3", name: "write_file", label: "✏️ 写入文件", detail: "📄 out.txt" },
+    { role: "assistant", content: "看完了，这是回答", thinking: "总结一下", durationMs: 9000, toolCalls: [
+      { id: "tc2", name: "bash", label: "🖥️ 执行命令", detail: "npm test",
+        kind: "execute", primaryText: "npm test", secondaryText: "", changeStat: "", inputJson: '{\\n  "command": "npm test"\\n}' },
+      { id: "tc3", name: "write_file", label: "✏️ 写入文件", detail: "📄 out.txt",
+        kind: "write", primaryText: "out.txt", secondaryText: "", changeStat: "", inputJson: '{\\n  "file_path": "out.txt"\\n}' },
     ] },
     { role: "toolResult", toolCallId: "tc2", toolName: "bash", isError: true, content: "command not found" },
   ],
@@ -250,53 +253,110 @@ const check = (name, cond, extra = "") => {
   else { fail++; console.log("FAIL ", name, extra ? ` — ${extra}` : ""); }
 };
 
-/** 读取某个折叠区的结构快照（思考段 / 工具卡片 / 标题 / 展开态） */
+/**
+ * 读取某个「工作分组」的结构快照：
+ *   分组标题文案 + 展开态 + 思考行（标题/正文/展开态）+ 工具行（类别词/主文本/变更量/展开区/状态）
+ */
 const READ_ACC = (i) => `JSON.stringify((function () {
-  var acc = document.querySelectorAll('#pi-chat-body .thought-accordion')[${i}];
-  if (!acc) return { missing: true };
+  var work = document.querySelectorAll('#pi-chat-body .turn-work')[${i}];
+  if (!work) return { missing: true };
   function txt(el, sel) { var n = el.querySelector(sel); return n ? n.textContent : ''; }
-  var thoughts = [];
-  var thoughtEls = acc.querySelectorAll('.accordion-content > .thought-text');
-  for (var k = 0; k < thoughtEls.length; k++) thoughts.push(thoughtEls[k].textContent);
-  var tools = [];
-  var cards = acc.querySelectorAll('.accordion-content > .tool-call-item');
-  for (var j = 0; j < cards.length; j++) {
-    var c = cards[j];
-    tools.push({
-      id: c.dataset.toolId || '',
-      status: c.dataset.status || '',
-      name: txt(c, '.tool-call-name'),
-      badge: txt(c, '.tool-call-status-badge'),
-      result: txt(c, '.tool-call-result'),
-      running: c.classList.contains('tool-running'),
-      error: c.classList.contains('tool-error'),
+  var reasonings = [];
+  var rrows = work.querySelectorAll('.turn-work-body > .reasoning-row');
+  for (var k = 0; k < rrows.length; k++) {
+    var r = rrows[k];
+    var streamEl = r.querySelector('.reasoning-stream');
+    reasonings.push({
+      label: txt(r, '.reasoning-label'),
+      meta: txt(r, '.reasoning-meta'),
+      text: txt(r, '.reasoning-text'),
+      open: r.open,
+      settled: r.dataset.settled === '1',
+      stream: (streamEl && !streamEl.hidden) ? streamEl.textContent : '',
     });
   }
-  return { open: acc.open, summary: txt(acc, 'summary'), thoughts: thoughts, tools: tools };
+  var tools = [];
+  var trows = work.querySelectorAll('.turn-work-body > .tool-row');
+  for (var j = 0; j < trows.length; j++) {
+    var t = trows[j];
+    var bodyEl = t.querySelector('.tool-row-body');
+    var primEl = t.querySelector('.tool-row-primary');
+    var chgEl = t.querySelector('.tool-row-change');
+    // 展开区的块按标题归类：参数 / 结果 / 错误
+    var blocks = { input: '', result: '', error: '' };
+    var bnodes = t.querySelectorAll('.tool-block');
+    for (var b = 0; b < bnodes.length; b++) {
+      var titleText = txt(bnodes[b], '.tool-block-title');
+      var preText = txt(bnodes[b], '.tool-block-pre');
+      if (titleText === '参数') blocks.input = preText;
+      else if (titleText === '错误') blocks.error = preText;
+      else if (titleText === '结果') blocks.result = preText;
+    }
+    tools.push({
+      id: t.dataset.toolId || '',
+      kind: t.dataset.kind || '',
+      status: t.dataset.status || '',
+      kindLabel: txt(t, '.tool-row-kind'),
+      primary: (primEl && !primEl.hidden) ? primEl.textContent : '',
+      change: (chgEl && !chgEl.hidden) ? chgEl.textContent : '',
+      secondary: txt(t, '.tool-row-secondary'),
+      open: t.open,
+      hasBody: !!bodyEl && !bodyEl.hidden,
+      input: blocks.input,
+      result: blocks.result,
+      error: blocks.error,
+      running: t.classList.contains('tool-running'),
+      errored: t.classList.contains('tool-error'),
+    });
+  }
+  return {
+    open: work.open,
+    state: work.dataset.state,
+    status: txt(work, '.turn-work-status'),
+    reasonings: reasonings,
+    tools: tools,
+  };
 })())`;
 const readAcc = async (i) => JSON.parse(await evalJs(READ_ACC(i)));
-/** 点击某个折叠区标题（模拟用户展开/收起） */
-const clickAcc = async (i) => evalJs(`document.querySelectorAll('#pi-chat-body .thought-accordion')[${i}].querySelector('summary').click(); 1`);
+/** 点击某个工作分组的标题（模拟用户展开/收起） */
+const clickAcc = async (i) => evalJs(`document.querySelectorAll('#pi-chat-body .turn-work')[${i}].querySelector('.turn-work-trigger').click(); 1`);
+/** 点击某个工作分组里第 j 个工具行的摘要（展开看参数与结果） */
+const clickToolRow = async (i, j) => evalJs(`document.querySelectorAll('#pi-chat-body .turn-work')[${i}].querySelectorAll('.turn-work-body > .tool-row')[${j}].querySelector('.tool-row-head').click(); 1`);
+/** 点击某个工作分组里第 j 个思考行（展开看正文） */
+const clickReasoningRow = async (i, j) => evalJs(`document.querySelectorAll('#pi-chat-body .turn-work')[${i}].querySelectorAll('.turn-work-body > .reasoning-row')[${j}].querySelector('.reasoning-trigger').click(); 1`);
 
 await S("Page.navigate", { url: base + "/pi-chat-actions-harness.html" }, sessionId);
 
-/* ============ Part A. 历史会话：已完成轮次的动作默认收起、可展开 ============ */
-const loaded = await waitFor(`document.querySelectorAll('#pi-chat-body .thought-accordion').length >= 2`, 15000);
-check("历史会话渲染出 2 个动作折叠区（两条含动作的回答）", loaded === true,
-  `count=${await evalJs(`document.querySelectorAll('#pi-chat-body .thought-accordion').length`)}`);
+/* ============ Part A. 历史会话：轮次工作分组默认收起、可展开回看 ============ */
+const loaded = await waitFor(`document.querySelectorAll('#pi-chat-body .turn-work').length >= 2`, 15000);
+check("历史会话渲染出 2 个工作分组（两条含动作的回答）", loaded === true,
+  `count=${await evalJs(`document.querySelectorAll('#pi-chat-body .turn-work').length`)}`);
 
 const a0 = await readAcc(0), a1 = await readAcc(1);
-check("历史折叠区默认收起（不遮挡正文）★需求", a0.open === false && a1.open === false,
+check("历史工作分组默认收起（不遮挡正文）★需求", a0.open === false && a1.open === false,
   JSON.stringify({ open0: a0.open, open1: a1.open }));
-check("折叠区标题带动作计数（思考段 + 工具卡片）", a0.summary === "思考过程 / 工具调用 (2)" && a1.summary === "思考过程 / 工具调用 (3)",
-  JSON.stringify([a0.summary, a1.summary]));
-check("历史思考文本完整保留", JSON.stringify(a0.thoughts) === JSON.stringify(["先看目录结构"]), JSON.stringify(a0.thoughts));
-check("历史工具卡片：成功调用回填结果", a0.tools.length === 1 && a0.tools[0].id === "tc1" && a0.tools[0].status === "success"
-  && a0.tools[0].badge === "✓ 完成" && a0.tools[0].result === "文件内容 123", JSON.stringify(a0.tools));
-check("历史工具卡片：失败调用显示错误徽标与错误文本", a1.tools.length === 2 && a1.tools[0].id === "tc2" && a1.tools[0].status === "error"
-  && a1.tools[0].badge === "✗ 失败" && a1.tools[0].result === "command not found", JSON.stringify(a1.tools[0]));
-check("历史中无结果的工具调用标记为「已停止」（不一直转圈）", a1.tools[1].id === "tc3" && a1.tools[1].status === "stopped"
-  && a1.tools[1].badge === "已停止" && a1.tools[1].running === false, JSON.stringify(a1.tools[1]));
+check("历史分组标题落定为「已工作 N 秒」（由 transcript 的 durationMs 得到）",
+  a0.status === "已工作 4 秒" && a1.status === "已工作 9 秒",
+  JSON.stringify([a0.status, a1.status]));
+check("历史分组的思考是独立行、默认收起、标题为「思考 · 持续了 N 秒」",
+  a0.reasonings.length === 1 && a0.reasonings[0].label === "思考" && a0.reasonings[0].open === false
+  && a0.reasonings[0].meta === "· 持续了几秒" && a0.reasonings[0].text === "先看目录结构",
+  JSON.stringify(a0.reasonings));
+
+check("历史工具行是单行摘要（类别词 + 主文本）", a0.tools.length === 1 && a0.tools[0].id === "tc1"
+  && a0.tools[0].kind === "read" && a0.tools[0].kindLabel === "已读取" && a0.tools[0].primary === "src/index.js",
+  JSON.stringify(a0.tools[0]));
+check("历史工具行默认未展开（参数与结果先收起）", a0.tools[0].open === false,
+  JSON.stringify({ open: a0.tools[0].open }));
+check("历史工具行：成功结果回填到展开区", a0.tools[0].status === "success" && a0.tools[0].result === "文件内容 123",
+  JSON.stringify({ status: a0.tools[0].status, result: a0.tools[0].result }));
+
+check("历史工具行：失败调用类别词为「执行失败」、错误文本落到错误块",
+  a1.tools.length === 2 && a1.tools[0].id === "tc2" && a1.tools[0].status === "error"
+  && a1.tools[0].kindLabel === "执行失败" && a1.tools[0].error === "command not found",
+  JSON.stringify(a1.tools[0]));
+check("历史中无结果的工具调用类别词为「已停止」（不一直转圈）", a1.tools[1].id === "tc3" && a1.tools[1].status === "stopped"
+  && a1.tools[1].kindLabel === "已停止" && a1.tools[1].running === false, JSON.stringify(a1.tools[1]));
 
 const bubbles = JSON.parse(await evalJs(`JSON.stringify([...document.querySelectorAll('#pi-chat-body .message.agent')].slice(0, 2).map((m) => {
   const b = m.querySelector('.message-content');
@@ -309,8 +369,24 @@ check("历史回答正文正常显示", bubbles[1].hidden === false && bubbles[1
 await clickAcc(0);
 await sleep(150);
 const a0open = await readAcc(0);
-check("点击标题可展开查看历史动作（思考 + 工具卡片都在）★需求", a0open.open === true && a0open.thoughts.length === 1 && a0open.tools.length === 1,
-  JSON.stringify({ open: a0open.open, thoughts: a0open.thoughts.length, tools: a0open.tools.length }));
+check("点击标题可展开查看历史动作（思考行 + 工具行都在）★需求",
+  a0open.open === true && a0open.reasonings.length === 1 && a0open.tools.length === 1,
+  JSON.stringify({ open: a0open.open, reasonings: a0open.reasonings.length, tools: a0open.tools.length }));
+
+// 展开思考行 → 看到思考正文
+await clickReasoningRow(0, 0);
+await sleep(120);
+const a0reason = await readAcc(0);
+check("展开思考行可见思考正文", a0reason.reasonings[0].open === true && a0reason.reasonings[0].text === "先看目录结构",
+  JSON.stringify(a0reason.reasonings[0]));
+
+// 展开工具行 → 看到参数与结果
+await clickToolRow(0, 0);
+await sleep(120);
+const a0tool = await readAcc(0);
+check("展开工具行可见参数与结果", a0tool.tools[0].open === true && a0tool.tools[0].hasBody === true
+  && a0tool.tools[0].input.includes("file_path") && a0tool.tools[0].result === "文件内容 123",
+  JSON.stringify({ open: a0tool.tools[0].open, input: a0tool.tools[0].input.slice(0, 40), result: a0tool.tools[0].result }));
 
 /* ============ Part B. 运行中轮次：动作实时可见、结束后可回看 ============ */
 await evalJs(`(() => {
@@ -323,70 +399,97 @@ const started = await waitFor(`window.__hasPendingChat()`, 5000);
 check("发送后进入运行态（chat 挂起等待完成）", started === true);
 check("运行中发送按钮为「停止」态", (await evalJs(`document.getElementById('pi-send-btn').classList.contains('running')`)) === true);
 
-// 思考实时出现
+// 思考实时出现：独立行、标题「正在思考」、正文行默认收起
 await evalJs(`window.__emit('chat:thinking', { sessionId: 's1', delta: '让我想想', content: '让我想想' }); 1`);
 await sleep(80);
 let live = await readAcc(2);
-check("运行中思考动作实时出现且默认展开", live.open === true && JSON.stringify(live.thoughts) === JSON.stringify(["让我想想"]),
-  JSON.stringify({ open: live.open, thoughts: live.thoughts }));
+check("运行中工作分组默认展开，标题是「工作中 N 秒」",
+  live.open === true && live.state === "running" && /^工作中 \d+ 秒$/.test(live.status), JSON.stringify({ open: live.open, status: live.status }));
+check("运行中思考实时出现为独立行、标题「正在思考」、正文行默认收起",
+  live.reasonings.length === 1 && live.reasonings[0].label === "正在思考" && live.reasonings[0].settled === false
+  && live.reasonings[0].open === false && live.reasonings[0].text === "让我想想",
+  JSON.stringify(live.reasonings));
+check("流式期间思考行标题右侧显示一行摘要", live.reasonings[0].stream === "让我想想",
+  JSON.stringify({ stream: live.reasonings[0].stream }));
 
 // 增量合并
 await evalJs(`window.__emit('chat:thinking', { sessionId: 's1', delta: '再看看', content: '让我想想再看看' }); 1`);
 await sleep(80);
 live = await readAcc(2);
-check("同一段思考增量合并（不重复整段）", JSON.stringify(live.thoughts) === JSON.stringify(["让我想想再看看"]), JSON.stringify(live.thoughts));
+check("同一段思考增量合并（不重复整段）", live.reasonings.length === 1 && live.reasonings[0].text === "让我想想再看看",
+  JSON.stringify(live.reasonings.map((r) => r.text)));
 
-// 工具调用开始
-await evalJs(`window.__emit('chat:tool', { sessionId: 's1', toolCallId: 't1', toolName: 'read_file', status: 'running', label: '📖 读取文件', detail: '📄 a.js' }); 1`);
+// 工具调用开始（带后端新协议的结构化字段）
+await evalJs(`window.__emit('chat:tool', { sessionId: 's1', toolCallId: 't1', toolName: 'read_file', status: 'running', label: '📖 读取文件', detail: '📄 a.js', kind: 'read', kindLabel: '正在读取', primaryText: 'a.js', secondaryText: '', changeStat: '', inputJson: '{\\n  "file_path": "a.js"\\n}' }); 1`);
 await sleep(80);
 live = await readAcc(2);
-check("工具调用实时显示为「执行中…」卡片", live.tools.length === 1 && live.tools[0].id === "t1" && live.tools[0].status === "running"
-  && live.tools[0].badge === "执行中…" && live.tools[0].running === true, JSON.stringify(live.tools));
+check("工具调用实时显示为单行摘要（类别词「正在读取」+ 主文本 a.js）",
+  live.tools.length === 1 && live.tools[0].id === "t1" && live.tools[0].status === "running"
+  && live.tools[0].kindLabel === "正在读取" && live.tools[0].primary === "a.js" && live.tools[0].running === true,
+  JSON.stringify(live.tools[0]));
+check("工具行开始即带上参数（展开可看）", live.tools[0].input.includes("file_path"), JSON.stringify(live.tools[0].input));
 
-// 工具调用后的思考另起一段
+// 工具调用后的思考另起一行（上一段思考落定）
 await evalJs(`window.__emit('chat:thinking', { sessionId: 's1', delta: '继续想', content: '让我想想再看看继续想' }); 1`);
 await sleep(80);
 live = await readAcc(2);
-check("工具调用后的思考另起一段（按发生顺序记录）", JSON.stringify(live.thoughts) === JSON.stringify(["让我想想再看看", "继续想"]),
-  JSON.stringify(live.thoughts));
+check("工具调用后的思考另起一行（按发生顺序记录）",
+  live.reasonings.length === 2 && live.reasonings[0].text === "让我想想再看看" && live.reasonings[1].text === "继续想",
+  JSON.stringify(live.reasonings.map((r) => r.text)));
+check("上一段思考已落定：标题切成「思考 · 持续了 N 秒」",
+  live.reasonings[0].settled === true && live.reasonings[0].label === "思考" && /^· \d+ 秒$/.test(live.reasonings[0].meta),
+  JSON.stringify({ settled: live.reasonings[0].settled, meta: live.reasonings[0].meta }));
 
-// 工具完成 → 结果回填
-await evalJs(`window.__emit('chat:tool', { sessionId: 's1', toolCallId: 't1', toolName: 'read_file', status: 'success', label: '📖 读取文件', detail: '内容A' }); 1`);
+// 工具完成 → 类别词改写 + 结果回填
+await evalJs(`window.__emit('chat:tool', { sessionId: 's1', toolCallId: 't1', toolName: 'read_file', status: 'success', label: '📖 读取文件', detail: '内容A', kind: 'read', kindLabel: '已读取', primaryText: 'a.js', resultText: '内容A' }); 1`);
 await sleep(80);
 live = await readAcc(2);
-check("工具完成：卡片回填成功徽标与结果", live.tools.length === 1 && live.tools[0].status === "success"
-  && live.tools[0].badge === "✓ 完成" && live.tools[0].result === "内容A", JSON.stringify(live.tools));
+check("工具完成后类别词改为「已读取」并回填结果",
+  live.tools.length === 1 && live.tools[0].status === "success" && live.tools[0].kindLabel === "已读取"
+  && live.tools[0].result === "内容A", JSON.stringify(live.tools[0]));
 
 // 同名工具二次调用 → 按 toolCallId 配对，结果不串台
-await evalJs(`window.__emit('chat:tool', { sessionId: 's1', toolCallId: 't2', toolName: 'read_file', status: 'running', label: '📖 读取文件', detail: '📄 b.js' }); 1`);
-await evalJs(`window.__emit('chat:tool', { sessionId: 's1', toolCallId: 't2', toolName: 'read_file', status: 'success', label: '📖 读取文件', detail: '内容B' }); 1`);
+await evalJs(`window.__emit('chat:tool', { sessionId: 's1', toolCallId: 't2', toolName: 'read_file', status: 'running', label: '📖 读取文件', detail: '📄 b.js', kind: 'read', kindLabel: '正在读取', primaryText: 'b.js' }); 1`);
+await evalJs(`window.__emit('chat:tool', { sessionId: 's1', toolCallId: 't2', toolName: 'read_file', status: 'success', label: '📖 读取文件', detail: '内容B', kind: 'read', kindLabel: '已读取', primaryText: 'b.js', resultText: '内容B' }); 1`);
 await sleep(80);
 live = await readAcc(2);
-check("同名工具二次调用各自成卡，结果不串台（按 toolCallId 配对）", live.tools.length === 2
-  && live.tools[0].id === "t1" && live.tools[0].result === "内容A"
-  && live.tools[1].id === "t2" && live.tools[1].result === "内容B", JSON.stringify(live.tools));
-check("折叠区计数随动作增长（2 段思考 + 2 次工具 = 4）", live.summary === "思考过程 / 工具调用 (4)", live.summary);
+check("同名工具二次调用各自成行，结果不串台（按 toolCallId 配对）", live.tools.length === 2
+  && live.tools[0].id === "t1" && live.tools[0].primary === "a.js" && live.tools[0].result === "内容A"
+  && live.tools[1].id === "t2" && live.tools[1].primary === "b.js" && live.tools[1].result === "内容B",
+  JSON.stringify(live.tools.map((t) => t.id + ":" + t.primary + ":" + t.result)));
+
+// 编辑类工具：变更量 +N -N 落在摘要行上
+await evalJs(`window.__emit('chat:tool', { sessionId: 's1', toolCallId: 't3', toolName: 'edit_file', status: 'success', label: '🔧 编辑文件', kind: 'edit', kindLabel: '已编辑', primaryText: 'src/a.js', secondaryText: '替换: a → b', changeStat: '+2 -1', inputJson: '{}', resultText: 'ok' }); 1`);
+await sleep(80);
+live = await readAcc(2);
+const editRow = live.tools.find((t) => t.id === "t3");
+check("编辑类工具行显示变更量 +N -N 与次文本", editRow && editRow.kindLabel === "已编辑"
+  && editRow.change === "+2 -1" && editRow.secondary === "替换: a → b", JSON.stringify(editRow));
 
 // 正文流式 + 完成
 await evalJs(`window.__emit('chat:delta', { sessionId: 's1', delta: '最终回答', content: '最终回答' }); 1`);
 await sleep(80);
 check("运行中正文流式显示", (await evalJs(`(() => {
-  const accs = document.querySelectorAll('#pi-chat-body .thought-accordion');
-  return accs[2].closest('.message').querySelector('.message-content').textContent.includes('最终回答');
+  const works = document.querySelectorAll('#pi-chat-body .turn-work');
+  return works[2].closest('.message').querySelector('.message-content').textContent.includes('最终回答');
 })()`)) === true);
 
-await evalJs(`window.__emit('chat:status', { sessionId: 's1', status: 'idle' }); 1`);
+// idle 带上后端算出的本轮耗时
+await evalJs(`window.__emit('chat:status', { sessionId: 's1', status: 'idle', durationMs: 12500 }); 1`);
 await evalJs(`window.__finishChat(); 1`);
 await sleep(400);
 live = await readAcc(2);
-check("完成后折叠区收起（不遮挡正文）", live.open === false, JSON.stringify({ open: live.open }));
-check("完成后动作完整保留在 DOM（思考 2 段 + 工具 2 张）★需求", JSON.stringify(live.thoughts) === JSON.stringify(["让我想想再看看", "继续想"])
-  && live.tools.length === 2 && live.tools[0].result === "内容A" && live.tools[1].result === "内容B",
-  JSON.stringify({ thoughts: live.thoughts, tools: live.tools.map((t) => t.id + ":" + t.result) }));
+check("完成后分组收起（不遮挡正文）", live.open === false, JSON.stringify({ open: live.open }));
+check("完成后标题落定为「已工作 13 秒」（用后端 durationMs）", live.status === "已工作 13 秒" && live.state === "worked",
+  JSON.stringify({ status: live.status, state: live.state }));
+check("完成后动作完整保留在 DOM（思考 2 段 + 工具 3 行）★需求",
+  live.reasonings.length === 2 && live.tools.length === 3
+  && live.tools[0].result === "内容A" && live.tools[1].result === "内容B",
+  JSON.stringify({ reasonings: live.reasonings.map((r) => r.text), tools: live.tools.map((t) => t.id + ":" + t.result) }));
 check("发送按钮回到「发送」态", (await evalJs(`document.getElementById('pi-send-btn').classList.contains('running')`)) === false);
 check("最终回答写入同一轮气泡", (await evalJs(`(() => {
-  const accs = document.querySelectorAll('#pi-chat-body .thought-accordion');
-  return accs[2].closest('.message').querySelector('.message-content').textContent.includes('完成后的回答');
+  const works = document.querySelectorAll('#pi-chat-body .turn-work');
+  return works[2].closest('.message').querySelector('.message-content').textContent.includes('完成后的回答');
 })()`)) === true);
 
 // 完成后再次点击 → 仍可展开回看全部动作
@@ -394,9 +497,37 @@ await clickAcc(2);
 await sleep(150);
 live = await readAcc(2);
 check("完成后点击标题仍可展开查看全部动作 ★核心需求", live.open === true
-  && JSON.stringify(live.thoughts) === JSON.stringify(["让我想想再看看", "继续想"])
-  && live.tools.length === 2 && live.tools[0].result === "内容A" && live.tools[1].result === "内容B",
-  JSON.stringify({ open: live.open, thoughts: live.thoughts, tools: live.tools.map((t) => t.id) }));
+  && live.reasonings.length === 2 && live.tools.length === 3
+  && live.tools[0].result === "内容A" && live.tools[1].result === "内容B",
+  JSON.stringify({ open: live.open, reasonings: live.reasonings.length, tools: live.tools.map((t) => t.id) }));
+
+/* ============ Part C. 中止：运行中的工具行与分组标题都落定为「已停止」 ============ */
+await evalJs(`(() => {
+  const el = document.getElementById('pi-input');
+  el.value = '再跑一轮';
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  document.getElementById('pi-send-btn').click();
+})(); 1`);
+await waitFor(`window.__hasPendingChat()`, 5000);
+// 让这一轮留下一个仍在「执行中」的工具行
+await evalJs(`window.__emit('chat:tool', { sessionId: 's1', toolCallId: 'ta', toolName: 'bash', status: 'running', label: '🖥️ 执行命令', kind: 'execute', kindLabel: '正在执行', primaryText: 'sleep 999', inputJson: '{\\n  "command": "sleep 999"\\n}' }); 1`);
+await sleep(80);
+const bIdx = (await evalJs(`document.querySelectorAll('#pi-chat-body .turn-work').length`)) - 1;
+const beforeAbort = await readAcc(bIdx);
+check("中止前：工具行仍在「正在执行」、分组在「工作中」",
+  beforeAbort.tools.length === 1 && beforeAbort.tools[0].running === true
+  && beforeAbort.tools[0].kindLabel === "正在执行" && beforeAbort.state === "running",
+  JSON.stringify({ kindLabel: beforeAbort.tools[0].kindLabel, state: beforeAbort.state }));
+
+await evalJs(`window.__emit('chat:aborted', { sessionId: 's1' }); 1`);
+await sleep(150);
+const afterAbort = await readAcc(bIdx);
+check("中止后：工具行类别词变「已停止」、不再转圈",
+  afterAbort.tools[0].status === "stopped" && afterAbort.tools[0].kindLabel === "已停止" && afterAbort.tools[0].running === false,
+  JSON.stringify(afterAbort.tools[0]));
+check("中止后：分组标题落定为「已停止」并收起",
+  afterAbort.status === "已停止" && afterAbort.state === "stopped" && afterAbort.open === false,
+  JSON.stringify({ status: afterAbort.status, state: afterAbort.state, open: afterAbort.open }));
 
 /* ============ 收尾 ============ */
 check("页面无未捕获异常", pageErrors.length === 0, pageErrors.slice(0, 2).join(" | "));

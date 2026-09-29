@@ -69,6 +69,12 @@ export const CACHE_BLUEPRINT: CacheBlueprintItem[] = [
     clearable: false,
   },
   {
+    key: "RECENT_ATTACH_KEY",
+    label: "最近添加的文件",
+    desc: "最近 20 次附加过的文件/文件夹（Alt 条带数据源）",
+    clearable: false,
+  },
+  {
     key: "SEARCH_NEW_ITEMS_KEY",
     label: "新增条目记录",
     desc: "订阅更新后标记出来的新条目",

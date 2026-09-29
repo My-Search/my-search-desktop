@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN" class="ms-overlay-root">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>截图</title>
+    <!-- 遮罩窗口：整屏铺满、透明（没有底色），由 overlay App 自己画底图 + 暗角 -->
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <style>
+      /* 必须在 Vue/样式表加载前生效：整屏透明、无滚动条、禁选中文本、十字光标 */
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+        user-select: none;
+        cursor: crosshair;
+        font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+      }
+      #app {
+        width: 100vw;
+        height: 100vh;
+        background: transparent;
+      }
+    </style>
+  </head>
+  <body class="ms-overlay-body">
+    <div id="app"></div>
+    <script type="module" src="/src/overlay.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,20 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "overlay",
+  "description": "截图框选遮罩窗口能力：整屏透明窗口，需读窗口缩放/关闭自身；不授予任何插件/网络/存储权限",
+  "windows": ["overlay-*"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-scale-factor",
+    "core:window:allow-close",
+    "core:window:allow-hide",
+    "core:window:allow-show",
+    "core:window:allow-set-focus",
+    "core:window:allow-set-size",
+    "core:window:allow-set-position",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-always-on-top",
+    "core:webview:allow-create-webview-window",
+    "dialog:default"
+  ]
+}

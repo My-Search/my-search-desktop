@@ -1,5 +1,5 @@
 /**
- * 安装包预处理 —— 从 `.msplugin`（ZIP）到「可直接落盘的文件表 + 已校验清单」。
+ * 安装包预处理 —— 从 `.mspp`（ZIP）到「可直接落盘的文件表 + 已校验清单」。
  *
  * 为什么单独成模块（而不是写在面板的 click 处理里）：
  *   - 这一段是**纯逻辑**（解压 → 剥离包裹目录 → 定位清单 → 校验），可以脱离
@@ -14,6 +14,7 @@
 
 import {
   checkMinAppVersion,
+  describeManifestErrors,
   parsePluginManifest,
   PLUGIN_MANIFEST_FILE,
   type PluginManifest,
@@ -61,6 +62,24 @@ export async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const view = new Uint8Array(bytes.buffer as ArrayBuffer, bytes.byteOffset, bytes.byteLength);
   const digest = await crypto.subtle.digest("SHA-256", view as unknown as ArrayBufferView<ArrayBuffer>);
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * 计算安装包的**内容指纹**（与 zip 时间戳 / 压缩实现无关）。
+ *
+ * 用法：内置插件判断「随版本分发的内容」是否与上次落盘的一致。
+ * 为什么不能用整包 SHA-256：`.mspp` 是 zip，打包器写入的 mtime / 压缩细节
+ * 每次都可能不同，同一个源目录两次打包的整包摘要并不相等（实测），因此整包
+ * 摘要只能用于「同一份文件是否被篡改」，不能用于「内容是否变化」。
+ * 这里改为对「排序后的 (路径, 内容) 列表」做摘要——与顺序、时间戳无关，
+ * 只有真正的文件内容变化才会改变它。
+ */
+export async function packageContentFingerprint(files: readonly InstallFilePayload[]): Promise<string> {
+  const normalized = files
+    .map((f) => `${f.path.replace(/\\/g, "/")}\u0000${f.executable ? "1" : "0"}\u0000${f.data}`)
+    .sort();
+  const text = normalized.join("\u0001");
+  return await sha256Hex(new TextEncoder().encode(text));
 }
 
 /** 取清单条目（先剥离包裹目录，再要求位于包根） */
@@ -111,7 +130,7 @@ export async function preparePackage(
   const manifestText = decoder.decode(manifestEntry.data);
   const parsed = parsePluginManifest(manifestText, opts.checkPermissions);
   if (!parsed.ok) {
-    const { describeManifestErrors } = await import("./manifest.ts");
+    // describeManifestErrors 由顶部静态 import 提供（本模块早已静态依赖 manifest.ts）
     const readable = describeManifestErrors(parsed.errors);
     throw new InstallPrepError(`插件清单校验失败：\n· ${readable.join("\n· ")}`);
   }
@@ -121,8 +140,7 @@ export async function preparePackage(
 
   // 警告码同样要翻译：它们会被拼进安装确认弹窗，直接透传就成了
   // 「注意：· id.reservedPrefix:com.mysearch」这种给用户看的天书。
-  const { describeManifestErrors: describeWarnings } = await import("./manifest.ts");
-  const warnings = describeWarnings(parsed.warnings);
+  const warnings = describeManifestErrors(parsed.warnings);
 
   // 清单以外的文件（清单本身也要落盘：运行时读清单、Rust 侧校验 id 一致性都依赖它）
   const files: InstallFilePayload[] = entries.map((e) => ({

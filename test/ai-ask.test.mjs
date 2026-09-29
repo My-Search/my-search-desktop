@@ -3,8 +3,9 @@
  *
  * 背景：官方系统项「[脚本]问AI」的使用方式是
  *   `<搜索数据项><tab><子项接收文本>`（见官方订阅说明 3.1）：
- *   呼出搜索框 → 按 Tab（空内容 → 转发为「问AI : 」）→ 回车打开「问AI」脚本应用
- *   → 输入问题再回车，问题会交给应用里的 `MS_SCRIPT_ENV.event.sendListener`。
+ *   呼出搜索框 → 按 Tab（空内容**直接停在「 : 」**，列出全部可搜索项；
+ *   旧版会自动跳转「问AI : 」，已按新交互要求移除）→ 输入「问AI : 你好」回车
+ *   打开「问AI」脚本应用 → 问题会交给应用里的 `MS_SCRIPT_ENV.event.sendListener`。
  *
  * 桌面版曾丢失三处原版行为，导致「你好」永远传不到应用：
  *   1. 脚本视图挂载完成后没有自动调用 `tryRunTextViewHandler()`
@@ -105,10 +106,20 @@ ok(
   "子关键词为空时不再直接返回未处理（与原版一致地吞掉这次回车）"
 );
 
-// ---- 5. 转发结果以 onRedirect 走正常输入路径，记录「已进入子搜索模式」 ----
+// ---- 5. 空父词不再走「问AI」自动转发（新交互：直接按 Tab、左词为空不过滤） ----
+const engineSrc = read("src/lib/search-engine.ts");
 ok(
-  /search\.onRedirect\s*\([\s\S]{0,300}?search\.onInput\s*\(keyword\)/.test(appCode),
-  "问AI 转发（onRedirect）走 search.onInput，记录子搜索模式状态"
+  !/onRedirect/.test(appCode) && !/onRedirect/.test(stateCode),
+  "App.vue / useSearchState 已移除 onRedirect 转发链（空 Tab 不再跳「问AI : 」）"
+);
+ok(
+  !/_pendingRedirectKeyword/.test(engineSrc) && !/问AI"\s*\+\s*SEARCH_BOUNDARY/.test(engineSrc),
+  "引擎不再设置「问AI : 」待转发关键词"
+);
+ok(
+  /父关键词为空[\s\S]{0,200}?\[可搜索\]/.test(engineSrc.replace(/\s+/g, " ")) ||
+    /不进行过滤[\s\S]{0,160}?\[可搜索\]/.test(engineSrc.replace(/\s+/g, " ")),
+  "引擎文档说明：父关键词为空 = 不过滤、列出全部 [可搜索] 项"
 );
 
 console.log(`\n结果: ${pass} passed, ${fail} failed`);

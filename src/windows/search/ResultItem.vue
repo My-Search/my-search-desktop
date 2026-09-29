@@ -17,9 +17,6 @@ import type { SearchItem } from "../../types/index";
 
 const props = defineProps<{
   item: SearchItem;
-  /** 原数据项（临时展示项如 <new> 的结果会展开原项取图标） */
-  refItem: SearchItem;
-  index: number;
   active: boolean;
   /** 在 state.results 中的下标（点击时回传给 App） */
   resultIndex: number;
@@ -41,7 +38,7 @@ const titleHtml = computed(
 const desc = computed(() => String(props.item.desc ?? ""));
 const isSketch = computed(() => !isUrl(props.item.resource));
 const links = computed(() => props.item.links ?? []);
-const favicon = computed(() => resolveFavicon(props.refItem));
+const favicon = computed(() => resolveFavicon(props.item));
 const faviconsData = computed(() => faviconsAttr(favicon.value.favicons));
 
 /**
@@ -128,7 +125,7 @@ function onClick(e: MouseEvent) {
 </script>
 
 <template>
-  <li class="resultItem" :class="{ active: props.active }" :data-index="props.index" @click="onClick">
+  <li class="resultItem" :class="{ active: props.active }" :data-index="props.resultIndex" @click="onClick">
     <span class="item-icon" :class="{ 'is-plugin': isPluginItem }">
       <img
         ref="imgEl"
@@ -152,7 +149,7 @@ function onClick(e: MouseEvent) {
       :href="isSketch ? '' : String(props.item.resource ?? '')"
       target="_blank"
       :title="desc"
-      :index="props.refItem.index ?? props.index"
+      :index="props.resultIndex"
       class="enter_main_link"
       :data-open="props.resultIndex"
     >

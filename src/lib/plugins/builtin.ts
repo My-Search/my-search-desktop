@@ -21,6 +21,13 @@ export interface BuiltinEntry {
   removed: boolean;
   version: string | null;
   resourcePath: string | null;
+  /**
+   * 开发模式：仓库内该插件的源码目录（含 plugin.json）。
+   *
+   * 仅当应用跑在 `tauri dev` 且能找到 `<repo>/plugins/<name>` 时非空。
+   * 有值时前端改为「目录挂载」（编辑源码即时生效），不再从 .mspp 安装。
+   */
+  devSource: string | null;
 }
 
 /** 与 Rust `BootstrapReport` 对齐 */

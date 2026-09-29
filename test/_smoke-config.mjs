@@ -249,16 +249,25 @@ check(
     '["Ctrl","Shift","F9"]'
 );
 
-// 3b. 没有可打开插件时：点击「+ 添加快捷键」给出引导提示，不新增行
+// 3b. 没有可打开插件时：新增一条「快速过滤」草稿（填常用头前不校验、不提交、不报错）
 await evalJs(`document.querySelector('.shortcut-add').click()`);
 await sleep(200);
+const draftRows = await evalJs(`document.querySelectorAll('.shortcut-row').length`);
+const draftAction = await evalJs(
+  `document.querySelectorAll('.shortcut-row')[1]?.querySelector('[data-act="action"]')?.value ?? 'null'`
+);
 check(
-  "无可用插件时不允许新增插件快捷键",
-  (await evalJs(`document.querySelectorAll('.shortcut-row').length`)) === 1,
-  `rows=${await evalJs(`document.querySelectorAll('.shortcut-row').length`)}`
+  "无可用插件时新增快速过滤草稿（行保留）",
+  draftRows === 2 && draftAction === "quick-filter",
+  `rows=${draftRows} action=${draftAction}`
+);
+check(
+  "草稿未提交给后端（呼出/隐藏保持原样）",
+  (await evalJs(`JSON.stringify(window.__bindings)`)) === bindings1,
+  await evalJs(`JSON.stringify(window.__bindings)`)
 );
 
-// 3c. 插入一个假插件后：新增一行 → 作用类型 = 打开插件 → 作用对象可选该插件
+// 3c. 插入一个假插件后：新增一条「打开插件」草稿 → 选完插件（填完）才校验提交
 await evalJs(`
   localStorage.setItem('my-search-desktop:PLUGIN_REGISTRY_CACHE_KEY', JSON.stringify({
     version: 1,
@@ -272,7 +281,7 @@ await evalJs(`
   }));
   1;
 `);
-// 重新进入面板（触发插件列表重读）
+// 重新进入面板（触发插件列表重读；切走会卸载面板，3b 的未填草稿随之丢弃）
 await evalJs(`document.querySelector('.cfg-nav .nav-item[data-pane="cache"]').click()`);
 await sleep(150);
 await evalJs(`document.querySelector('.cfg-nav .nav-item[data-pane="shortcut"]').click()`);
@@ -287,15 +296,28 @@ const pluginSelect = await evalJs(`JSON.stringify({
   options: [...document.querySelectorAll('.shortcut-row')[1].querySelectorAll('[data-act="target"] option')].map(o => o.value)
 })`);
 check(
-  "新行作用类型=打开插件且作用对象选中该插件",
+  "新行作用类型=打开插件（草稿：作用对象未选、可选该插件）",
   JSON.parse(pluginSelect).action === "open-plugin" &&
-    JSON.parse(pluginSelect).target === "com.test.demo" &&
+    JSON.parse(pluginSelect).target === "" &&
     JSON.parse(pluginSelect).options.includes("com.test.demo"),
   pluginSelect
 );
+check(
+  "未填完的草稿不提交给后端（不触发校验）",
+  (await evalJs(`JSON.stringify(window.__bindings)`)) === bindings1,
+  await evalJs(`JSON.stringify(window.__bindings)`)
+);
+// 选择插件 = 填完 → 立即校验并提交
+await evalJs(`
+  const sel = document.querySelectorAll('.shortcut-row')[1].querySelector('[data-act="target"]');
+  sel.value = 'com.test.demo';
+  sel.dispatchEvent(new Event('change', { bubbles: true }));
+  1;
+`);
+await sleep(300);
 const bindings2 = await evalJs(`JSON.stringify(window.__bindings)`);
 check(
-  "新增的插件快捷键提交给后端（含 target）",
+  "选完插件后草稿提交给后端（含 target）",
   bindings2.includes('"action":"open-plugin"') && bindings2.includes('"target":"com.test.demo"'),
   bindings2
 );
@@ -314,7 +336,8 @@ check(
 await evalJs(`document.querySelector('.cfg-nav .nav-item[data-pane="cache"]').click()`);
 await sleep(300);
 const cacheItems = await evalJs(`document.querySelectorAll('#cacheList .cache-item').length`);
-check("缓存面板列出全部缓存条目", cacheItems === 10, `items=${cacheItems}`);
+// 与 CACHE_BLUEPRINT 条目数保持一致（当前 11，新增缓存条目时同步更新）
+check("缓存面板列出全部缓存条目", cacheItems === 11, `items=${cacheItems}`);
 check(
   "订阅数据缓存显示剩余有效期",
   (await evalJs(`document.querySelector('#cacheList .cache-item[data-key="SEARCH_DATA_KEY"] .cache-count')?.textContent.includes('剩')`)) === true,

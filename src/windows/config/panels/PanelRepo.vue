@@ -102,7 +102,7 @@ function openRepoLink(e: MouseEvent): void {
         <span class="cfg-hint">TisHub 是一个开源订阅仓库，订阅以 Issues 方式共享</span>
       </div>
       <div class="cfg-btn-row">
-        <button id="pushTis" class="cfg-btn primary" @click="pushTis">
+        <button id="pushTis" class="cfg-btn" @click="pushTis">
           提交我的订阅到 TisHub <span class="badge submitable">{{ commitableCount ?? "-" }}</span>
         </button>
         <button id="openTisHub" class="cfg-btn" @click="props.openTisHub()">Tis 订阅市场</button>
@@ -114,12 +114,6 @@ function openRepoLink(e: MouseEvent): void {
         >
           清理 Token
         </button>
-      </div>
-      <div class="cfg-note">
-        提交订阅需要 GitHub Token，仅缓存在本地；Token 失效或需要更换时，可先点击「清理 Token」后重试。
-        <a :href="TISHUB_REPO" :data-ext="TISHUB_REPO" class="cfg-hub-link" @click="openRepoLink"
-          >打开 TisHub 仓库 ↗</a
-        >
       </div>
     </div>
   </section>

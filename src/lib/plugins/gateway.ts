@@ -9,6 +9,7 @@
  */
 
 import { syncGateway } from "./ipc.ts";
+import { buildPluginEnv } from "./env-store.ts";
 import type { PluginRecord } from "./registry.ts";
 
 /** 由插件记录生成下发给 Rust 的网关配置 */
@@ -24,6 +25,8 @@ export function gatewaySpecOf(rec: PluginRecord): {
   maxRestarts: number;
   startupTimeoutMs: number;
   callTimeoutMs: number;
+  /** 注入插件后台进程的环境变量（只含**已授权**的宿主变量） */
+  env: Record<string, string>;
 } {
   const backend = rec.manifest.backend;
   return {
@@ -39,6 +42,9 @@ export function gatewaySpecOf(rec: PluginRecord): {
     maxRestarts: backend?.maxRestarts ?? 3,
     startupTimeoutMs: backend?.startupTimeoutMs ?? 3000,
     callTimeoutMs: backend?.callTimeoutMs ?? 30000,
+    // 环境变量：清单里的字面量 + 引用，加上该插件**已授权**（env.read:<NAME>）的
+    // 宿主变量（见 env-store.buildPluginEnv）。未授权的一律不出现。
+    env: buildPluginEnv(rec),
   };
 }
 

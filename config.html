@@ -10,11 +10,27 @@
          但控制台会多一条误导性的 "Failed to load resource: 404"）。 -->
     <link rel="icon" type="image/png" href="/favicon.png" />
     <script>
-      // 在样式表/模块脚本加载前先按系统主题铺底，避免首帧白闪
+      // 在样式表/模块脚本加载前先按**用户选择的主题**铺底，避免首帧闪错底色。
+      // 注意：主题值由 storageSet 以 JSON 写入（如 "light" 带引号），必须 JSON.parse；
+      // 早期版本直接比较裸字符串，导致「强制浅色 + 系统深色」时先铺深色底再跳浅色。
       (function () {
+        var theme = "system";
+        try {
+          var raw = localStorage.getItem("my-search-desktop:theme");
+          if (raw != null) {
+            var parsed = JSON.parse(raw);
+            if (parsed === "light" || parsed === "dark" || parsed === "system") {
+              theme = parsed;
+            }
+          }
+        } catch (e) {}
         var dark =
-          window.matchMedia &&
-          window.matchMedia("(prefers-color-scheme: dark)").matches;
+          theme === "dark" ||
+          (theme === "system" &&
+            window.matchMedia &&
+            window.matchMedia("(prefers-color-scheme: dark)").matches);
+        // 同步挂上主题类：CSS 变量（含 color-scheme）在样式表到达后立即生效
+        document.documentElement.classList.add(dark ? "theme-dark" : "theme-light");
         document.documentElement.style.backgroundColor = dark
           ? "#17191d"
           : "#f5f6f8";

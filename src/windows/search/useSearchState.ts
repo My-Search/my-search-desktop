@@ -26,7 +26,7 @@ import {
   PLACEHOLDER_PREPARE_MS,
 } from "../../lib/util";
 import { setWindowHeight, getDefaultSubscribeText } from "../../lib/tauri-bridge";
-import { pluginIdOf } from "../../lib/plugins/plugin-items";
+import { pluginIdOf, pluginSubSearchOf } from "../../lib/plugins/plugin-items";
 import type { SearchItem, SubscribeItem } from "../../types/index";
 
 /** 订阅原文存储键（与配置窗口共享） */
@@ -128,17 +128,6 @@ export function useSearchState() {
 
   const engine = new SearchEngine();
 
-  // PRO 模式特殊路由 `^\s*$` → "问AI" 转发：把输入框改写为 "问AI : " 并重新触发搜索
-  // （原版通过 registry.searchData.triggerSearchHandle("问AI" + searchBoundary) 实现）
-  let redirectHandler: ((keyword: string) => void) | null = null;
-  engine.onRedirect = (keyword) => {
-    redirectHandler?.(keyword);
-  };
-  /** 注册特殊路由转发处理（由 App.vue 设置：改写输入框 + 重新搜索） */
-  function onRedirect(handler: (keyword: string) => void): void {
-    redirectHandler = handler;
-  }
-
   // ============== 占位提示 ==============
   const placeholder = ref(PLACEHOLDER_DEFAULT_TEXT);
   let placeholderRestoreTimer: ReturnType<typeof setTimeout> | null = null;
@@ -222,7 +211,8 @@ export function useSearchState() {
 
   /**
    * 执行搜索（输入防抖后的真正搜索）。
-   * 空关键词 → 清空结果；PRO 模式空父关键词 → 由上层的 onRedirect 改写输入并重搜。
+   * 空关键词 → 清空结果；边界符本身（" : "）→ PRO 模式「不过滤」列出
+   * （空内容按 Tab 直接停在 " : "，不再跳转 "问AI : "）。
    */
   async function doSearch(rawKeyword: string): Promise<SearchResult[]> {
     state.rawKeyword = rawKeyword;
@@ -230,9 +220,26 @@ export function useSearchState() {
 
     // 真正的空关键词 → 清空结果。
     // 注意：边界符本身（" : "，空内容按 Tab 后的值）不能在这里短路——
-    // 原版会进入 PRO 模式路由并把关键词转发为 "问AI : "（searchableSpecialRouting["^\\s*$"]），
-    // 需要交给引擎触发转发。
+    // 它要交给引擎走 PRO 模式：空父词不进行过滤，列出当前域的全部候选
+    // （普通模式 = 全部 [可搜索] 项；附件模式 = 能处理附件的插件）。
     if (rawKeyword.trim() === "") {
+      // 附件模式（粘贴/拖入了文件或文件夹）：空输入不是「清空」，
+      // 而是把「能处理这些附件的插件」全部列出来，让用户直接选/继续输入。
+      const attachFilter = engine.resultFilter;
+      if (attachFilter) {
+        const idle = engine.searchData.filter((it) => {
+          try {
+            return attachFilter(it);
+          } catch (e) {
+            return false;
+          }
+        });
+        state.results = idle.map((item) => ({ item, level: 0 }));
+        state.activeIndex = -1;
+        state.mode = state.results.length > 0 ? MODE.SHOW_RESULT : MODE.WAIT_SEARCH;
+        afterResultsRendered?.();
+        return state.results;
+      }
       state.results = [];
       state.activeIndex = -1;
       state.mode = MODE.WAIT_SEARCH;
@@ -377,9 +384,16 @@ export function useSearchState() {
   /** 上一次挂载的插件项「指纹」（用于判断是否真的变了） */
   let lastPluginItemsKey = "";
 
-  /** 插件项指纹：id + 关键词 + 标题，任一变化都说明该重挂 */
+  /** 插件项指纹：id + 关键词 + 二次搜索声明 + 标题，任一变化都说明该重挂 */
   function pluginItemsKey(items: readonly SearchItem[]): string {
-    return items.map((it) => `${pluginIdOf(it) ?? ""}\u0001${it._pluginKeyword ?? ""}\u0001${it.title ?? ""}`).join("\u0002");
+    return items
+      .map(
+        (it) =>
+          `${pluginIdOf(it) ?? ""}\u0001${it._pluginKeyword ?? ""}\u0001${
+            pluginSubSearchOf(it) ? "1" : "0"
+          }\u0001${it.title ?? ""}`
+      )
+      .join("\u0002");
   }
 
   /**
@@ -568,7 +582,6 @@ export function useSearchState() {
     placeholder,
     visibleResults,
     // 生命周期/绑定
-    onRedirect,
     bindInputValueGetter,
     bindAfterResultsRendered,
     bindPluginItems,

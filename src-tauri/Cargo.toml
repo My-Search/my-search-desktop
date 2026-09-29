@@ -33,10 +33,20 @@ tauri-plugin-dialog = "2.7.3"
 # 备份归档（.msbackup = ZIP）：导出/导入与云同步共用同一套打包/解包实现。
 # 只开 deflate：本应用不需要 zip64 之外的加密、bzip2、zstd 等（保持依赖最小）。
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# 附件/截图模块的 PNG 编解码（缩略图、剪贴板位图落盘）
+png = "0.17"
+# 单实例：见 lib.rs run() 里注册的第一个插件（.mspp 双击与重复启动都靠它收敛到同一进程）
+tauri-plugin-single-instance = "2"
 
 # 插件后台进程：Unix 上结束整个进程组（插件可能自己拉起孙进程，只 kill 直接子进程会留孤儿）
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# 跟随系统代理（见 system_proxy.rs）：macOS 用 SystemConfiguration 原生 API 读
+# SCDynamicStore 里的系统代理（与 reqwest/hyper-util 同源），不解析 scutil 文本。
+# Windows 复用下方已有 winreg，Linux 调 gsettings，均零新增依赖。
+[target.'cfg(target_os = "macos")'.dependencies]
+system-configuration = "0.7"
 
 # 托盘菜单导致鼠标光标消失的修复（见 src/lib.rs 的 force_cursor_visible）
 # 仅 Windows 需要；复用 tauri 依赖树中已有的 windows-sys，不额外引入 winapi
@@ -46,6 +56,19 @@ libc = "0.2"
 #   （见 lib.rs refresh_autostart_exe_path；与 auto-launch 是同款实现，
 #    tauri 依赖树里本就已有 winreg 0.55，不新增实际下载量）
 [target.'cfg(windows)'.dependencies]
+# 与 windows-sys 是两套 API：alt_click.rs 需要 COM 接口（IUIAutomation / IShellWindows）
+# 与 Interface trait，windows-sys 不提供这些封装，故单独引入 windows。仅 Windows 编译。
+windows = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_Com",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Threading",
+  "Win32_System_Variant",
+  "Win32_UI_Accessibility",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
 windows-sys = { version = "0.60", features = [
   "Win32_UI_WindowsAndMessaging",
   "Win32_Foundation",
@@ -53,5 +76,15 @@ windows-sys = { version = "0.60", features = [
   "Win32_System_JobObjects",
   "Win32_System_Threading",
   "Win32_System_ProcessStatus",
+  # 截屏 / 附件 / 剪贴板历史用到的子系统（feature 未开时对应 mod 会被 cfg 掉，
+  # 报错形式是「cannot find X in Win32」／「could not find DataExchange in System」）
+  "Win32_Graphics_Gdi",       # HDC / HBITMAP / ICONINFO / WNDCLASSW / RegisterClassW
+  "Win32_Graphics_Dwm",       # DwmFlush（截屏前等合成器提交，避免抓到旧帧）
+  "Win32_System_DataExchange",# 剪贴板 OpenClipboard / GetClipboardData
+  "Win32_System_Memory",      # GlobalAlloc / GlobalLock / GlobalSize / GlobalUnlock
+  "Win32_System_Ole",         # CF_DIB / CF_UNICODETEXT
+  "Win32_System_Com",         # CoInitializeEx（附件图标解析）
+  "Win32_UI_Shell",           # DragQueryFileW（拖入文件的路径解析）
+  "Win32_Storage_FileSystem", # 附件模块读取文件属性
 ] }
 winreg = "0.55"

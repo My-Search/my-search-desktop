@@ -49,8 +49,11 @@ import {
   pluginDataGet,
   pluginDataSet,
   pluginDataRemove,
+  resolvePluginTheme,
   shouldStopBackendOnClose,
 } from "../../lib/plugins/registry.ts";
+import { readPluginThemeProvider } from "../../lib/plugins/host.ts";
+import { applyThemeOverride, clearThemeOverride } from "../../lib/theme-override.ts";
 import { decideViewClose, decideViewRestore } from "../../lib/plugins/dev-reload.ts";
 import { consumePluginFrontendRestart } from "../../lib/plugins/restart.ts";
 import type { ScriptEnv } from "../../lib/script-runtime.ts";
@@ -67,6 +70,59 @@ export const PLUGIN_PARKING_ID = "ms-plugin-parking";
  * 作用域里，插件作者不需要知道「保活」这件事。
  */
 export const PLUGIN_STYLE_PREFIX = "#text_show .plugin-view";
+
+/**
+ * 「附件（粘贴/拖入的文件与文件夹）变了」的广播事件名。
+ *
+ * 宿主在 document 上派发一次；插件入口脚本各自挂 document 监听自行响应
+ * （文件搜索收到后自动重扫最新文件夹集合）。停靠（最小化）中的会话 DOM
+ * 仍在文档内（停车场只是 display:none），因此保活会话同样收得到。
+ * 插件侧按字符串约定引用（插件不能 import 宿主模块）。
+ */
+export const ATTACHMENTS_CHANGED_EVENT = "ms-attachments-changed";
+
+/**
+ * 「文件被拖进了插件视图」的事件名（宿主 → 插件，**定向**投递）。
+ *
+ * 为什么需要它：主窗口开着 Tauri 的**原生**拖放处理器，插件页里的 HTML5
+ * `drop` 永远不会触发（事件在 WebView 层就被吃掉了），插件因此没法自己
+ * 知道「文件落在我身上了」。宿主是唯一能拿到落点坐标的一方，判定落点属于
+ * 插件视图后再把**真实路径**推给插件（见 App.vue 的 onDragDropEvent 与
+ * drop-target.ts 的 resolveDropTarget）。
+ *
+ * 与 ATTACHMENTS_CHANGED_EVENT 的区别（两者**不要混用**）：
+ *   - 那个是**全局广播**、**无载荷**，语义是「附件集合变了，自己去
+ *     `ms.input.attachments()` 拉最新的」，任何插件（含停靠保活的）都收；
+ *   - 这个是**定向投递**、**带载荷**（`detail.paths`），语义是「这几个文件
+ *     是冲着你的界面来的」，只在**前台会话的载体**上派发——停靠中的视图
+ *     收不到，免得文件被一个看不见的视图吃掉。
+ *
+ * 事件载荷：`CustomEvent<{ paths: string[] }>`，`paths` 为宿主侧的真实
+ * 绝对路径。插件用 `ms.input.readFile(path)` 读内容（受 `file.read` 权限
+ * 约束，且 Rust 侧还会按 `attachments_sync` 注册的路径集二次校验）。
+ */
+export const DROPPED_PATHS_EVENT = "ms-dropped-paths";
+
+/**
+ * 拖拽悬停事件：原生拖放悬停在前台插件视图上时（enter/over/leave），
+ * 宿主把「悬停状态 + 悬停到的元素」定向投递给该插件，让插件能画悬停高亮。
+ *
+ * ## 为什么需要它
+ *
+ * 主窗口开着 Tauri 原生拖放时，插件页里的 HTML5 `dragover/dragleave` **永远
+ * 不会触发**（事件在 WebView 层就被原生处理器吃掉了，见 drop-target.ts 的
+ * 说明）。插件因此无法自己感知「拖拽正悬在我身上」——只能等到 drop 那一刻
+ * 才知道。而好的拖放体验需要在**悬停时**就给出「可放这里」的视觉反馈。
+ *
+ * 宿主是唯一能看到原生拖拽坐标的一方：它在 `onDragDropEvent` 里拿到
+ * enter/over/leave + 位置，再 `elementFromPoint` 找到悬停到的元素。这里把
+ * 该元素一并投递给插件（而非由宿主判定「是不是侧边栏」）——**只有插件自己
+ * 知道自己的 DOM 结构**，它用 `closest(选择器)` 即可判断悬停是否落在左侧栏上。
+ *
+ * 事件载荷：`CustomEvent<{ active: boolean; hit: Element | null }>`。
+ * `active=false`（leave / drop / 判为不应投递）时 `hit` 为 null，插件应清除高亮。
+ */
+export const DROP_HOVER_EVENT = "ms-drop-hover";
 
 /** 插件视图的挂载结果 */
 export interface PluginViewMount {
@@ -253,6 +309,10 @@ export function usePluginViewHost(opts: PluginViewHostOptions) {
     session.scrolls = [];
     opts.fitHeight();
     opts.flushHeight?.();
+    // 插件重新回到前台：按它当前的主题诉求切整个呼出窗口
+    //（provider 每次恢复都重新读——保活会话没重跑脚本，但用户在插件界面里
+    //  可能已经改过主题，或用户在设置面板改了偏好）
+    applySessionTheme(session.pluginId);
     // 与「重新挂载」保持一致：输入框里若带着「父 : 子」，把子关键词交给插件
     // （用户常见路径：在结果列表里重新用「插件 : 问题」打开，期望这个问题被收到）。
     // 没有分隔符时不动作，因此不会凭空重复转发。
@@ -272,6 +332,9 @@ export function usePluginViewHost(opts: PluginViewHostOptions) {
       sessionActive.value = false;
       activeKeyword = null;
     }
+    // 插件界面已不在前台：撤掉它的主题覆盖，呼出窗口回到软件主题
+    //（停在停车场里的会话没有可见界面，不该继续影响观感）
+    clearThemeOverride();
   }
 
   /**
@@ -300,6 +363,15 @@ export function usePluginViewHost(opts: PluginViewHostOptions) {
       if (backend && typeof backend._clearNotifications === "function") {
         (backend._clearNotifications as () => void)();
       }
+      // 主题订阅（ms.ui.onThemeChanged）：同理，会话销毁即失效
+      const ui = session.api?.ui as Record<string, unknown> | undefined;
+      if (ui && typeof ui._clearThemeHandlers === "function") {
+        (ui._clearThemeHandlers as () => void)();
+      }
+      // 主题 provider（ms.ui.registerThemeProvider）：会话没了，它的诉求也就没了
+      if (ui && typeof ui._clearThemeProvider === "function") {
+        (ui._clearThemeProvider as () => void)();
+      }
     } catch (e) {
       /* ignore */
     }
@@ -323,6 +395,8 @@ export function usePluginViewHost(opts: PluginViewHostOptions) {
       viewError.value = null;
       pendingPermission.value = null;
       resolvePermission(false);
+      // 前台插件被卸载：撤掉主题覆盖，呼出窗口回到软件主题
+      clearThemeOverride();
     }
     // 会话被真正销毁：连同「本会话内已拒绝的权限」一起忘掉
     deniedBySession.delete(pluginId);
@@ -357,6 +431,44 @@ export function usePluginViewHost(opts: PluginViewHostOptions) {
     if (decision.action === "park") parkSession(session);
     else release(id, reason || decision.reason);
     return decision.action;
+  }
+
+  /* ==================== 插件主题（呼出窗口联动） ==================== */
+
+  /**
+   * 求解并应用某插件视图的主题：把整个呼出窗口临时切到插件主题，或恢复软件主题。
+   *
+   * 优先级（前一条命中即用）：
+   *   1. 插件运行时上报的 provider（`ms.ui.registerThemeProvider`，如 pi-agent
+   *      左下角的主题切换）——"inherit" 表示明确要求跟随宿主；
+   *   2. 注册表里的持久偏好 `resolvePluginTheme`（用户在「设置 → 插件」的选择
+   *      → 清单声明 → 默认 inherit）；
+   *   3. 最终 `inherit` 时清除覆盖，恢复软件主题。
+   *
+   * 为什么必须在这里（而不是 App.vue）做：所有「打开 / 恢复 / 关闭 / 卸载」
+   * 插件视图的路径都汇聚到本文件（open 的挂载与恢复分支、settleActive 的
+   * 停靠与卸载、release、disposeAll、reapSessions），在这里收口就不会漏。
+   */
+  function applySessionTheme(pluginId: string | null): void {
+    if (!pluginId) {
+      clearThemeOverride();
+      return;
+    }
+    const fromProvider = readPluginThemeProvider(pluginId);
+    const pref = fromProvider ?? resolvePluginTheme(opts.getRecord(pluginId) ?? null);
+    if (pref === "dark" || pref === "light") applyThemeOverride(pref);
+    else clearThemeOverride();
+  }
+
+  /**
+   * 让插件在界面内改主题后立即生效（`ms.ui.applyTheme` 的下游）。
+   *
+   * 只作用于**前台**会话：停靠中的插件不该改变当前呼出窗口的观感
+   * （它自己不可见，改了也看不到；等它被再次打开时 applySessionTheme 会重新读）。
+   */
+  function refreshActiveTheme(): void {
+    if (!sessionActive.value) return;
+    applySessionTheme(activePluginId.value);
   }
 
   /**
@@ -570,6 +682,8 @@ export function usePluginViewHost(opts: PluginViewHostOptions) {
 
       sessions.set(record.id, session);
       channel.setActive(true);
+      // 挂载完成、插件脚本已跑（可能已 registerThemeProvider）：切整个呼出窗口的主题
+      applySessionTheme(record.id);
       // 自动转发一次子关键词（对齐老脚本项的挂载后自动转发；恢复路径不重复转发）
       pushCurrentSubKeyword();
     } catch (e) {
@@ -828,6 +942,142 @@ export function usePluginViewHost(opts: PluginViewHostOptions) {
     return n;
   }
 
+  /**
+   * 广播「附件变了」给插件视图（粘贴/拖入/移除文件与文件夹后由宿主调用）。
+   *
+   * 只在 document 上派发一次，各会话的入口脚本自己挂监听响应（见
+   * ATTACHMENTS_CHANGED_EVENT）——不用逐会话循环，也不依赖会话是否在
+   * 前台；打开着视图的插件（如文件搜索）据此自动重扫最新文件夹集合。
+   */
+  function notifyAttachmentsChanged(): void {
+    document.dispatchEvent(new CustomEvent(ATTACHMENTS_CHANGED_EVENT));
+  }
+
+  /**
+   * 当前**前台**插件会话的 DOM 载体（没有前台会话时为 null）。
+   *
+   * 供拖放落点判定使用（App.vue 把它交给 `resolveDropTarget`）：只有前台
+   * 会话能收「拖进来的文件」，停靠保活中的会话载体虽然还在文档里，也不该
+   * 吃掉一次看不见的拖入。
+   */
+  function frontContainer(): HTMLElement | null {
+    const id = activePluginId.value;
+    if (!id || !sessionActive.value) return null;
+    const session = sessions.get(id);
+    if (!session || !session.channel.alive) return null;
+    return session.channel.container;
+  }
+
+  /**
+   * 把**拖入的真实路径**定向投递给当前前台插件会话。
+   *
+   * 只在会话载体上派发（不是 document）：停靠中的视图收不到，且事件带
+   * `detail.paths`——插件据此走 `ms.input.readFile` 取内容，不必再去
+   * `ms.input.attachments()` 里认领（那条路对「视图已经开着时新拖入的文件」
+   * 需要插件自己订阅广播，容易漏）。
+   *
+   * **必须 bubbles: true**：插件入口脚本按契约统一在 `document` 上挂监听
+   * （与 ATTACHMENTS_CHANGED_EVENT 同样的写法）。`CustomEvent` 的 `bubbles`
+   * 默认是 `false`，事件从载体出发**不会冒泡到 document**——插件一个字节都
+   * 收不到，「拖进插件界面没反应」就是这么来的。定向投递的语义（只给前台
+   * 会话、停靠中的看不见的视图收不到）由「在谁的载体上派发」保证，与冒泡
+   * 并不冲突：冒泡只是把事件送达 document 上的监听器。
+   *
+   * **投递前必须登记路径**（`attachmentsSync`）：插件拿到的路径最终要过
+   * `ms.input.readFile` → Rust `attachment_read`，而 Rust 侧的第二道校验是
+   * 「路径必须落在已登记的附加集合内」。拖到插件界面的文件**不走**搜索框
+   * 附件管线（那正是本函数存在的意义：不污染搜索框的附件 chip），所以若不
+   * 在这里补登记，`readFile` 会被 Rust 以「路径不在已附加的内容范围内」拒绝，
+   * 插件又普遍把读取失败静默 catch 掉——用户只会看到「检测到 N 个拖入的文件」
+   * 之后就没下文了。
+   *
+   * 登记用**并集**（不覆盖）：搜索框里已附加的文件/文件夹不能被这次拖入挤掉，
+   * 否则原本可读的附件会突然变得不可读。这里也不写回 `ctx.getAttachments()`，
+   * 搜索框的附件状态不受影响。
+   *
+   * 事件 detail 形如 `{ paths: string[], entries: {path,isDir}[] }`：`paths`
+   * 保持旧形态（既有插件只读它）；`entries` 额外带上「是不是文件夹」，
+   * 让插件能区分「拖入文件夹 = 加项目」与「拖入图片 = 作附件」。描述失败时
+   * `entries` 退化为「全部按文件」，不阻断投递。
+   *
+   * @param paths      拖入的真实路径
+   * @param describe   路径 → {path,isDir} 的描述器（宿主注入；缺省按文件处理）
+   * @param syncRoots  把附加根登记到 Rust（宿主注入；缺省不登记）
+   * @param currentRoots 当前已登记的附加根（用于取并集）
+   * @returns 是否投递成功（没有前台会话时为 false，调用方应回退到附件流程）
+   */
+  async function notifyPluginDrop(
+    paths: string[],
+    describe?: (paths: string[]) => Promise<{ path: string; isDir: boolean }[]>,
+    syncRoots?: (roots: { path: string; isDir: boolean }[]) => Promise<void>,
+    currentRoots?: () => { path: string; isDir: boolean }[]
+  ): Promise<boolean> {
+    const list = (paths ?? []).filter((p) => typeof p === "string" && p !== "");
+    if (list.length === 0) return false;
+    const target = frontContainer();
+    if (!target) return false;
+
+    // 先登记（拿到 isDir 才登记得准）：失败不阻断投递——登记不了时插件会得到
+    // 一个明确的读取错误，好过把文件悄悄吞掉。挂起中用户可能已切走视图，
+    // 因此登记完要复核前台会话是否仍是当初那一个。
+    // 拖入路径的「是否文件夹」描述（并行于登记计算，供事件 detail 携带）。
+    // 插件拿到的只有路径字符串，自己没有能力判定 isDir（它只能用 file.read
+    // 读已登记集合里的内容）；而 pi-agent 这类插件需要区分「拖进来的是文件夹
+    // （加项目）还是图片（作附件）」。所以描述结果一并在事件里回传。
+    let entries: { path: string; isDir: boolean }[] =
+      list.map((p) => ({ path: p, isDir: false }));
+    if (syncRoots) {
+      try {
+        const described = describe ? await describe(list) : list.map((p) => ({ path: p, isDir: false }));
+        entries = described.map((d) => ({ path: d.path, isDir: !!d.isDir }));
+        const known = currentRoots?.() ?? [];
+        const seen = new Set(known.map((r) => `${r.isDir ? "d" : "f"}\u0000${r.path.toLowerCase()}`));
+        const merged = known.slice();
+        for (const d of described) {
+          const key = `${d.isDir ? "d" : "f"}\u0000${String(d.path).toLowerCase()}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          merged.push({ path: d.path, isDir: !!d.isDir });
+        }
+        await syncRoots(merged);
+      } catch (e) {
+        console.warn("[插件] 拖入路径登记失败（插件读取可能被拒）:", e);
+      }
+      // 登记是异步的：期间视图可能已被关闭/顶掉，此时不该再投递
+      if (frontContainer() !== target) return false;
+    }
+
+    // detail 同时带 paths（旧插件兼容：只读 paths）与 entries（带 isDir）。
+    target.dispatchEvent(
+      new CustomEvent(DROPPED_PATHS_EVENT, {
+        detail: { paths: list, entries },
+        bubbles: true,
+      })
+    );
+    return true;
+  }
+
+  /**
+   * 把「拖拽悬停在插件视图上」的状态定向投递给当前前台插件会话。
+   *
+   * 宿主在原生拖放的 enter/over/leave 里调用：`active=true` 表示拖拽正悬在
+   * 前台插件视图内（`hit` 是悬停到的元素）；`active=false` 表示离开/放下/不应
+   * 高亮（`hit` 为 null）。插件据此画/清悬停高亮（如 pi-agent 左侧栏）。
+   *
+   * 与 notifyPluginDrop 同构：只在会话载体上派发、必须 bubbles: true（插件
+   * 统一在 document 上挂监听）。没有前台会话时什么也不做。
+   */
+  function notifyPluginDropHover(active: boolean, hit: Element | null = null): void {
+    const target = frontContainer();
+    if (!target) return;
+    target.dispatchEvent(
+      new CustomEvent(DROP_HOVER_EVENT, {
+        detail: { active: !!active, hit: active ? hit : null },
+        bubbles: true,
+      })
+    );
+  }
+
   return {
     activePluginId,
     sessionActive,
@@ -837,6 +1087,10 @@ export function usePluginViewHost(opts: PluginViewHostOptions) {
     clear,
     isActive,
     pushCurrentSubKeyword,
+    notifyAttachmentsChanged,
+    frontContainer,
+    notifyPluginDrop,
+    notifyPluginDropHover,
     tryRunTextViewHandler,
     setSubKeywordHandler,
     resolvePermission,
@@ -850,6 +1104,10 @@ export function usePluginViewHost(opts: PluginViewHostOptions) {
     sessionCount,
     hasSession,
     isParked,
+    // 插件主题（呼出窗口联动）：applySessionTheme 供宿主主动重算，
+    // refreshActiveTheme 是 ms.ui.applyTheme 的下游（App.vue 注入 ctx 时引用）。
+    applySessionTheme,
+    refreshActiveTheme,
   };
 }
 

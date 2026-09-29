@@ -112,6 +112,21 @@ const { sessionId } = await send("Target.attachToTarget", { targetId, flatten: t
 const S = (m, p) => send(m, p, sessionId);
 await S("Page.enable");
 await S("Runtime.enable");
+// 注入 Tauri 桥（页面脚本执行前生效）。
+// transformCallback 必须有：theme.ts 启动时会 listen 主题变更事件，
+// 而 @tauri-apps/api 的 listen 会同步调用 window.__TAURI_INTERNALS__.transformCallback。
+// 缺了它会同步抛错 → 未处理拒绝 → CDP 记为 pageerror → 本测试即使断言全过也会 exit 1。
+await S("Page.addScriptToEvaluateOnNewDocument", {
+  source: `
+    window.__TAURI_INTERNALS__ = {
+      invoke(cmd) { return Promise.resolve(null); },
+      transformCallback(cb) { return cb; },
+      metadata: { currentWindow: { label: 'config' }, currentWebview: { label: 'config' } },
+      plugins: {},
+    };
+    window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener(){} };
+  `,
+});
 const evalJs = async (expr) => {
   const r = await S("Runtime.evaluate", {
     expression: expr,

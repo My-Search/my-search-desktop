@@ -20,6 +20,8 @@ export default defineConfig({
       input: {
         main: fileURLToPath(new URL("./index.html", import.meta.url)),
         config: fileURLToPath(new URL("./config.html", import.meta.url)),
+        // 截图框选/标注遮罩（宿主用 WebviewWindowBuilder 按显示器开「overlay-N」窗口）
+        overlay: fileURLToPath(new URL("./overlay.html", import.meta.url)),
       },
     },
   },

@@ -44,6 +44,11 @@ export function useMessageDialog() {
 
   /**
    * 弹出确认框（单按钮时退化为提示框）
+   *
+   * 只存一个 resolver：连续两次 confirm（如插件卸载的「确定卸载？」→「是否同时
+   * 删除数据？」）是**串行**的 —— 前一个 resolve 之后才发下一个，所以不会互相
+   * 覆盖。但切记不要在 await 之前并发调用两次，否则第二次会顶掉第一次的 resolver，
+   * 第一个 Promise 永远悬着（表现为点「卸载」没反应）。
    * @returns 点「确定」为 true；点「取消」/Esc 为 false
    */
   function showMessage(text: string, opts: MessageDialogOptions = {}): Promise<boolean> {

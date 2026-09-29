@@ -34,7 +34,7 @@
 //! 停止时宿主发 `{"jsonrpc":"2.0","method":"deactivate"}`（通知，不等回复），
 //! 等 `shutdownTimeoutSec` 后强杀。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -89,7 +89,10 @@ fn plugin_dir(app: &AppHandle, plugin_id: &str) -> Result<PathBuf, String> {
 }
 
 /// 插件私有数据目录（后端进程用）
-fn plugin_data_dir(app: &AppHandle, plugin_id: &str) -> Result<PathBuf, String> {
+///
+/// `pub(crate)`：screenshot 模块的截图落盘/读回也走这里——插件私有目录
+/// 是插件唯一被允许持久化文件的地方，两处必须共用同一套解析口径。
+pub(crate) fn plugin_data_dir(app: &AppHandle, plugin_id: &str) -> Result<PathBuf, String> {
     validate_plugin_id(plugin_id)?;
     let dir = app
         .path()
@@ -136,7 +139,9 @@ fn validate_plugin_id(id: &str) -> Result<(), String> {
 }
 
 /// 相对路径安全校验（防 zip-slip / 绝对路径 / 盘符 / 协议）
-fn is_safe_relative(rel: &str) -> bool {
+///
+/// `pub(crate)`：screenshot 模块校验截图相对路径时复用同一套规则。
+pub(crate) fn is_safe_relative(rel: &str) -> bool {
     if rel.is_empty() || rel.len() > 512 || rel.contains('\0') {
         return false;
     }
@@ -180,6 +185,15 @@ pub struct GatewaySpec {
     pub startup_timeout_ms: u64,
     #[serde(default)]
     pub call_timeout_ms: u64,
+    /// 注入后台进程的环境变量（前端已按「用户逐项授权」筛过，见 env-store.ts）。
+    ///
+    /// 为什么放在网关里而不是让插件自己存：值由宿主集中维护，Rust 只在
+    /// `spawn_backend` 时把它读进进程环境——这样密钥不经过插件 JS 上下文，
+    /// 也不会出现在插件可读的 DOM 里（inlay 不是沙箱）。
+    /// 注意：快照会把它明文落盘（plugin-gateway.json），这是「开机自启的插件
+    /// 也能拿到变量」的必要代价。
+    #[serde(default)]
+    pub env: HashMap<String, String>,
 }
 
 static GATEWAY: LazyLock<Mutex<HashMap<String, GatewaySpec>>> =
@@ -249,7 +263,7 @@ fn gateway_all() -> Vec<GatewaySpec> {
 }
 
 /// 是否已授予某基础权限（只按基础 id 比较，scope 由调用点另行校验）
-fn has_base_permission(spec: &GatewaySpec, base: &str) -> bool {
+pub(crate) fn has_base_permission(spec: &GatewaySpec, base: &str) -> bool {
     spec.grants.iter().any(|g| {
         let b = g.split(':').next().unwrap_or("");
         b == base
@@ -514,6 +528,8 @@ pub fn plugin_link_dir(app: AppHandle, plugin_id: String, dir: String) -> Result
     }
     // 解析掉符号链接，避免后续路径校验失败
     let src = src.canonicalize().map_err(|e| err(format!("目录不可访问: {e}")))?;
+    // canonicalize 返回 \\?\ 前缀路径：存进 .dev-source 后 cmd.exe 读不了（见 helper 注释）
+    let src = without_verbatim_prefix(&src);
 
     let root = plugins_root(&app)?;
     std::fs::create_dir_all(&root).map_err(|e| err(format!("创建插件目录失败: {e}")))?;
@@ -552,6 +568,22 @@ pub fn plugin_watch_dir(app: AppHandle, plugin_id: String, dir: String, enable: 
     crate::plugin_watch::watch_plugin(&plugin_id, &src)
 }
 
+/// 去掉 Windows 扩展长度前缀（`\\?\C:\x` → `C:\x`；`\\?\UNC\srv\share` → `\\srv\share`）。
+///
+/// `canonicalize()` 返回的就是 `\\?\` 形式（`.dev-source` 里存的也是它）。fs 读写
+/// 没问题，但 **cmd.exe 不认识 `\\?\`**：拿它执行 `.cmd` 会立刻报
+/// 「系统找不到指定的路径」，node 根本不启动，表现为后台握手 15s 超时。
+fn without_verbatim_prefix(p: &Path) -> PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    p.to_path_buf()
+}
+
 /// 读取插件开发目录的源路径（无开发标记时返回 None）
 fn dev_source_of(dir: &Path) -> Option<PathBuf> {
     let text = std::fs::read_to_string(dir.join(".dev-source")).ok()?;
@@ -559,8 +591,36 @@ fn dev_source_of(dir: &Path) -> Option<PathBuf> {
         .lines()
         .map(|l| l.trim())
         .find(|l| !l.is_empty() && !l.starts_with('#'))?;
-    let p = PathBuf::from(line);
+    let p = without_verbatim_prefix(&PathBuf::from(line));
     p.is_dir().then_some(p)
+}
+
+/// `dev_source_of` 的可诊断版本，把「有开发标记、但源目录已失效」单独区分出来：
+///   - `Ok(None)`：没有开发标记 → 用安装目录（正常安装的插件）；
+///   - `Ok(Some(p))`：开发标记有效 → 用源目录；
+///   - `Err(路径)`：标记指向的目录已不存在（源目录被改名 / 移动 / 删除）。
+///
+/// 为什么要区分：失效时若静默回退到安装目录，而开发挂载的安装目录里**只有**
+/// `.dev-source` 一个文件，`resolve_plugin_file` 会报一句没头没脑的
+/// 「文件不存在: backend/run.cmd」——既不提开发挂载，也不提真正该看的那条路径，
+/// 现场极难定位（真实踩到过）。
+fn dev_source_checked(dir: &Path) -> Result<Option<PathBuf>, String> {
+    let Ok(text) = std::fs::read_to_string(dir.join(".dev-source")) else {
+        return Ok(None);
+    };
+    let Some(line) = text
+        .lines()
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty() && !l.starts_with('#'))
+    else {
+        return Ok(None);
+    };
+    let p = without_verbatim_prefix(&PathBuf::from(line));
+    if p.is_dir() {
+        Ok(Some(p))
+    } else {
+        Err(p.to_string_lossy().to_string())
+    }
 }
 
 /// 解析插件内文件的真实路径（开发模式下指向源目录）
@@ -569,10 +629,18 @@ fn resolve_plugin_file(app: &AppHandle, plugin_id: &str, rel: &str) -> Result<Pa
         return Err(err(format!("非法路径: {rel}")));
     }
     let dir = plugin_dir(app, plugin_id)?;
-    let base = dev_source_of(&dir).unwrap_or(dir);
+    let base = match dev_source_checked(&dir) {
+        Ok(Some(src)) => src,
+        Ok(None) => dir,
+        Err(stale) => {
+            return Err(err(format!(
+                "开发目录已失效（.dev-source 指向的目录不存在，请重新挂载）: {stale}"
+            )));
+        }
+    };
     let full = base.join(rel.replace('\\', "/"));
     if !full.is_file() {
-        return Err(err(format!("文件不存在: {rel}")));
+        return Err(err(format!("文件不存在: {rel}（查找于 {}）", full.display())));
     }
     Ok(full)
 }
@@ -648,8 +716,8 @@ pub fn plugin_read_local_base64(path: String) -> Result<String, String> {
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
         .unwrap_or_default();
-    if ext != "msplugin" && ext != "zip" {
-        return Err(err("只支持读取 .msplugin / .zip 文件"));
+    if ext != "mspp" && ext != "zip" {
+        return Err(err("只支持读取 .mspp / .zip 文件"));
     }
     let meta = std::fs::metadata(&p).map_err(|e| err(format!("读取失败: {e}")))?;
     if meta.len() > MAX_FILE_BYTES {
@@ -665,7 +733,7 @@ pub fn plugin_read_local_base64(path: String) -> Result<String, String> {
 /// 读取插件开发目录的 plugin.json（开发安装用；路径由用户在系统对话框里选定）
 ///
 /// 安全：只读取选定目录下的 plugin.json 一个文件，不做递归读取，
-/// 且拒绝 .zip/.msplugin 以外的任意路径枚举。
+/// 且拒绝 .zip/.mspp 以外的任意路径枚举。
 #[tauri::command]
 pub fn plugin_read_dev_manifest(dir: String) -> Result<String, String> {
     let p = PathBuf::from(&dir);
@@ -848,6 +916,10 @@ struct BackendHandle {
     state: Arc<Mutex<BackendState>>,
     /// 待响应的 JSON-RPC 请求
     pending: Arc<Mutex<HashMap<u64, Sender<Result<Value, String>>>>>,
+    /// 进程最近一次「有产出（响应或通知）」的时刻。
+    /// `request()` 用它做心跳：只要后端持续输出，就不触发 callTimeoutMs，
+    /// 否则像 `chat` 这样的长耗时流式调用会被误杀（实际只在「完全静默」时超时）。
+    last_activity: Arc<Mutex<Instant>>,
 }
 
 // 安全性：
@@ -877,6 +949,48 @@ pub struct BackendState {
 
 static BACKENDS: LazyLock<Mutex<HashMap<String, Arc<BackendHandle>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// 正在启动中的插件 id（并发保护，见 `SpawnSlot`）。
+static SPAWNING: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// 启动占位：把「查活性 → 起子进程 → 入 `BACKENDS` 表」串行化。
+///
+/// 为什么需要：这段流程不是原子的。自启动改到后台线程执行后，它可能与前端触发的
+/// 按需启动 / 网关同步并发（例如 app 刚启动、前端 `reload` 恰好也判定该拉起），
+/// 两个线程都通过活性检查就会各起一个子进程——其中一个失去引用变成孤儿，宿主
+/// 运行期间再也管不到它（只有宿主退出时随 Job Object 一起被杀）。
+///
+/// Drop 时释放，保证任何返回路径（含 `?` 提前返回）都会摘掉标记。
+/// 锁按「中毒即取回」处理（与全仓 `unwrap_or_else(|p| p.into_inner())` 一致）：
+/// 真在持锁时 panic 也只是丢掉一次占位，不该让后续所有启动永久失败。
+struct SpawnSlot {
+    plugin_id: String,
+}
+
+impl SpawnSlot {
+    /// 尝试占位；返回 `None` 表示已有线程正在启动该插件。
+    fn acquire(plugin_id: &str) -> Option<Self> {
+        let mut set = SPAWNING
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !set.insert(plugin_id.to_string()) {
+            return None;
+        }
+        Some(Self {
+            plugin_id: plugin_id.to_string(),
+        })
+    }
+}
+
+impl Drop for SpawnSlot {
+    fn drop(&mut self) {
+        let mut set = SPAWNING
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        set.remove(&self.plugin_id);
+    }
+}
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -949,6 +1063,34 @@ fn spawn_backend(app: &AppHandle, plugin_id: &str) -> Result<BackendState, Strin
     if backend_is_alive(plugin_id) {
         return Ok(backend_state(plugin_id));
     }
+    // 并发保护：串行化同一插件的「查活性 → 起子进程 → 入表」。
+    // 抢不到槽 = 另一个线程正在启动它，等它出结果（成功则已入表、失败则已释放槽）
+    // 再复检，避免两个线程各起一个进程、其中一个变成孤儿。
+    let wait_budget = gateway_get(plugin_id)
+        .map(|s| s.startup_timeout_ms.max(200))
+        .unwrap_or(3000)
+        + 5000;
+    let deadline = Instant::now() + Duration::from_millis(wait_budget);
+    let _slot = loop {
+        match SpawnSlot::acquire(plugin_id) {
+            Some(slot) => {
+                // 抢到槽后必须复检：上一个占位者可能刚好成功入表并释放了槽
+                if backend_is_alive(plugin_id) {
+                    return Ok(backend_state(plugin_id));
+                }
+                break slot;
+            }
+            None => {
+                if backend_is_alive(plugin_id) {
+                    return Ok(backend_state(plugin_id));
+                }
+                if Instant::now() >= deadline {
+                    return Err(err("插件正在启动中，请稍候重试"));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    };
     // 网关未同步时尝试从磁盘快照加回
     let spec = match gateway_get(plugin_id) {
         Some(s) => s,
@@ -974,7 +1116,8 @@ fn spawn_backend(app: &AppHandle, plugin_id: &str) -> Result<BackendState, Strin
     if protocol != "jsonrpc-stdio" {
         return Err(err(format!("暂不支持的进程协议: {protocol}")));
     }
-    let exe = resolve_plugin_file(app, plugin_id, &entry)?;
+    // cmd.exe 执行 .cmd 不认 \\?\ 前缀（开发挂载的源目录是 canonicalize 出来的）
+    let exe = without_verbatim_prefix(&resolve_plugin_file(app, plugin_id, &entry)?);
     let cwd = plugin_dir(app, plugin_id)?;
     let data_dir = plugin_data_dir(app, plugin_id)?;
 
@@ -982,8 +1125,15 @@ fn spawn_backend(app: &AppHandle, plugin_id: &str) -> Result<BackendState, Strin
     cmd.current_dir(&cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env("MS_PLUGIN_PROTOCOL", "1")
+        .stderr(Stdio::piped());
+    // 宿主集中维护的环境变量（设置 → 环境变量）：前端已按「用户逐项授权」筛过，
+    // 这里只负责注入。**必须在 MS_PLUGIN_* 之前**——Rust 的 Command 是「后写覆盖
+    // 先写」，这样即便用户的变量名恰好叫 MS_PLUGIN_ID，也顶不掉宿主的身份变量
+    // （与「插件改不了身份」的既有约定一致）。
+    for (key, value) in &spec.env {
+        cmd.env(key, value);
+    }
+    cmd.env("MS_PLUGIN_PROTOCOL", "1")
         .env("MS_PLUGIN_ID", plugin_id)
         .env("MS_PLUGIN_DATA_DIR", data_dir.to_string_lossy().to_string())
         .env("MS_PLUGIN_HOST_VERSION", env!("CARGO_PKG_VERSION"));
@@ -1043,39 +1193,60 @@ fn spawn_backend(app: &AppHandle, plugin_id: &str) -> Result<BackendState, Strin
             stop_requested: false,
         })),
         pending: Arc::new(Mutex::new(HashMap::new())),
+        last_activity: Arc::new(Mutex::new(Instant::now())),
     });
 
     if let Ok(mut map) = BACKENDS.lock() {
         map.insert(plugin_id.to_string(), handle.clone());
     }
 
-    // stdout 读取线程：既写日志，也解析 JSON-RPC 响应
+    // stdout 读取线程：既写日志，也解析 JSON-RPC 响应。
+    // 用 read_until + 有损解码而不是 lines()：cmd.exe 在中文 Windows 输出的是 GBK，
+    // 一行非法 UTF-8 会让 lines() 返回 Err 并静默结束整个线程——故障时日志里
+    // 什么都没有（真实踩到过：.cmd 启动失败的报错因此完全不可见）。
     if let Some(out) = stdout {
         let app2 = app.clone();
         let pid2 = plugin_id.to_string();
         let h = handle.clone();
         std::thread::spawn(move || {
-            let reader = BufReader::new(out);
-            for line in reader.lines() {
-                let Ok(line) = line else { break };
+            let mut reader = BufReader::new(out);
+            let mut buf: Vec<u8> = Vec::new();
+            loop {
+                buf.clear();
+                match reader.read_until(b'\n', &mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                let line = String::from_utf8_lossy(&buf);
+                let line = line.trim_end_matches(|c| c == '\r' || c == '\n');
                 if line.trim().is_empty() {
                     continue;
                 }
-                if handle_rpc_line(&line, &h, &app2, &pid2) {
+                if handle_rpc_line(line, &h, &app2, &pid2) {
                     continue;
                 }
                 append_log(&app2, &pid2, &format!("stdout: {line}"));
             }
         });
     }
-    // stderr 读取线程：只写日志
+    // stderr 读取线程：只写日志（同样有损读取，理由见上）
     if let Some(err_out) = stderr {
         let app2 = app.clone();
         let pid2 = plugin_id.to_string();
         std::thread::spawn(move || {
-            let reader = BufReader::new(err_out);
-            for line in reader.lines() {
-                let Ok(line) = line else { break };
+            let mut reader = BufReader::new(err_out);
+            let mut buf: Vec<u8> = Vec::new();
+            loop {
+                buf.clear();
+                match reader.read_until(b'\n', &mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                let line = String::from_utf8_lossy(&buf);
+                let line = line.trim_end_matches(|c| c == '\r' || c == '\n');
+                if line.is_empty() {
+                    continue;
+                }
                 append_log(&app2, &pid2, &format!("stderr: {line}"));
             }
         });
@@ -1273,6 +1444,11 @@ fn handle_rpc_line(
         Some(o) => o,
         None => return false,
     };
+    // 任何被成功解析的行（响应或通知）都刷新「最近活跃」时刻，
+    // 供 request() 做心跳，避免流式调用（chat:delta 等）被 callTimeoutMs 误杀。
+    if let Ok(mut a) = handle.last_activity.lock() {
+        *a = Instant::now();
+    }
     // 响应：带 id 且含 result/error
     if let Some(id) = obj.get("id").and_then(|v| v.as_u64()) {
         let result = if let Some(e) = obj.get("error") {
@@ -1363,20 +1539,36 @@ fn request(
             .and_then(|_| stdin.flush())
             .map_err(|e| err(format!("向插件进程写入失败: {e}")))?;
     }
-    match rx.recv_timeout(timeout) {
-        Ok(Ok(v)) => Ok(v),
-        Ok(Err(e)) => Err(err(format!("插件返回错误: {e}"))),
-        Err(_) => {
-            if let Ok(mut pending) = handle.pending.lock() {
-                pending.remove(&id);
-            }
-            let _ = app.emit(EVENT_BACKEND_CHANGED, backend_state(plugin_id));
-            Err(err(format!(
-                "插件调用超时（{}ms，方法 {method}）",
-                timeout.as_millis()
-            )))
-        }
+    let start = Instant::now();
+    // 心跳：超时以「最近一次产出」为基准——只要后端持续输出（含 chat:delta 等通知），
+    // 截止时刻就随之后延，不会误杀长耗时流式调用；只有「后端完全静默」满 timeout
+    // 才真正超时（即疑似卡死 / 崩溃）。用 max(start, last) 兜底，避免 last_activity
+    // 是上一次调用的旧值时出现「wait=0 忙等」空转。
+    let tick = Duration::from_millis(1000);
+    loop {
+      let last = handle.last_activity.lock().map(|a| *a).unwrap_or(start);
+      let deadline = start.max(last) + timeout;
+      let now = Instant::now();
+      if now >= deadline {
+        break;
+      }
+      let wait = (deadline - now).min(tick);
+      match rx.recv_timeout(wait) {
+        Ok(Ok(v)) => return Ok(v),
+        Ok(Err(e)) => return Err(err(format!("插件返回错误: {e}"))),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+        // 通道断开（进程已退出）：按超时处理，让调用方看到明确错误
+        Err(_) => break,
+      }
     }
+    if let Ok(mut pending) = handle.pending.lock() {
+        pending.remove(&id);
+    }
+    let _ = app.emit(EVENT_BACKEND_CHANGED, backend_state(plugin_id));
+    Err(err(format!(
+        "插件调用超时（{}ms，方法 {method}）",
+        timeout.as_millis()
+    )))
 }
 
 /// 停止后台进程（先发 deactivate 优雅退出，超时后连带进程树强杀）
@@ -1665,15 +1857,31 @@ pub fn shutdown_all(app: &AppHandle) {
 /// 只对「开机自启」的插件拉起后台进程（应用启动时调用一次）。
 ///
 /// 前置条件：网关镜像已由 `load_gateway_snapshot` 读回（否则表为空，什么也不会启动）。
+///
+/// **本函数必须立即返回、绝不阻塞调用线程**：它在 Tauri `setup` 里执行，而
+/// `setup` 返回前事件循环还不泵消息——此刻若同步 `spawn_backend`（子进程启动 +
+/// `init` 握手，上限 `startupTimeoutMs`，最长 30s），全局快捷键与托盘就全被挡住，
+/// 用户表现为「应用启动很慢、呼不出来」。因此这里只**同步**读快照（纯文件读，
+/// 必须在返回前完成，以确定「快照先于前端同步入表」的顺序），把真正耗时的
+/// spawn + 握手丢到后台线程。逐个插件的成败只记日志，互不影响。
 pub fn autostart_enabled_backends(app: &AppHandle) {
     load_gateway_snapshot(app);
-    for spec in gateway_all() {
-        if spec.enabled && spec.auto_start == "always" && spec.backend_entry.is_some() {
-            if let Err(e) = spawn_backend(app, &spec.plugin_id) {
-                eprintln!("[插件] {} 自启动失败: {e}", spec.plugin_id);
+    let ids: Vec<String> = gateway_all()
+        .into_iter()
+        .filter(|spec| spec.enabled && spec.auto_start == "always" && spec.backend_entry.is_some())
+        .map(|spec| spec.plugin_id)
+        .collect();
+    if ids.is_empty() {
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        for id in ids {
+            if let Err(e) = spawn_backend(&app, &id) {
+                eprintln!("[插件] {} 自启动失败: {e}", id);
             }
         }
-    }
+    });
 }
 
 /// 校验一个相对路径是否安全（供前端安装前预检）
@@ -1687,8 +1895,8 @@ pub fn plugin_check_path(rel_path: String) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        decide_sync_action, has_base_permission, is_safe_relative, scope_allows, validate_plugin_id,
-        GatewaySpec, SyncAction,
+        decide_sync_action, has_base_permission, is_safe_relative, scope_allows,
+        validate_plugin_id, without_verbatim_prefix, GatewaySpec, SyncAction,
     };
 
     fn spec_with(grants: &[&str]) -> GatewaySpec {
@@ -1710,6 +1918,29 @@ mod tests {
         assert!(validate_plugin_id("../evil").is_err());
         assert!(validate_plugin_id("com..a").is_err());
         assert!(validate_plugin_id("").is_err());
+    }
+
+    #[test]
+    fn verbatim_prefix_stripping() {
+        use std::path::Path;
+        // 关键回归：开发挂载的 .dev-source 是 canonicalize 写出来的 \\?\ 路径，
+        // 直接拿去跑 run.cmd 会让 cmd.exe 报「系统找不到指定的路径」、握手超时
+        assert_eq!(
+            without_verbatim_prefix(Path::new(r"\\?\D:\code\p\backend\run.cmd")),
+            Path::new(r"D:\code\p\backend\run.cmd")
+        );
+        assert_eq!(
+            without_verbatim_prefix(Path::new(r"\\?\UNC\server\share\x")),
+            Path::new(r"\\server\share\x")
+        );
+        assert_eq!(
+            without_verbatim_prefix(Path::new(r"D:\code\p")),
+            Path::new(r"D:\code\p")
+        );
+        assert_eq!(
+            without_verbatim_prefix(Path::new(r"relative\path")),
+            Path::new(r"relative\path")
+        );
     }
 
     #[test]
@@ -1763,6 +1994,44 @@ mod tests {
         let p = "net.fetch:https://api.x.com/v1/*";
         assert!(scope_allows(p, "https://api.x.com/v1/chat"));
         assert!(!scope_allows(p, "https://api.x.com/v2/chat"));
+    }
+
+    /// 环境变量经网关下发（前端 → GatewaySpec.env → spawn）。
+    ///
+    /// 契约：
+    ///   1. `env` 可缺省（老前端 / 无变量时不发这个字段）——`#[serde(default)]`；
+    ///   2. 反序列化后按变量名取到值；
+    ///   3. 序列化（快照落盘）后能与原值一一对应地读回。
+    #[test]
+    fn gateway_spec_env_round_trip() {
+        // 缺省：不带 env 字段也能解析（向后兼容旧前端）
+        let raw = r#"{"pluginId":"com.test.a","enabled":true,"autoStart":"on-demand"}"#;
+        let spec: GatewaySpec = serde_json::from_str(raw).expect("旧报文可解析");
+        assert!(spec.env.is_empty());
+
+        // 带 env：解析正确
+        let raw = r#"{
+            "pluginId":"com.test.a","enabled":true,"autoStart":"on-demand",
+            "env":{"ALPHA_API_KEY":"sk-1","PROXY_URL":"http://127.0.0.1:7890"}
+        }"#;
+        let spec: GatewaySpec = serde_json::from_str(raw).expect("含 env 的报文可解析");
+        assert_eq!(spec.env.get("ALPHA_API_KEY").map(String::as_str), Some("sk-1"));
+        assert_eq!(spec.env.len(), 2);
+
+        // 落盘快照往返（camelCase + 值不丢）
+        let json = serde_json::to_string(&spec).expect("可序列化");
+        assert!(json.contains("\"env\""), "序列化保留 env 字段: {json}");
+        let back: GatewaySpec = serde_json::from_str(&json).expect("可反序列化");
+        assert_eq!(back.env, spec.env);
+
+        // 值里含特殊字符也不能被破坏（JSON 转义往返）
+        let mut tricky = spec_with(&["backend.spawn"]);
+        tricky
+            .env
+            .insert("WEIRD".into(), "a\"b\\c\n$X=${Y}".into());
+        let j = serde_json::to_string(&tricky).expect("可序列化");
+        let b: GatewaySpec = serde_json::from_str(&j).expect("可反序列化");
+        assert_eq!(b.env.get("WEIRD").map(String::as_str), Some("a\"b\\c\n$X=${Y}"));
     }
 
     // ===== 网关同步 → 进程动作（回归：重复同步不得打断按需进程） =====

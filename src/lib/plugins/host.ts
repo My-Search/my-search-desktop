@@ -19,7 +19,14 @@ import type { SearchResult } from "../../types/index.ts";
 import { storageGet } from "../util.ts";
 import { openExternal } from "../tauri-bridge.ts";
 import { effectiveTheme, THEME_CHANGED_EVENT } from "../theme.ts";
-import { isKnownPermission, permissionBaseId } from "./permissions.ts";
+import {
+  groupPermissions,
+  isKnownPermission,
+  permissionBaseId,
+  type PermissionGroupBlock,
+} from "./permissions.ts";
+import { iconDataUrl, isInlineIconRef } from "./icon.ts";
+import type { PluginManifest } from "./manifest.ts";
 import type { PluginRecord, PluginRegistryFile } from "./registry.ts";
 import {
   findPlugin,
@@ -33,7 +40,14 @@ import {
   saveRegistry,
 } from "./registry.ts";
 import { loadEnvVars } from "./env-store.ts";
-import { attachmentList, attachmentListCancel, attachmentOpen, attachmentRead, attachmentReveal } from "./ipc.ts";
+import {
+  attachmentFileIcons,
+  attachmentList,
+  attachmentListCancel,
+  attachmentOpen,
+  attachmentRead,
+  attachmentReveal,
+} from "./ipc.ts";
 import type { AttachedEntry } from "./attachments.ts";
 
 /** 权限不足（插件视图宿主据此弹授权，而不是当异常吞掉） */
@@ -78,6 +92,16 @@ export interface PluginHostContext {
   getSelectedText: (hint?: string) => Promise<string>;
   /** 打开插件独立窗口（M3 提供，未实现时抛错） */
   openPluginWindow?: (pluginId: string, entry: string, title: string) => void;
+  /**
+   * 安装前的用户确认（`ms.market.install` / `update` 的必经闸门）。
+   *
+   * 由窗口层注入：弹窗是宿主 UI（PluginInstallDialog.vue），插件运行时不该知道它的
+   * 存在。返回 `true` = 用户确认安装，`false` = 用户取消。
+   *
+   * **未注入时市场安装一律拒绝**（fail-closed）：宁可报错也不静默把插件装进用户
+   * 机器——「装插件」是对用户系统影响最大的动作，不能有绕过确认的路径。
+   */
+  confirmPluginInstall?: (req: PluginInstallConfirmRequest) => Promise<boolean>;
   /** 面板里请求授权（由面板注入；详情视图内为 null 时走内联弹窗） */
   requestPermission?: (pluginId: string, permission: string) => Promise<boolean>;
   /** 当前附加在搜索框里的文件/文件夹（ms.input.attachments 的数据源） */
@@ -91,6 +115,219 @@ export interface PluginHostContext {
    * theme-override.ts）。未注入时两个 API 退化为空操作。
    */
   refreshPluginTheme?: () => void;
+
+  // ===== 截图（新增）=====
+  /** 整屏抓屏 → { dataUrl, width, height }（mask 之前调用） */
+  screenshotCapture?: () => Promise<ScreenshotCaptureResult>;
+  /** 打开全屏框选遮罩（每显示器一个透明窗口），返回窗口数 */
+  screenshotOpenOverlay?: () => Promise<number>;
+  /** 关闭遮罩 */
+  screenshotCloseOverlay?: () => Promise<void>;
+  /** 取某屏的抓屏底图（data URL） */
+  screenshotOverlayImage?: (monitorIndex: number) => Promise<ScreenshotOverlayImageResult>;
+  /** 在遮罩里框选某屏一块 → 裁出 PNG data URL */
+  screenshotCrop?: (
+    monitorIndex: number,
+    x: number,
+    y: number,
+    width: number,
+    height: number
+  ) => Promise<ScreenshotCropResult>;
+  /** 在屏幕上直接框选一个矩形（开遮罩→拖选→关遮罩一次完成），Esc 取消返回 null */
+  screenshotPickRegion?: () => Promise<ScreenshotPickResult | null>;
+  /** 把 PNG data URL 写进系统剪贴板 */
+  screenshotCopyImage?: (dataUrl: string) => Promise<void>;
+  /** 把 PNG 落盘到插件私有目录，返回索引记录 */
+  screenshotSaveShot?: (pluginId: string, dataUrl: string) => Promise<ScreenshotShotEntry>;
+  /**
+   * 弹系统「另存为」对话框，把 PNG 存到用户选定的位置。
+   * 用户取消 → null（不是错误）；保存成功 → 落盘的绝对路径。
+   */
+  screenshotSaveShotAs?: (
+    pluginId: string,
+    dataUrl: string,
+    parentDir?: string
+  ) => Promise<string | null>;
+  /** 插件截图目录的绝对路径（另存为对话框的起始目录） */
+  screenshotShotsDir?: (pluginId: string) => Promise<string>;
+  /** 广播「新截图已保存」事件，打开中的插件画廊据此刷新 */
+  screenshotNotifySaved?: (pluginId?: string, relPath?: string) => Promise<void>;
+  /** 列出插件私有目录的截图（时间从新到旧） */
+  screenshotListShots?: (pluginId: string) => Promise<ScreenshotShotEntry[]>;
+  /** 读回一张截图 → data URL */
+  screenshotReadShot?: (pluginId: string, relPath: string) => Promise<string>;
+  /** 删除一张截图 */
+  screenshotDeleteShot?: (pluginId: string, relPath: string) => Promise<void>;
+  /** 删除早于 N 天的截图，返回删掉的张数 */
+  screenshotPruneShots?: (pluginId: string, days: number) => Promise<number>;
+  /** 读「截图」动作当前绑的全局快捷键（权威在宿主的 shortcut_bindings） */
+  screenshotGetShortcut?: () => Promise<string>;
+  /** 给「截图」动作改绑全局快捷键（空串 = 解绑），返回实际生效的键 */
+  screenshotSetShortcut?: (shortcut: string) => Promise<string>;
+
+  // ===== 剪贴板历史（新增）=====
+  /** 列出剪贴板历史（从新到旧）；query 非空时交 Rust 先做文本粗筛 */
+  clipboardHistoryList?: (query?: string) => Promise<ClipboardItem[]>;
+  /** 分页拉取剪贴板历史（过滤在分页前完成，返回总数与是否还有更多） */
+  clipboardHistoryPage?: (opts: {
+    query?: string;
+    favoriteOnly?: boolean;
+    offset?: number;
+    limit?: number;
+  }) => Promise<ClipboardPage>;
+  /** 读回一张剪贴板图片 → data URL */
+  clipboardHistoryReadImage?: (relPath: string) => Promise<string>;
+  /** 删除一条剪贴板历史 */
+  clipboardHistoryDelete?: (id: string) => Promise<void>;
+  /** 清空剪贴板历史（keepFavorites=true 时保留收藏条目） */
+  clipboardHistoryClear?: (keepFavorites?: boolean) => Promise<void>;
+  /** 把某条历史复制回系统剪贴板（用户显式触发） */
+  clipboardHistoryCopy?: (id: string) => Promise<void>;
+  /** 收藏 / 取消收藏一条剪贴板历史 */
+  clipboardHistorySetFavorite?: (id: string, favorite: boolean) => Promise<void>;
+  /** 读「剪贴板历史」动作当前绑的全局快捷键（空串 = 未绑） */
+  clipboardHistoryGetShortcut?: () => Promise<string>;
+  /** 给「剪贴板历史」动作改绑全局快捷键（空串 = 解绑），返回实际生效的键 */
+  clipboardHistorySetShortcut?: (shortcut: string) => Promise<string>;
+
+  // ===== 数据同步（新增）=====
+  /**
+   * 发起一次数据同步（等价设置面板的「立即同步」），返回本轮结束后的状态。
+   *
+   * 由搜索窗注入（那里常驻着同步引擎；设置窗口不在时不至于无人能同步）。
+   * **不做**「插件只能同步自己那块数据」的裁剪：同步走的是用户配置的云端备份，
+   * 其单位就是「整份状态」，半份快照会污染用户的历史备份——这一点在权限描述里
+   * 已向用户讲明（安装弹窗还会额外提醒）。
+   */
+  syncNow?: () => Promise<PluginSyncState>;
+  /** 读同步状态（不触发同步；插件据此做进度/错误展示） */
+  syncStatus?: () => PluginSyncState;
+}
+
+/**
+ * 一次「安装确认」请求（市场安装/更新用）。
+ *
+ * 与 `install.ts` 的 `PreparedInstall` 相比，这里刻意只带**展示所需**的字段：
+ * 待装文件（`files`）留在宿主侧，弹窗确认后由宿主自己落盘，插件拿不到也改不了
+ * 即将写入磁盘的内容。
+ */
+export interface PluginInstallConfirmRequest {
+  /** 待安装插件的清单（弹窗据此展示名称/版本/作者/描述） */
+  manifest: PluginManifest;
+  /** 可直接用于 `<img src>` 的图标（null = 无图标，弹窗显示占位） */
+  iconUrl: string | null;
+  /** 权限分组（弹窗渲染「请求权限」列表） */
+  permBlocks: PermissionGroupBlock[];
+  /** 清单校验警告（非致命，弹窗展示） */
+  warnings: string[];
+  /** 已安装版本（null = 未装过；弹窗按钮据此显示 安装/重新安装/升级） */
+  installedVersion: string | null;
+  /** 安装来源（市场卡片上点的是「安装」还是「更新」；仅用于文案） */
+  action: "install" | "update";
+}
+
+/**
+ * 暴露给插件的同步状态（`ms.sync.status()` / `ms.sync.trigger()` 的返回）。
+ *
+ * 刻意**不含** WebDAV 地址 / 用户名 / 是否已存密码：插件只需要知道「有没有开、
+ * 现在在干嘛、上次啥时候、失败原因」，给它账号信息属于无谓的扩大暴露面。
+ */
+export interface PluginSyncState {
+  /** 用户是否开启了云端同步（未开启时 trigger 会抛错） */
+  enabled: boolean;
+  status: "idle" | "syncing" | "uploading" | "downloading" | "error";
+  lastSyncAt: number;
+  lastError: string;
+}
+
+/** 截图抓屏结果 */
+export interface ScreenshotCaptureResult {
+  dataUrl: string;
+  originX: number;
+  originY: number;
+  width: number;
+  height: number;
+}
+
+/** 遮罩底图（某屏） */
+export interface ScreenshotOverlayImageResult {
+  dataUrl: string;
+  width: number;
+  height: number;
+  monitor: ScreenshotMonitor;
+  monitorCount: number;
+  originX: number;
+  originY: number;
+}
+
+export interface ScreenshotMonitor {
+  index: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  scaleFactor: number;
+  isPrimary: boolean;
+}
+
+/** 框选结果 */
+export interface ScreenshotCropResult {
+  dataUrl: string;
+  width: number;
+  height: number;
+  screenX: number;
+  screenY: number;
+}
+
+/** 「屏幕上直接框选」得到的矩形（虚拟桌面物理像素，与录屏采集坐标同口径） */
+export interface ScreenshotPickResult {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** 一条截图索引记录 */
+export interface ScreenshotShotEntry {
+  relPath: string;
+  name: string;
+  size: number;
+  mtimeMs: number;
+  createdAt: string;
+}
+
+/** 一条剪贴板历史（`ms.clipboard.list()` 的返回项） */
+export interface ClipboardItem {
+  /** 稳定 id（复制/删除时用） */
+  id: string;
+  /** "text" | "image" */
+  kind: string;
+  /** 文本内容（kind=text） */
+  text?: string;
+  /** 图片相对路径（kind=image，形如 "clipboard/xxx.png"） */
+  relPath?: string;
+  /** 图片宽（kind=image） */
+  width?: number;
+  /** 图片高（kind=image） */
+  height?: number;
+  /** 字节数 */
+  size: number;
+  /** 记录时间（毫秒时间戳） */
+  createdAt: number;
+  /** 来源描述（如「文件：a.txt」） */
+  source?: string;
+  /** 是否已收藏（收藏条目永久保留，不参与上限淘汰与默认清空） */
+  favorite?: boolean;
+}
+
+/** 一页剪贴板历史（`ms.clipboard.page()` 的返回项） */
+export interface ClipboardPage {
+  /** 本页条目（从新到旧） */
+  items: ClipboardItem[];
+  /** 当前过滤条件下的总条数（不受分页影响） */
+  total: number;
+  /** 是否还有下一页 */
+  hasMore: boolean;
 }
 
 /** 一次调用的审计记录（环形缓冲，面板「权限与调用记录」页签展示） */
@@ -185,6 +422,105 @@ function clearNotificationHandlers(pluginId: string): void {
 }
 
 /* ============================================================
+ * 「截图已保存」事件监听管理器（模块级，跨 API 实例共享）
+ *
+ * 宿主遮罩保存截图后广播 `my-search://screenshot-saved`。与后端通知同构：
+ * 全局 listen 一次，按 payload.pluginId 分发给订阅了 onSaved 的插件。
+ * 未订阅时事件自然丢弃——画廊下次打开用 list() 兜底补齐。
+ * ============================================================ */
+
+/** 已保存事件监听器：pluginId → Set<handler> */
+const screenshotSavedHandlers = new Map<string, Set<(payload: { pluginId?: string; relPath?: string }) => void>>();
+let screenshotSavedListener: (() => void) | null = null;
+
+function ensureScreenshotSavedListener(): void {
+  if (screenshotSavedListener) return;
+  import("@tauri-apps/api/event").then(({ listen }) => {
+    listen<{ pluginId?: string; relPath?: string }>(
+      "my-search://screenshot-saved",
+      (event) => {
+        const payload = event.payload ?? {};
+        // 带 pluginId 的事件只发给对应插件；无 pluginId（宿主自己触发）发给所有订阅者
+        for (const [pid, handlers] of screenshotSavedHandlers) {
+          if (payload.pluginId && payload.pluginId !== pid) continue;
+          for (const h of handlers) {
+            try { h(payload); } catch (e) { console.warn(`[插件 ${pid}] 截图已保存处理器异常:`, e); }
+          }
+        }
+      },
+    ).then((unlisten) => {
+      screenshotSavedListener = unlisten;
+    }).catch((e) => {
+      console.warn(`[插件] 注册截图已保存监听失败:`, e);
+    });
+  });
+}
+
+/** 为某插件注册「截图已保存」监听，返回取消函数。 */
+function addScreenshotSavedListener(
+  pluginId: string,
+  handler: (payload: { pluginId?: string; relPath?: string }) => void,
+): () => void {
+  if (typeof handler !== "function") return () => {};
+  ensureScreenshotSavedListener();
+  let handlers = screenshotSavedHandlers.get(pluginId);
+  if (!handlers) {
+    handlers = new Set();
+    screenshotSavedHandlers.set(pluginId, handlers);
+  }
+  handlers.add(handler);
+  return () => {
+    if (handlers) handlers.delete(handler);
+    if (handlers?.size === 0) screenshotSavedHandlers.delete(pluginId);
+  };
+}
+
+/* ============================================================
+ * 「剪贴板有更新」事件监听管理器（模块级，跨 API 实例共享）
+ *
+ * 宿主原生监听剪贴板变更后广播 `my-search://clipboard-updated`（无 payload）。
+ * 与截图已保存同构：全局 listen 一次，分发给订阅了 onUpdated 的插件实例。
+ * 未订阅时事件自然丢弃——视图下次打开用 list() 兜底补齐。
+ * ============================================================ */
+
+/** 剪贴板更新监听器：pluginId → Set<handler> */
+const clipboardUpdatedHandlers = new Map<string, Set<() => void>>();
+let clipboardUpdatedListener: (() => void) | null = null;
+
+function ensureClipboardUpdatedListener(): void {
+  if (clipboardUpdatedListener) return;
+  import("@tauri-apps/api/event").then(({ listen }) => {
+    listen("my-search://clipboard-updated", () => {
+      for (const [pid, handlers] of clipboardUpdatedHandlers) {
+        for (const h of handlers) {
+          try { h(); } catch (e) { console.warn(`[插件 ${pid}] 剪贴板更新处理器异常:`, e); }
+        }
+      }
+    }).then((unlisten) => {
+      clipboardUpdatedListener = unlisten;
+    }).catch((e) => {
+      console.warn(`[插件] 注册剪贴板更新监听失败:`, e);
+    });
+  });
+}
+
+/** 为某插件注册「剪贴板有更新」监听，返回取消函数。 */
+function addClipboardUpdatedListener(pluginId: string, handler: () => void): () => void {
+  if (typeof handler !== "function") return () => {};
+  ensureClipboardUpdatedListener();
+  let handlers = clipboardUpdatedHandlers.get(pluginId);
+  if (!handlers) {
+    handlers = new Set();
+    clipboardUpdatedHandlers.set(pluginId, handlers);
+  }
+  handlers.add(handler);
+  return () => {
+    if (handlers) handlers.delete(handler);
+    if (handlers?.size === 0) clipboardUpdatedHandlers.delete(pluginId);
+  };
+}
+
+/* ============================================================
  * 主题变更监听管理器（模块级，跨 API 实例共享）
  *
  * 通知源只有一个 DOM 事件（THEME_CHANGED_EVENT，由 theme.ts 的 applyTheme
@@ -276,6 +612,11 @@ export function readPluginThemeProvider(
 /** 清理某插件的主题 provider（视图卸载时调用） */
 function clearThemeProvider(pluginId: string): void {
   themeProviders.delete(pluginId);
+}
+
+/** 未注入同步能力时的兜底状态（浏览器调试 / 未启用同步：一律「关」） */
+function offlineSyncState(): PluginSyncState {
+  return { enabled: false, status: "idle", lastSyncAt: 0, lastError: "" };
 }
 
 /**
@@ -499,6 +840,49 @@ export function createHostApi(pluginId: string, ctx: PluginHostContext): Record<
             return true;
           },
         }),
+      /**
+       * 弹系统「选择文件夹」对话框，返回用户选中的**绝对路径**；
+       * 用户取消返回 `null`（取消不是错误）。
+       *
+       * 挂在 `ui.inlay` 权限下：这是纯界面行为——只把用户**主动挑选**的一个
+       * 路径交回插件，并不授予插件访问该路径的读取能力（插件要读它仍需
+       * `file.read` 且走附加集合校验）。因此不新增权限项、不加重安装负担。
+       *
+       * 典型的「添加项目」用法：用户不想手敲路径，点按钮选一个文件夹，
+       * 拿到路径后交给插件自己的后端去登记。
+       */
+      pickFolder: (opts?: { title?: string; defaultPath?: string }) =>
+        call({
+          api: "ui.pickFolder",
+          permission: "ui.inlay",
+          run: async (): Promise<string | null> => {
+            const { isTauri } = await import("../tauri-bridge.ts");
+            // 浏览器调试环境没有系统对话框：返回 null（等同取消），
+            // 不抛错——插件据此保持「手动输入」这条退路即可。
+            if (!isTauri) return null;
+            try {
+              const pkg: any = await import("@tauri-apps/plugin-dialog");
+              const picked = await pkg.open({
+                directory: true,
+                multiple: false,
+                title: String(opts?.title ?? "选择文件夹"),
+                defaultPath:
+                  typeof opts?.defaultPath === "string" && opts.defaultPath.trim() !== ""
+                    ? opts.defaultPath
+                    : undefined,
+              });
+              // 不同版本可能回字符串或 { path }；统一收敛成绝对路径字符串。
+              if (typeof picked === "string") return picked;
+              if (picked && typeof picked === "object" && typeof (picked as any).path === "string") {
+                return (picked as any).path;
+              }
+              return null;
+            } catch (e) {
+              console.warn(`[插件 ${pluginId}] 打开文件夹选择对话框失败:`, e);
+              throw new Error("文件夹选择对话框不可用");
+            }
+          },
+        }),
 
       /**
        * 当前生效主题（"light"/"dark"；「跟随系统」时返回按系统偏好解析后的结果）。
@@ -667,6 +1051,37 @@ export function createHostApi(pluginId: string, ctx: PluginHostContext): Record<
             return true;
           },
         }),
+      /**
+       * 批量取**系统文件图标**（资源管理器同款：.docx 显示 Word 图标、
+       * .pdf 显示 PDF 图标…），返回 `path → PNG data URL`。
+       *
+       * 与 `listFolder` 同权限（`file.read`），Rust 侧还会做「网关 grants +
+       * 附加集合」双重校验——传入集合外的路径会整批报错（调用方需自行过滤，
+       * 本 API 只服务已附加文件夹里的条目）。
+       *
+       * 语义提醒：取值失败/取不到的条目**不会出现在返回的 Map 里**（调用方
+       * 用 `map.get(path)` 拿到 undefined/空串时退回内置图标），不会抛错——
+       * 只有「权限/集合校验」这类调用级错误才抛。
+       */
+      fileIcons: (entries: { path: string; isDir?: boolean }[]) =>
+        call({
+          api: "input.fileIcons",
+          permission: "file.read",
+          detail: `${Array.isArray(entries) ? entries.length : 0} 个路径`,
+          run: async () => {
+            const list = (Array.isArray(entries) ? entries : [])
+              .filter((e) => e && String(e.path ?? "").trim() !== "")
+              .map((e) => ({ path: String(e.path), isDir: !!e.isDir }));
+            if (list.length === 0) return {};
+            const map = await attachmentFileIcons(list, pluginId);
+            // Map 过不了插件与宿主之间的结构化克隆边界（new Function 直传
+            // 时虽然是同进程对象，但 API 契约要稳定、可序列化）——统一成
+            // 普通对象 `{ [path]: dataUrl }`。
+            const out: Record<string, string> = {};
+            for (const [k, v] of map) out[k] = v;
+            return out;
+          },
+        }),
     },
 
     /* ---------------- 存储 ---------------- */
@@ -746,6 +1161,41 @@ export function createHostApi(pluginId: string, ctx: PluginHostContext): Record<
         }),
     },
 
+    /* ---------------- 数据同步（gate: sync） ----------------
+     *
+     * 宿主原生只实现了一种数据源（WebDAV），但这里按「能力」而非「数据源」暴露：
+     * 以后接入第三方同步源时 API 与权限都不变，插件无需改清单、用户无需重新授权。
+     *
+     * 同步对象是**用户自己的云端备份**（整份可备份数据：设置、订阅、插件与插件
+     * 数据），因此它能读到的东西超出「这个插件自己的数据」——安装时已向用户
+     * 提醒过，权限描述里也写明了。
+     */
+    sync: {
+      /** 读同步状态（不触发；未配置同步时 enabled=false） */
+      status: () =>
+        call({
+          api: "sync.status",
+          permission: "sync",
+          run: (): PluginSyncState => ctx.syncStatus?.() ?? offlineSyncState(),
+        }),
+      /**
+       * 发起一次同步（按用户的冲突策略决定上传还是下载），返回结束后的状态。
+       *
+       * 语义提醒：这是**异步且可能较久**的动作（上传/下载整份备份），不要放在
+       * 界面主流程里阻塞用户；失败以返回值的 `status: "error"` + `lastError`
+       * 表达（而非抛错），只有「权限不足 / 未配置同步」才抛。
+       */
+      trigger: () =>
+        call({
+          api: "sync.trigger",
+          permission: "sync",
+          run: async (): Promise<PluginSyncState> => {
+            if (!ctx.syncNow) throw new Error("当前窗口不支持数据同步");
+            return await ctx.syncNow();
+          },
+        }),
+    },
+
     /* ---------------- 网络 ---------------- */
     net: {
       /**
@@ -771,7 +1221,7 @@ export function createHostApi(pluginId: string, ctx: PluginHostContext): Record<
     },
 
 /* ---------------- 插件市场（gate: plugin.install） ---------------- */
-    market: createMarketApi(pluginId, call),
+    market: createMarketApi(pluginId, call, ctx),
 
     /* ---------------- 系统 ---------------- */
     system: {
@@ -830,6 +1280,310 @@ export function createHostApi(pluginId: string, ctx: PluginHostContext): Record<
         }),
     },
 
+    /* ---------------- 截图（mask 均为新权限） ---------------- */
+    screenshot: {
+      /** 整屏抓屏 → PNG data URL（不含框选遮罩，纯截全屏） */
+      capture: () =>
+        call({
+          api: "screenshot.capture",
+          permission: "screenshot.capture",
+          run: () =>
+            ctx.screenshotCapture?.() ??
+            Promise.reject(new Error("当前版本不支持截图")),
+        }),
+      /** 打开全屏框选遮罩（抓屏 + 每显示器一个透明窗口），返回窗口数 */
+      openOverlay: () =>
+        call({
+          api: "screenshot.openOverlay",
+          permission: "screenshot.overlay",
+          run: () =>
+            ctx.screenshotOpenOverlay?.() ??
+            Promise.reject(new Error("当前版本不支持框选遮罩")),
+        }),
+      /** 关闭遮罩（用户取消时调用） */
+      closeOverlay: () =>
+        call({
+          api: "screenshot.closeOverlay",
+          permission: "screenshot.overlay",
+          run: () => ctx.screenshotCloseOverlay?.() ?? Promise.resolve(),
+        }),
+      /** 取某屏抓屏底图（data URL）——遮罩页铺满窗口用，插件一般不用直接调 */
+      overlayImage: (monitorIndex: number) =>
+        call({
+          api: "screenshot.overlayImage",
+          permission: "screenshot.overlay",
+          run: () =>
+            ctx.screenshotOverlayImage?.(Math.floor(Number(monitorIndex)) || 0) ??
+            Promise.reject(new Error("当前版本不支持框选遮罩")),
+        }),
+      /** 框选并裁出 PNG data URL（遮罩页内部用；插件调 openOverlay 即可） */
+      crop: (monitorIndex: number, x: number, y: number, width: number, height: number) =>
+        call({
+          api: "screenshot.crop",
+          permission: "screenshot.overlay",
+          run: () =>
+            ctx.screenshotCrop?.(
+              Math.floor(Number(monitorIndex)) || 0,
+              Number(x) || 0,
+              Number(y) || 0,
+              Number(width) || 0,
+              Number(height) || 0
+            ) ?? Promise.reject(new Error("当前版本不支持框选遮罩")),
+        }),
+      /**
+       * **在屏幕上直接框选**：一次调用完成「开遮罩 → 用户拖选 → 关遮罩」，
+       * 返回虚拟桌面**物理**像素矩形（与 gdigrab/ddagrab 的采集坐标同口径）；
+       * 用户按 Esc 取消返回 null。适合录屏选区这类「只要坐标不要图」的场景。
+       * 需要 `screenshot.overlay` 权限。
+       */
+      pickRegion: () =>
+        call({
+          api: "screenshot.pickRegion",
+          permission: "screenshot.overlay",
+          run: () =>
+            ctx.screenshotPickRegion?.() ??
+            Promise.reject(new Error("当前版本不支持屏幕框选")),
+        }),
+      /** 把 PNG data URL 写进系统剪贴板（不走 navigator.clipboard，能写真正的图片） */
+      copy: (dataUrl: string) =>
+        call({
+          api: "screenshot.copy",
+          permission: "clipboard.write",
+          run: () => ctx.screenshotCopyImage?.(String(dataUrl ?? "")),
+        }),
+      /** 把 PNG 落盘到插件私有目录，返回索引记录（含 relPath，供 read/list 用） */
+      save: (dataUrl: string) =>
+        call({
+          api: "screenshot.save",
+          permission: "screenshot.write",
+          detail: `${String(dataUrl ?? "").length} 字节`,
+          run: () =>
+            ctx.screenshotSaveShot?.(pluginId, String(dataUrl ?? "")) ??
+            Promise.reject(new Error("当前版本不支持保存截图")),
+        }),
+      /**
+       * 弹系统「另存为」对话框，把这张 PNG 存到**用户选定**的位置。
+       *
+       * 与 `save` 的区别：`save` 只能存进插件私有目录（用户找不到），
+       * 本 API 让用户自己挑目录和文件名——「导出到桌面」这类需求走它。
+       * 用户取消时 resolve(null)（取消不是错误，别当异常处理）。
+       */
+      saveAs: (dataUrl: string, parentDir?: string) =>
+        call({
+          api: "screenshot.saveAs",
+          permission: "screenshot.write",
+          detail: `${String(dataUrl ?? "").length} 字节`,
+          run: () =>
+            ctx.screenshotSaveShotAs?.(
+              pluginId,
+              String(dataUrl ?? ""),
+              parentDir ? String(parentDir) : undefined
+            ) ?? Promise.reject(new Error("当前版本不支持另存为")),
+        }),
+      /** 广播「新截图已保存」，打开中的插件画廊据此刷新 */
+      notifySaved: (relPath?: string) =>        call({
+          api: "screenshot.notifySaved",
+          permission: "screenshot.write",
+          run: () => ctx.screenshotNotifySaved?.(pluginId, relPath ? String(relPath) : undefined),
+        }),
+      /** 列出插件私有目录的截图（时间从新到旧） */
+      list: () =>
+        call({
+          api: "screenshot.list",
+          permission: "screenshot.read",
+          run: () => ctx.screenshotListShots?.(pluginId) ?? Promise.resolve([]),
+        }),
+      /** 读回一张截图 → data URL（画廊缩略图/大图） */
+      readShot: (relPath: string) =>
+        call({
+          api: "screenshot.readShot",
+          permission: "screenshot.read",
+          detail: String(relPath ?? "").slice(0, 300),
+          run: () =>
+            ctx.screenshotReadShot?.(pluginId, String(relPath ?? "")) ??
+            Promise.reject(new Error("当前版本不支持读取截图")),
+        }),
+      /** 删除一张截图 */
+      remove: (relPath: string) =>
+        call({
+          api: "screenshot.remove",
+          permission: "screenshot.read",
+          detail: String(relPath ?? "").slice(0, 300),
+          run: () => ctx.screenshotDeleteShot?.(pluginId, String(relPath ?? "")),
+        }),
+      /** 删除早于 N 天的截图，返回删掉的张数（画廊「只留最近 N 天」用） */
+      prune: (days: number) =>
+        call({
+          api: "screenshot.prune",
+          permission: "screenshot.write",
+          run: () => ctx.screenshotPruneShots?.(pluginId, Math.max(1, Math.floor(Number(days)) || 7)),
+        }),
+      /**
+       * 读当前「截图」全局快捷键（无绑定时返回默认 ctrl+alt+x）。
+       *
+       * 不申请额外权限：读的是**本动作**的键，不含其它动作的信息；
+       * 权威存储是宿主的 settings.json，插件不要自己存一份（会不一致）。
+       */
+      getShortcut: () =>
+        call({
+          api: "screenshot.getShortcut",
+          run: () => ctx.screenshotGetShortcut?.() ?? Promise.resolve(""),
+        }),
+      /**
+       * 改绑「截图」全局快捷键（插件前台的设置项）。传空串 = 解绑（关掉热键）。
+       * 冲突（该键已被其它动作占用）会抛错，文案可直接展示给用户。
+       */
+      setShortcut: (shortcut: string) =>
+        call({
+          api: "screenshot.setShortcut",
+          detail: String(shortcut ?? ""),
+          run: () =>
+            ctx.screenshotSetShortcut?.(String(shortcut ?? "")) ??
+            Promise.reject(new Error("当前版本不支持在插件内改快捷键")),
+        }),
+      /**
+       * 监听「新截图已保存」事件（宿主热键触发遮罩保存后广播）。
+       * 打开中的画廊用它在后台自动刷新；未打开时事件被丢弃，下次打开 list() 兜底。
+       * 返回取消订阅函数。
+       */
+      onSaved: (handler: (payload: { pluginId?: string; relPath?: string }) => void) => {
+        // 与 backend.onNotification 同一路由：全局 listen 一次，按 payload.pluginId 分发
+        const unsubscribe = addScreenshotSavedListener(pluginId, handler);
+        return unsubscribe;
+      },
+    },
+
+    /* ---------------- 剪贴板历史 ---------------- */
+    clipboard: {
+      /**
+       * 列出剪贴板历史（从新到旧）。
+       *
+       * `query` 非空时交给 Rust 先按文本做一次粗筛（图片用来源描述参与匹配），
+       * 前端仍可在此基础上再过滤。需要 `clipboard.read` 权限。
+       */
+      list: (query?: string) =>
+        call({
+          api: "clipboard.list",
+          permission: "clipboard.read",
+          detail: query ? String(query).slice(0, 100) : "",
+          run: () => ctx.clipboardHistoryList?.(query ? String(query) : undefined) ?? Promise.resolve([]),
+        }),
+      /**
+       * 分页拉取剪贴板历史（从新到旧）。
+       *
+       * 关键词与「仅收藏」过滤在 Rust 侧**分页之前**完成，返回的 `total` 是
+       * 过滤后总条数、`hasMore` 指示是否还有下一页——前端据此做「每页 30 条 +
+       * 触底加载更多」。需要 `clipboard.read` 权限。
+       */
+      page: (opts?: { query?: string; favoriteOnly?: boolean; offset?: number; limit?: number }) =>
+        call({
+          api: "clipboard.page",
+          permission: "clipboard.read",
+          detail: opts?.query ? String(opts.query).slice(0, 100) : "",
+          run: () =>
+            ctx.clipboardHistoryPage?.({
+              query: opts?.query,
+              favoriteOnly: opts?.favoriteOnly,
+              offset: opts?.offset,
+              limit: opts?.limit,
+            }) ?? Promise.resolve({ items: [], total: 0, hasMore: false }),
+        }),
+      /**
+       * 读回一张剪贴板图片 → data URL（列表缩略图 / 大图预览）。
+       * 需要 `clipboard.read` 权限。
+       */
+      readImage: (relPath: string) =>
+        call({
+          api: "clipboard.readImage",
+          permission: "clipboard.read",
+          detail: String(relPath ?? "").slice(0, 300),
+          run: () =>
+            ctx.clipboardHistoryReadImage?.(String(relPath ?? "")) ??
+            Promise.reject(new Error("当前版本不支持读取剪贴板图片")),
+        }),
+      /**
+       * 把某条历史复制回系统剪贴板。
+       *
+       * 这是**用户显式触发**的写入：宿主监听路径永远只读，只有点「复制」才会写。
+       * 需要 `clipboard.write` 权限。
+       */
+      copy: (id: string) =>
+        call({
+          api: "clipboard.copy",
+          permission: "clipboard.write",
+          detail: String(id ?? ""),
+          run: () =>
+            ctx.clipboardHistoryCopy?.(String(id ?? "")) ??
+            Promise.reject(new Error("当前版本不支持复制剪贴板历史")),
+        }),
+      /** 删除一条历史（图片连同磁盘文件一起删）。需要 `clipboard.read` 权限。 */
+      remove: (id: string) =>
+        call({
+          api: "clipboard.remove",
+          permission: "clipboard.read",
+          detail: String(id ?? ""),
+          run: () =>
+            ctx.clipboardHistoryDelete?.(String(id ?? "")) ??
+            Promise.reject(new Error("当前版本不支持删除剪贴板历史")),
+        }),
+      /**
+       * 清空剪贴板历史。
+       *
+       * 默认**保留收藏条目**（只清未收藏的）；传 `{ keepFavorites: false }`
+       * 则连同收藏一起清空——是否保留由插件按用户选择决定。
+       * 需要 `clipboard.read` 权限。
+       */
+      clear: (opts?: { keepFavorites?: boolean }) =>
+        call({
+          api: "clipboard.clear",
+          permission: "clipboard.read",
+          detail: opts?.keepFavorites === false ? "keepFavorites=false" : "",
+          run: () =>
+            ctx.clipboardHistoryClear?.(opts?.keepFavorites !== false) ??
+            Promise.reject(new Error("当前版本不支持清空剪贴板历史")),
+        }),
+      /**
+       * 收藏 / 取消收藏一条历史。
+       *
+       * 收藏条目永久保留：不参与历史上限淘汰，也不被默认「清空」删除。
+       * 这是**用户显式触发**的写入性操作，与复制同属修改类，需要
+       * `clipboard.write` 权限。
+       */
+      setFavorite: (id: string, favorite: boolean) =>
+        call({
+          api: "clipboard.setFavorite",
+          permission: "clipboard.write",
+          detail: String(id ?? ""),
+          run: () =>
+            ctx.clipboardHistorySetFavorite?.(String(id ?? ""), !!favorite) ??
+            Promise.reject(new Error("当前版本不支持收藏剪贴板历史")),
+        }),
+      /**
+       * 读当前「剪贴板历史」全局快捷键（空串 = 未绑）。
+       * 不申请额外权限：读的是本动作的键，权威在宿主 settings.json。
+       */
+      getShortcut: () =>
+        call({
+          api: "clipboard.getShortcut",
+          run: () => ctx.clipboardHistoryGetShortcut?.() ?? Promise.resolve(""),
+        }),
+      /** 改绑「剪贴板历史」全局快捷键（空串 = 解绑）。 */
+      setShortcut: (shortcut: string) =>
+        call({
+          api: "clipboard.setShortcut",
+          detail: String(shortcut ?? ""),
+          run: () =>
+            ctx.clipboardHistorySetShortcut?.(String(shortcut ?? "")) ??
+            Promise.reject(new Error("当前版本不支持在插件内改快捷键")),
+        }),
+      /**
+       * 监听「剪贴板有更新」事件（宿主原监听到剪贴板变更后广播）。
+       * 打开中的列表用它在后台自动刷新；未打开时事件被丢弃，下次打开 list() 兜底。
+       * 返回取消订阅函数。
+       */
+      onUpdated: (handler: () => void) => addClipboardUpdatedListener(pluginId, handler),
+    },
+
     /* ---------------- 后端 ---------------- */
     backend: {
       /** 调用后端方法（未运行时按需拉起） */
@@ -886,17 +1640,36 @@ function safeStringify(v: unknown): string {
 }
 
 /**
+ * 从预处理结果里取「可直接用于 `<img src>` 的图标」。
+ *
+ * 三种形态与 `icon.ts` 的说明一致：`data:` / `http(s):` 直用；插件目录内的相对
+ * 路径则从已解包的文件表里按 base64 拼 data URL（不额外读盘——文件已在内存里）。
+ * 取不到就返回 null，弹窗显示占位图标。
+ */
+function iconUrlOf(prepared: { manifest: PluginManifest; files: readonly { path: string; data: string }[] }): string | null {
+  const ref = prepared.manifest.icon;
+  if (!ref) return null;
+  if (isInlineIconRef(ref)) return ref;
+  const file = prepared.files.find((f) => f.path === ref);
+  return file ? iconDataUrl(ref, file.data) : null;
+}
+
+/**
  * 创建插件市场的宿主 API（`ms.market.*`，gate: plugin.install）。
  *
  * 与其它 API 不同：市场 API 不可能在创建时获得 `api` 引用（创建中），
  * 因此在这里单独提取成函数，避开循环引用问题。
  */
-function createMarketApi(pluginId: string, call: <T>(opts: {
-  api: string;
-  permission?: string;
-  detail?: string;
-  run: (record: any) => T | Promise<T>;
-}) => T | Promise<T>): Record<string, unknown> {
+function createMarketApi(
+  pluginId: string,
+  call: <T>(opts: {
+    api: string;
+    permission?: string;
+    detail?: string;
+    run: (record: any) => T | Promise<T>;
+  }) => T | Promise<T>,
+  ctx: PluginHostContext
+): Record<string, unknown> {
   function guarded<T>(name: string, run: () => T | Promise<T>): T | Promise<T> {
     return call({ api: `market.${name}`, permission: "plugin.install", run: () => run() });
   }
@@ -938,15 +1711,25 @@ function createMarketApi(pluginId: string, call: <T>(opts: {
       error: null as string | null,
     };
   });
-  self.install = (id: string) => guarded("install", async () => {
+  /**
+   * 市场安装 / 更新的公共实现（两者只差确认弹窗的文案与来源标记）。
+   *
+   * **必经用户确认**：下载并解包后、落盘前，交给宿主注入的 `confirmPluginInstall`
+   * 弹安装确认框；用户取消即返回 `{ ok:false, cancelled:true }`，磁盘与注册表都
+   * 不动。宿主未注入该能力时**直接拒绝**（fail-closed）——静默安装是对用户系统
+   * 影响最大的动作，不能有绕过确认的路径。
+   */
+  async function installOrUpdate(id: string, action: "install" | "update") {
+    if (!ctx.confirmPluginInstall) {
+      return { ok: false as const, error: "当前窗口不支持安装确认，已取消安装" };
+    }
     const { marketFetchRaw, installPluginPackage } = await import("./ipc.ts");
-    const { loadRegistry, saveRegistry, createPluginRecord, upsertPlugin } = await import("./registry.ts");
-    const { isKnownPermission } = await import("./permissions.ts");
+    const { loadRegistry, saveRegistry, createPluginRecord, upsertPlugin, findPlugin } = await import("./registry.ts");
     const { parseCatalog } = await import("./market-types.ts");
     const catalogRaw = await marketFetchRaw(pluginId, MARKET_CATALOG_URL, "");
     const parsed = parseCatalog(new TextDecoder("utf-8").decode(catalogRaw));
     const entry = parsed.ok ? parsed.catalog.plugins.find((e) => e.id === id) : null;
-    if (!entry) return { ok: false, error: `市场中未找到插件: ${id}` };
+    if (!entry) return { ok: false as const, error: `市场中未找到插件: ${id}` };
     // 下载地址以目录条目为准：插件包可能托管在开发者自己的仓库（见 sources.json
     // 准入名单），因此不能再按固定模板拼 URL。Rust 侧会按 host 白名单再判一次。
     const pkgUrl = entry.downloadUrl;
@@ -956,11 +1739,25 @@ function createMarketApi(pluginId: string, call: <T>(opts: {
       hostVersion: typeof __APP_VERSION__ !== "undefined" ? __APP_VERSION__ : null,
       checkPermissions: isKnownPermission,
     });
-    const allPerms = [...(prepared.manifest.permissions ?? []), ...(prepared.manifest.optionalPermissions ?? [])];
+
+    // 落盘前先问用户：展示清单、权限分组、校验警告与已装版本。
+    const mf = prepared.manifest;
+    const installedVersion = findPlugin(loadRegistry(), mf.id)?.version ?? null;
+    const confirmed = await ctx.confirmPluginInstall({
+      manifest: mf,
+      iconUrl: iconUrlOf(prepared),
+      permBlocks: groupPermissions([...(mf.permissions ?? []), ...(mf.optionalPermissions ?? [])]),
+      warnings: prepared.warnings,
+      installedVersion,
+      action,
+    });
+    if (!confirmed) return { ok: false as const, cancelled: true };
+
+    const allPerms = [...(mf.permissions ?? []), ...(mf.optionalPermissions ?? [])];
     await installPluginPackage(id, prepared.files);
     const reg = loadRegistry();
     const record = createPluginRecord({
-      manifest: prepared.manifest,
+      manifest: mf,
       dir: `plugins/${id}`,
       // ref 记录实际下载地址，便于排障与「来源仓库」展示
       source: { kind: "market", ref: pkgUrl },
@@ -969,15 +1766,28 @@ function createMarketApi(pluginId: string, call: <T>(opts: {
     });
     upsertPlugin(reg, record, { preserveUserChoices: false });
     saveRegistry(reg);
-    return { ok: true };
-  });
+    return { ok: true as const, version: mf.version };
+  }
+
+  self.install = (id: string) => guarded("install", () => installOrUpdate(id, "install"));
   self.update = (id: string) => guarded("update", async () => {
-    const result = await (self.install as any)(id);
-    return result.ok ? { ok: true as const, updatedTo: "" } : result;
+    const result = await installOrUpdate(id, "update");
+    return result.ok ? { ok: true as const, updatedTo: result.version } : result;
   });
   self.uninstall = (id: string) => guarded("uninstall", async () => {
-    const { removePluginDir } = await import("./ipc.ts");
+    const { removePluginDir, stopPluginBackend } = await import("./ipc.ts");
     const { loadRegistry, saveRegistry, removePlugin } = await import("./registry.ts");
+    // 卸载前先停掉运行中的后台进程：未停的进程持有插件目录的文件句柄，
+    // Windows 上会直接删不掉；即使删除成功进程也会变成孤儿继续跑。
+    // 记录或清单拿不到（目录缺失）时也照常尝试——stop 对未运行的插件是幂等的。
+    const rec = findPlugin(loadRegistry(), id);
+    if (!rec || rec.manifest.backend) {
+      try {
+        await stopPluginBackend(id);
+      } catch (e) {
+        console.warn(`[插件市场] 卸载前停止后台进程失败（${id}）:`, e);
+      }
+    }
     await removePluginDir(id);
     const reg = loadRegistry();
     removePlugin(reg, id);

@@ -396,8 +396,8 @@ export function scrollToText(text: string, container: HTMLElement | null): void 
       range.setStart(textNode, idx);
       range.setEnd(textNode, idx + keyword.length);
       const span = document.createElement("span");
+      // 配色由 CSS `#text_show .highlight-text` 提供（含深色主题适配），勿再内联写死颜色
       span.className = "highlight-text";
-      span.style.background = "#ffe58f";
       try {
         range.surroundContents(span);
         target = span;

@@ -194,7 +194,7 @@ const mkRecord = (mf) => ({
   description: mf.description,
   manifest: mf,
   dir: `plugins/${mf.id}`,
-  source: { kind: "file", ref: "x.msplugin" },
+  source: { kind: "file", ref: "x.mspp" },
   installedAt: now,
   updatedAt: now,
   enabled: true,

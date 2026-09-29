@@ -10,7 +10,8 @@
  * 4. 点击权重、选择历史、特殊关键词（<new> / <history> / <highFrequency>）。
  * 6. 搜索PRO模式（子搜索模式）：当关键词中含有 " : "（SEARCH_BOUNDARY）时，
  *    触发PRO模式搜索，仅搜索被标记为"[可搜索]"的项（URL 包含 [[...keyword...]] 模板）。
- *    支持特殊路由：空父关键词 → "问AI"，父关键词为 "问AI" → 精确搜索。
+ *    特殊路由：父关键词为 "问AI" → 精确搜索；父关键词为空（如空内容按 Tab）
+ *    → **不进行过滤**，直接列出全部 [可搜索] 项（不再自动跳转 "问AI : "）。
  * 5. 数据缓存（还原油猴版 SEARCH_DATA_KEY + effectiveDuration）：
  *    加载结果带过期时间写入本地存储，未过期时启动直接复用缓存，只有过期
  *    （或订阅变化 / 强制刷新）才重新发起网络加载，避免每次启动都全量拉取。
@@ -31,7 +32,7 @@ import type { DesignatedSingTag } from "./subscribe-parser.ts";
 import { parseTags, extractTagsAndCleanContent } from "./tags.ts";
 import { overlapMatchingDegreeForObjectArray } from "./overlap.ts";
 import { storageGet, storageSet, storageRemove, isUrl } from "./util.ts";
-import { pluginIdOf, pluginKeywordOf } from "./plugins/plugin-items.ts";
+import { pluginIdOf, pluginKeywordOf, pluginSubSearchOf } from "./plugins/plugin-items.ts";
 import type { SearchItem, SearchResult, SubscribeItem, TagStat } from "../types/index.ts";
 
 /** 搜索结果包装（对外导出，便于视图层引用） */
@@ -102,6 +103,29 @@ export function itemId(item: SearchItem | null | undefined): string | null {
   return item.title.replace(/\[.*\]/, "").trim() + ("" + item.desc).trim();
 }
 
+/**
+ * 数据项稳定指纹（位置无关身份键）。
+ *
+ * 为什么需要它：`itemId` 只由「标题 + 描述」构成，同标题不同资源的条目会撞键，
+ * 且展示层旧实现用 `item.index`（数组下标）反查原项——数组一变（摘插件项、
+ * 过滤不关注标签）下标即失效，导致 favicon/url 与 title 对不上。
+ * 指纹由**内容**（所属订阅 + 标题 + 描述 + 资源 + 附加内容）派生，与数组位置无关，
+ * 用于权重/历史/新数据对齐与去重校验，保证「同一个对象始终认得出自己」。
+ */
+export function itemFingerprint(item: SearchItem | null | undefined): string | null {
+  if (item == null || !(item instanceof Object) || item.title == null) return null;
+  const part = (v: unknown, len = 512) => String(v ?? "").trim().slice(0, len);
+  // 标题去标签后参与指纹，避免「加/去 [可搜索] 标签」使同一数据项指纹漂移
+  const title = part(item.title).replace(/\[[^\]]*\]/g, "").trim();
+  return [
+    part(item.subscribe, 128),
+    title,
+    part(item.desc),
+    part(item.resource),
+    part(item.vassal, 128),
+  ].join("\u0001");
+}
+
 /** links 搜索字符串（还原 links.stringifyForSearch） */
 export function linksToString(links: unknown): string {
   if (!Array.isArray(links)) return "";
@@ -138,10 +162,24 @@ const NEW_DATA_EXPIRE_DAY_NUM = 7;
 const NEW_ITEMS_TAG = "[新]";
 const DAY_MS = 1000 * 60 * 60 * 24;
 
+/**
+ * 数据项的身份键（用于权重/历史/新数据对齐）。
+ *
+ * 优先用稳定指纹 `_fp`（内容派生、位置无关），未建索引的项回退到 `itemId`。
+ * 统一入口的意义：权重表/历史表/新数据表若各自用不同的键，就会出现
+ * 「点过的项下次认不出来」或「同标题不同资源的项串权重」——这正是
+ * 「数据项解析不稳定」在持久化层的表现。
+ */
+export function itemIdentity(item: SearchItem | null | undefined): string | null {
+  if (item == null || !(item instanceof Object)) return null;
+  if (typeof item._fp === "string" && item._fp !== "") return item._fp;
+  return itemId(item);
+}
+
 /** 给被点击项加分（还原 DataWeightScorer.select） */
 export function scoreSelect(item: SearchItem | null | undefined): void {
   if (item == null) return;
-  const key = itemId(item);
+  const key = itemIdentity(item);
   if (key == null) return;
   const data = storageGet<Record<string, number>>(WEIGHT_KEY, {}) || {};
   data[key] = (data[key] ?? 0) + 1;
@@ -154,7 +192,7 @@ function sortByWeight(items: SearchItem[]): SearchItem[] {
   const data = storageGet<Record<string, number>>(WEIGHT_KEY, {}) || {};
   return items
     .map((item, i) => {
-      const key = itemId(item);
+      const key = itemIdentity(item);
       return { item, i, w: key != null && data[key] != null ? data[key] : 0 };
     })
     .sort((a, b) => b.w - a.w || a.i - b.i)
@@ -163,12 +201,12 @@ function sortByWeight(items: SearchItem[]): SearchItem[] {
 
 /** 记录选择历史（还原 SelectHistoryRecorder.select） */
 export function historySelect(item: SearchItem | null | undefined): void {
-  if (item == null || itemId(item) == null) return;
-  const key = itemId(item);
+  const key = itemIdentity(item);
+  if (item == null || key == null) return;
   let history = storageGet<SearchItem[]>(HISTORY_KEY, []) || [];
-  history = history.filter((_item) => itemId(_item) !== key);
+  history = history.filter((_item) => itemIdentity(_item) !== key);
   const copy: SearchItem = { ...item };
-  delete copy.index;
+  delete copy._fp;
   delete copy._titleUpper;
   delete copy._descUpper;
   delete copy._contentUpper;
@@ -192,7 +230,7 @@ export function highFrequencyList(allItems: SearchItem[], count?: number): Searc
   const keys = Object.keys(data).sort((a, b) => data[b] - data[a]);
   const picked = count != null ? keys.slice(0, count) : keys;
   const map = new Map<string | null, SearchItem>();
-  for (const item of allItems) map.set(itemId(item), item);
+  for (const item of allItems) map.set(itemIdentity(item), item);
   return picked
     .map((k) => map.get(k))
     .filter((x): x is SearchItem => Boolean(x));
@@ -219,7 +257,7 @@ function recordNewItems(allItems: SearchItem[]): void {
   // 收集本次加载的全部 id（后续无论哪条分支都要更新，作为下次比较的基线）
   const currentIds: string[] = [];
   for (const item of allItems) {
-    const id = itemId(item);
+    const id = itemIdentity(item);
     if (id != null) currentIds.push(id);
   }
 
@@ -258,7 +296,7 @@ export function buildNewItemsResult(allItems: SearchItem[]): SearchResult[] {
   const now = Date.now();
   const byId = new Map<string | null, SearchItem>();
   for (const item of allItems) {
-    const id = itemId(item);
+    const id = itemIdentity(item);
     if (id != null && !byId.has(id)) byId.set(id, item);
   }
   const matched = records
@@ -309,14 +347,14 @@ export class SearchEngine {
   textPinyinMap: Record<string, string>;
   /** 标签统计 */
   tagsMap: Record<string, TagStat>;
-  /** PRO 特殊路由 `^\s*$` → "问AI" 的待转发关键词（见 search / _proSearch） */
-  _pendingRedirectKeyword: string | null;
   /**
-   * PRO 特殊路由转发回调（还原 searchableSpecialRouting["^\\s*$"] 的
-   * triggerSearchHandle("问AI"+searchBoundary)）：主流程把输入框改写为
-   * "问AI : " 并重新触发搜索
+   * 「附件模式」结果过滤（粘贴/拖入文件、文件夹后由宿主注入，见 attachments.ts）。
+   *
+   * 非 null 时：所有检索分支的产出都会再过一遍该谓词，结果里只剩
+   * 「声明了对应处理能力的插件」贡献的条目；且 PRO 模式改走附件分支
+   * （父关键词只在候选插件里过滤、不查 [可搜索] 项；父关键词为空 = 列出全部候选）。
    */
-  onRedirect: ((keyword: string) => void) | null;
+  resultFilter: ((item: SearchItem) => boolean) | null;
   /** 加载状态 */
   loading: boolean;
   loadedCount: number;
@@ -337,8 +375,7 @@ export class SearchEngine {
     this._lastProgressNotifyAt = 0;
     this.textPinyinMap = {};
     this.tagsMap = {};
-    this._pendingRedirectKeyword = null;
-    this.onRedirect = null;
+    this.resultFilter = null;
     this.loading = false;
     this.loadedCount = 0;
     this.failedUrls = [];
@@ -724,28 +761,67 @@ export class SearchEngine {
    */
   _buildIndex(): void {
     const tagsMap: Record<string, TagStat> = {};
-    for (let i = 0; i < this.searchData.length; i++) {
-      this._indexItem(this.searchData[i], i, tagsMap);
+    for (const item of this.searchData) {
+      this._indexItem(item, tagsMap);
     }
     this.tagsMap = tagsMap;
+    this._assertFingerprintIntegrity();
+  }
+
+  /**
+   * 指纹完整性校验（解析对齐的护栏，不静默）。
+   *
+   * 展示层的 favicon/url/title 现在全部取自**同一个数据项对象**，不再依赖下标，
+   * 因此「错位」的最后一处可能来源就是解析阶段产出的脏项（缺标题、重复指纹等）。
+   * 这里显式统计并告警，便于定位订阅数据里的异常条目，而不是让它们悄悄混入结果集。
+   */
+  _assertFingerprintIntegrity(): void {
+    let missing = 0;
+    const seen = new Map<string, SearchItem>();
+    const duplicates: string[] = [];
+    for (const item of this.searchData) {
+      const fp = item._fp;
+      if (fp == null || fp === "") {
+        missing++;
+        continue;
+      }
+      if (seen.has(fp)) {
+        if (duplicates.length < 5) duplicates.push(fp);
+        continue;
+      }
+      seen.set(fp, item);
+    }
+    if (missing > 0 || duplicates.length > 0) {
+      console.warn(
+        `[我的搜索] 数据项指纹校验：缺失 ${missing} 条，重复 ${duplicates.length}` +
+          (duplicates.length ? `（示例：${duplicates.map((d) => d.slice(0, 80)).join(" / ")}）` : "")
+      );
+    }
   }
 
   /** 为单条数据建立检索索引（供整体重建与「后挂插件项」共用） */
-  _indexItem(item: SearchItem, index: number, tagsMap: Record<string, TagStat>): void {
-    item.index = index;
+  _indexItem(item: SearchItem, tagsMap: Record<string, TagStat>): void {
+    // 稳定身份键（位置无关）：替代旧的 `item.index` 下标反查，避免数组变动后错位。
+    // 必须在 title 被追加 [可搜索] 标签等改动前计算，且指纹内部会去标签，故两者等价。
+    item._fp = itemFingerprint(item) ?? undefined;
 
     // 给 URL 包含 [[...keyword...]] 模板的项添加 [可搜索] 标签（还原 refreshTags）
     // 必须在 title 变量捕获前执行，否则索引字段不包含该标签
     if (this._isSearchableItem(item) && !(item.title ?? "").includes(SEARCH_PRO_TAG)) {
       item.title = SEARCH_PRO_TAG + (item.title ?? "");
     }
-    // 插件贡献的「命令型」条目（声明了 keyword）同样要能被子搜索命中：
+    // 插件贡献的「命令型」条目：只有**声明参与二次搜索**（清单
+    // contributes.searchItem.subSearch = true）的才补 [可搜索] 标记。
     // PRO 模式（`父 : 子`）只检索带 [可搜索] 的项，而插件项的 resource 通常是空的
     // （界面由插件自己渲染，不是 URL 模板），不补这个标签的话，
     // 「按 Tab 进入子搜索 → 插件项从结果里消失」，onSubKeyword 永远收不到消息。
+    // 反过来，不消费子关键词的插件（如文件上传：子词只是 commit message）不应
+    // 出现在二次搜索候选里——它给不出任何结果，列出来只会误导用户。
+    // 判定必须声明式：插件脚本要等视图打开才执行，晚于结果列表的渲染。
     if (
       pluginIdOf(item) != null &&
       pluginKeywordOf(item) != null &&
+      pluginSubSearchOf(item) &&
       !(item.title ?? "").includes(SEARCH_PRO_TAG)
     ) {
       item.title = SEARCH_PRO_TAG + (item.title ?? "");
@@ -806,7 +882,7 @@ export class SearchEngine {
     const tagsMap: Record<string, TagStat> = {};
     for (const item of items) {
       // 插件项不参与「标签统计」（那是订阅数据的关注/过滤功能）
-      this._indexItem(item, this.searchData.length, tagsMap);
+      this._indexItem(item, tagsMap);
       this.searchData.push(item);
     }
     return items.length;
@@ -955,9 +1031,8 @@ export class SearchEngine {
       const processed = kw.trim().split(/\s+/).reverse().join(" ");
       return this._searchUnit(this.searchData, processed);
     }
-    // 无特殊路由匹配
-    // （空父关键词的 `^\s*$` → "问AI" 转发改在 _proSearch 中处理：
-    //   需要把输入框改写为 "问AI : " 并重新触发搜索，与原版 triggerSearchHandle 一致）
+    // 无特殊路由匹配（空父关键词不再特殊路由：由普通 PRO 分支「不过滤」承接，
+    // 见 _proSearch——空内容按 Tab 直接停在 " : "，列出全部 [可搜索] 项）
     return undefined;
   }
 
@@ -968,21 +1043,53 @@ export class SearchEngine {
   async _proSearch(rawKeyword: string): Promise<SearchResult[]> {
     const parentKeyword = this._getParentKeyword(rawKeyword);
 
-    // 先检查特殊路由
-    const specialResult = await this._proSearchSpecialRouting(parentKeyword);
-    // 无特殊路由但父关键词为空（输入框只有 " : "，如空内容按 Tab）：
-    // 还原原版特殊路由 `^\s*$` → "问AI"：把搜索框改写为 "问AI : " 并重新触发搜索
-    // （原版通过 searchableSpecialRouting["^\\s*$"] = "问AI" + triggerSearchHandle 转发实现）
-    if (specialResult === undefined && /^\s*$/.test(parentKeyword.trim())) {
-      this._pendingRedirectKeyword = "问AI" + SEARCH_BOUNDARY;
-      return [];
+    // ---- 附件模式分支（粘贴/拖入了文件或文件夹） ----
+    // 语义与常规 PRO 模式不同：父关键词 xxx 只在「能处理当前附件」的插件
+    // 候选里过滤（选插件），子关键词 yyy 不参与检索——它会在视图挂载/回车时
+    // 经子关键词通道直接交给插件。父关键词为空 = 不过滤（列出全部候选），
+    // 也不走「问AI」父词特殊路由。
+    const attachFilter = this.resultFilter;
+    if (attachFilter) {
+      const candidates = this.searchData.filter((it) => {
+        try {
+          return attachFilter(it);
+        } catch (e) {
+          return false;
+        }
+      });
+      if (parentKeyword === "") {
+        return candidates.map((item) => ({ item, level: LEVEL_TITLE }));
+      }
+      const processed = parentKeyword.trim().split(/\s+/).reverse().join(" ");
+      const hit = this._searchUnit(candidates, processed);
+      if (hit.length > 0) return hit;
+      // 父关键词没命中标题/描述：在候选内做一次重叠度兜底（与常规 PRO 一致）
+      const scoreList: number[] = [];
+      const matched = overlapMatchingDegreeForObjectArray<SearchItem>(
+        parentKeyword.toUpperCase(),
+        candidates,
+        (item) => {
+          const str2ScopeMap: Record<string, number> = {};
+          str2ScopeMap[item._cleanedTitleUpper ?? ""] = 9;
+          str2ScopeMap[item._descTagsUpper ?? ""] = 8;
+          str2ScopeMap[(item._contentUpper ?? "").substring(0, 4096)] = 2;
+          return str2ScopeMap;
+        },
+        { onlyHasScope: true, scopeForObjArrContainer: scoreList }
+      );
+      return matched.map((item, i) => ({ item, level: LEVEL_FUZZY, score: scoreList[i] }));
     }
+
+    // 先检查特殊路由（目前只有父词 = "问AI" 的精确搜索）
+    const specialResult = await this._proSearchSpecialRouting(parentKeyword);
     if (specialResult !== undefined) {
       return specialResult;
     }
 
-    // 普通 PRO 模式：只搜索已标记 [可搜索] 的项
-    // 构造 `[可搜索] <parentKeyword>` 关键词，利用标题匹配过滤出标记项
+    // 普通 PRO 模式：只搜索已标记 [可搜索] 的项。
+    // 父关键词为空（空内容按 Tab 停在 " : "）→ 关键词只剩 `[可搜索]` 标记本身
+    // = **不进行过滤**，列出全部可搜索项（旧版会在此自动跳转 "问AI : "，已按
+    //   新交互要求移除）。
     const proKeyword = `${SEARCH_PRO_TAG} ${parentKeyword}`;
     const processed = proKeyword.trim().split(/\s+/).reverse().join(" ");
     let result = this._searchUnit(this.searchData, processed);
@@ -1014,26 +1121,35 @@ export class SearchEngine {
     return result || [];
   }
 
+  /** 应用「附件模式」结果过滤（resultFilter 为 null 时原样返回） */
+  _applyResultFilter(results: SearchResult[]): SearchResult[] {
+    const filter = this.resultFilter;
+    if (!filter) return results ?? [];
+    const src = results ?? [];
+    const out: SearchResult[] = [];
+    for (const r of src) {
+      try {
+        if (filter(r.item)) out.push(r);
+      } catch (e) {
+        /* 单条谓词出错按不通过处理，不拖垮整次搜索 */
+      }
+    }
+    return out;
+  }
+
   /** 搜索路由（还原 searchEven.event 与 searchAOP） */
   async search(rawKeyword: string | null | undefined): Promise<SearchResult[]> {
     const raw = String(rawKeyword ?? "");
 
     // PRO模式（子搜索模式）：关键词包含 SEARCH_BOUNDARY（ : ）
     if (this._isProSearchMode(raw)) {
-      const result = await this._proSearch(raw);
-      // 特殊路由 `^\s*$` → "问AI" 转发（还原 searchableSpecialRouting["^\\s*$"]）：
-      // 引擎通知主流程把输入框改写为 "问AI : " 并重新触发搜索
-      if (this._pendingRedirectKeyword != null) {
-        const redirect = this._pendingRedirectKeyword;
-        this._pendingRedirectKeyword = null;
-        this.onRedirect?.(redirect);
-      }
-      return result;
+      // 父关键词为空时由 _proSearch 直接「不过滤」列出（不再跳转 "问AI : "）
+      return this._applyResultFilter(await this._proSearch(raw));
     }
 
     // 特殊关键词直达
     const special = this._specialSearch(raw);
-    if (special) return special;
+    if (special) return this._applyResultFilter(special);
 
     // 逆序处理多关键词（与油猴版一致：rawKeyword.trim().split(/\s+/).reverse().join(" ")）
     const processedKeyword = raw.trim().split(/\s+/).reverse().join(" ");
@@ -1043,7 +1159,7 @@ export class SearchEngine {
     if ((result == null || result.length === 0) && raw.trim().length > 0) {
       result = this.fuzzySearch(raw);
     }
-    return result || [];
+    return this._applyResultFilter(result || []);
   }
 
   _specialSearch(rawKeyword: string): SearchResult[] | null {

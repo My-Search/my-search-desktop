@@ -12,7 +12,8 @@
     "tauri": "tauri",
     "icons": "node test/gen-icons.mjs && tauri icon test/_icons/icon-master.png -o src-tauri/icons && tauri icon test/_icons/icon-master-win.png -o src-tauri/icons/windows && node test/prune-win-icons.mjs",
     "typecheck": "vue-tsc --noEmit",
-    "build:index": "node scripts/build-index.mjs"
+    "build:index": "node scripts/build-index.mjs",
+    "publish:market": "node scripts/publish-market.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

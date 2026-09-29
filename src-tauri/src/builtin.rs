@@ -167,6 +167,49 @@ pub(crate) struct BuiltinEntry {
     pub version: Option<String>,
     /// 资源文件路径（available 为 true 时给出）
     pub resource_path: Option<String>,
+    /// **开发模式**：仓库里该插件的源码目录（`<repo>/plugins/<name>`，含 plugin.json）。
+    /// 仅当 `tauri::is_dev()` 且该目录存在时给出；前端据此改为「目录挂载」——
+    /// 编辑源码即时生效，无需重新打包 .mspp 再装一遍。
+    pub dev_source: Option<String>,
+}
+
+/// 开发模式下的插件源码根目录：`<repo>/plugins`。
+///
+/// 定位方式：`env!("CARGO_MANIFEST_DIR")` 在编译期展开为 `src-tauri/` 的绝对路径，
+/// 其上级即仓库根。只在 `tauri::is_dev()` 时返回——正式构建里源码目录根本不存在，
+/// 也不应该被扫描。
+fn dev_plugins_root() -> Option<PathBuf> {
+    if !tauri::is_dev() {
+        return None;
+    }
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = manifest.parent()?.join("plugins");
+    root.is_dir().then_some(root)
+}
+
+/// 在开发源码目录里按插件 id 找到对应目录（读每个子目录的 plugin.json 比对 id）。
+///
+/// 不靠「目录名 = id 去前缀」的约定，直接读清单比对 id，改目录名也不会错配。
+fn dev_source_for(id: &str) -> Option<String> {
+    let root = dev_plugins_root()?;
+    let entries = std::fs::read_dir(&root).ok()?;
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let manifest_path = dir.join("plugin.json");
+        let Ok(text) = std::fs::read_to_string(&manifest_path) else {
+            continue;
+        };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        if json.get("id").and_then(|v| v.as_str()) == Some(id) {
+            return Some(dir.to_string_lossy().to_string());
+        }
+    }
+    None
 }
 
 /// 读取已安装插件的 version（从 plugin.json 的 version 字段）
@@ -191,6 +234,7 @@ pub(crate) fn builtin_list_inner(app: &tauri::AppHandle) -> Vec<BuiltinEntry> {
             removed: state.removed.iter().any(|r| r == id),
             version: if installed(app, id) { read_installed_version(app, id) } else { None },
             resource_path: bundle.map(|b| b.resource_path.clone()),
+            dev_source: dev_source_for(id),
         });
     }
     out

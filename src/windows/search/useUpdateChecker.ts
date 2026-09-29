@@ -12,10 +12,12 @@ import {
   startUpdateDownload,
   onUpdateProgress,
   onUpdateComplete,
+  onAutoDownloadChanged,
   openInstaller,
   type UnlistenFn,
 } from "../../lib/tauri-bridge";
 import type { UpdateInfo } from "../../types/index";
+import { getAutoDownloadUpdate } from "../../lib/update-settings";
 
 /** 定时检查间隔：20 分钟 */
 const UPDATE_CHECK_INTERVAL_MS = 20 * 60 * 1000;
@@ -39,6 +41,10 @@ export function useUpdateChecker() {
   let unlistenProgress: UnlistenFn | null = null;
   let unlistenComplete: UnlistenFn | null = null;
   let checkTimer: ReturnType<typeof setInterval> | null = null;
+  /** 「自动下载更新」开关变更监听（配置窗口切换时立即重求值用） */
+  let unlistenSettingChange: UnlistenFn | null = null;
+  /** 监听注册进行中（异步 gap 内防止重复注册） */
+  let settingListenPending = false;
 
   /** 徽章是否可见（有更新） */
   function isBadgeVisible(): boolean {
@@ -86,6 +92,19 @@ export function useUpdateChecker() {
       }
       unlistenComplete = null;
     }
+  }
+
+  /**
+   * 清空全部更新状态并释放监听（用于「自动下载更新」关闭时的完全静默）。
+   * 徽章因 `info` 为空而隐藏，logo 点击回退到原有 [系统项] 行为。
+   */
+  function resetUpdateState(): void {
+    cleanupUpdateListeners();
+    state.info = null;
+    state.downloading = false;
+    state.progress = 0;
+    state.downloadedPath = null;
+    state.downloadedVersion = "";
   }
 
   /**
@@ -147,6 +166,8 @@ export function useUpdateChecker() {
    * 4. 否则 → 触发下载
    */
   async function handleBadgeClick(): Promise<void> {
+    // 「自动下载更新」关闭时徽章本不该出现；若因切换竞态被点到，直接忽略。
+    if (!getAutoDownloadUpdate()) return;
     if (!state.info || !state.info.has_update) return;
     if (state.downloading) {
       // 正在下载中，徽章已有进度显示，无需额外操作
@@ -186,9 +207,16 @@ export function useUpdateChecker() {
 
   /**
    * 执行一次检查更新，若发现新版本则自动静默下载。
+   *
+   * 「自动下载更新」关闭时**完全静默**：不检查、不下载、不显示徽章，
+   * 并清空既有状态（每次定时/呼出触发都重读设置，故开关免重启即可生效）。
    */
   async function checkAndAutoDownload(): Promise<void> {
     if (!isTauri) return;
+    if (!getAutoDownloadUpdate()) {
+      resetUpdateState();
+      return;
+    }
     try {
       const info = await checkUpdate();
       state.info = info;
@@ -227,6 +255,32 @@ export function useUpdateChecker() {
     void checkAndAutoDownload();
     // 每 20 分钟周期检查
     checkTimer = setInterval(() => void checkAndAutoDownload(), UPDATE_CHECK_INTERVAL_MS);
+    // 监听设置窗口对「自动下载更新」的切换，当刻重求值——否则关闭开关后
+    // 徽章要滞留到下次呼出/定时点，开启后也要等同样久才出现新徽章。
+    if (unlistenSettingChange == null && !settingListenPending) {
+      settingListenPending = true;
+      void onAutoDownloadChanged(() => recheckSetting()).then((fn) => {
+        settingListenPending = false;
+        if (fn == null) return;
+        // 注册完成前已被 dispose → 立即释放，避免监听泄漏
+        if (checkTimer == null) {
+          fn();
+          return;
+        }
+        unlistenSettingChange = fn;
+      });
+    }
+  }
+
+  /**
+   * 立即按当前「自动下载更新」设置重新求值一次。
+   *
+   * 两个调用方：主窗口每次呼出时；配置窗口切换开关的当刻（见
+   * scheduleUpdateCheck 里的监听）。用户刚改过开关时无需等待下一个
+   * 20 分钟定时点——开启则马上检查并（必要时）下载，关闭则马上清空徽章。
+   */
+  function recheckSetting(): void {
+    void checkAndAutoDownload();
   }
 
   /** 组件卸载时清理 */
@@ -236,6 +290,14 @@ export function useUpdateChecker() {
       checkTimer = null;
     }
     cleanupUpdateListeners();
+    if (unlistenSettingChange != null) {
+      try {
+        unlistenSettingChange();
+      } catch (_) {
+        /* ignore */
+      }
+      unlistenSettingChange = null;
+    }
   }
 
   return {
@@ -246,6 +308,7 @@ export function useUpdateChecker() {
     badgeTitle,
     handleBadgeClick,
     scheduleUpdateCheck,
+    recheckSetting,
     dispose,
   };
 }

@@ -16,15 +16,15 @@ function mockInvoke(cmd, args) {
   switch (cmd) {
     case "builtin_list":
       return [
-        { id: "com.mysearch.baidu-translate", available: true, installed: false, removed: false, version: null, resourcePath: "/fake/baidu.msplugin" },
-        { id: "com.mysearch.pi-agent", available: true, installed: false, removed: false, version: null, resourcePath: "/fake/pi-agent.msplugin" },
-        { id: "com.mysearch.market", available: false, installed: false, removed: false, version: null, resourcePath: null },
+        { id: "com.mysearch.baidu-translate", available: true, installed: false, removed: false, version: null, resourcePath: "/fake/baidu.mspp", devSource: null },
+        { id: "com.mysearch.pi-agent", available: true, installed: false, removed: false, version: null, resourcePath: "/fake/pi-agent.mspp", devSource: null },
+        { id: "com.mysearch.market", available: false, installed: false, removed: false, version: null, resourcePath: null, devSource: null },
       ];
     case "builtin_mark_removed":
     case "builtin_clear_removed":
       return null;
     case "builtin_resource_path":
-      return `/fake/${args.id}.msplugin`;
+      return `/fake/${args.id}.mspp`;
     default:
       throw new Error(`未知模拟命令: ${cmd}`);
   }
@@ -62,7 +62,7 @@ describe("builtin bridge", () => {
   it("builtinResourcePath returns path for valid plugin", async () => {
     const path = await mockInvoke("builtin_resource_path", { id: "com.mysearch.baidu-translate" });
     assert.ok(path);
-    assert.match(path, /\.msplugin$/);
+    assert.match(path, /\.mspp$/);
   });
 
   it("builtinResourcePath rejects unknown plugin", async () => {
@@ -142,5 +142,29 @@ describe("install-builtin auto-install logic", () => {
       }
     }
     assert.equal(installed.length, 1);
+  });
+
+  /**
+   * 开发模式：带 devSource 的内置插件应**优先目录挂载**——即使 .mspp 未打包
+   * （available=false）也要处理（开发时往往只跑源码，不先跑 pack:builtin）。
+   * 这条规则与 installSingleBuiltin / pullAndInstall 里的守卫保持一致。
+   */
+  it("dev-mounts builtins with devSource (even when .mspp unavailable)", async () => {
+    const entries = [
+      { id: "com.mysearch.pi-agent", available: false, removed: false, devSource: "D:/repo/plugins/pi-agent" },
+    ];
+    const handled = [];
+    for (const e of entries) {
+      if (e.removed) continue;
+      if (e.devSource) {
+        handled.push({ id: e.id, mode: "dev-mount", dir: e.devSource });
+        continue;
+      }
+      if (!e.available) continue;
+      handled.push({ id: e.id, mode: "mspp" });
+    }
+    assert.deepEqual(handled, [
+      { id: "com.mysearch.pi-agent", mode: "dev-mount", dir: "D:/repo/plugins/pi-agent" },
+    ]);
   });
 });

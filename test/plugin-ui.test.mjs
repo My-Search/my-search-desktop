@@ -156,7 +156,9 @@ await writeFile(
       description: "供自动化测试使用",
       permissions: ["ui.inlay", "store", "ui.notify"],
       contributes: {
-        searchItem: { title: "[推荐][脚本]UI测试", desc: "自动化测试用插件项", keyword: "UI测试", visible: true },
+        // subSearch:true —— 本测试正是走「Tab → PRO 模式 → 回车」打开视图，
+        // 只有声明参与二次搜索的插件项才会出现在该模式的结果里
+        searchItem: { title: "[推荐][脚本]UI测试", desc: "自动化测试用插件项", keyword: "UI测试", visible: true, subSearch: true },
         detailView: { entry: "ui/view.html", script: "ui/view.js", mode: "inlay" },
       },
     },
@@ -187,9 +189,9 @@ window.__pluginProbe = { keyword: keyword, pluginId: plugin.id, hasStore: !!ms.s
 `
 );
 
-// 用共享打包器生成 .msplugin（与宿主解包器同一套 zip 实现），
+// 用共享打包器生成 .mspp（与宿主解包器同一套 zip 实现），
 // 读出 base64 供页面模拟「选择文件 + 读取本地文件」
-const packOut = path.join(root, "test", "_tmp", "ui-plugin.msplugin");
+const packOut = path.join(root, "test", "_tmp", "ui-plugin.mspp");
 const packer = spawn(
   process.execPath,
   [path.join(root, "test", "pack-plugin.mjs"), pkgDir, "-o", packOut],
@@ -214,7 +216,7 @@ await S(
       invoke(cmd, args) {
         window.__invoked.push({ cmd, args });
         // 系统文件选择框（@tauri-apps/plugin-dialog）：模拟用户选中了我们的测试包
-        if (cmd === 'plugin:dialog|open') return Promise.resolve('C:\\\\fake\\\\ui-plugin.msplugin');
+        if (cmd === 'plugin:dialog|open') return Promise.resolve('C:\\\\fake\\\\ui-plugin.mspp');
         if (cmd === 'plugin_read_local_base64') return Promise.resolve(window.__pkg);
         if (cmd === 'plugin_install') {
           // 记录落盘 payload，验证「含 plugin.json」与字段名
@@ -245,6 +247,9 @@ await S(
         }
         if (cmd === 'plugin_gateway_sync') return Promise.resolve(null);
         if (cmd === 'plugin_backend_list') return Promise.resolve([]);
+        // 内置插件列表：插件面板挂载时会拉取并渲染；必须返回数组，
+        // 否则 mock 落到末尾的 Promise.resolve(null) 会让面板渲染报错而整块不显示。
+        if (cmd === 'builtin_list') return Promise.resolve([]);
         if (cmd === 'get_default_subscribe_text') return Promise.resolve('');
         if (cmd === 'get_toggle_shortcut') return Promise.resolve('ctrl+alt+s');
         if (cmd === 'get_shortcut_bindings') {
@@ -311,11 +316,15 @@ await evalJs(`
     .find(b => b.textContent.includes('从文件安装')).click()
 `);
 await sleep(600);
-const dialogText = await evalJs(`document.querySelector('#msgText')?.textContent || ''`);
+// 安装确认弹窗现为专用组件 PluginInstallDialog（.plugin-install-dialog），
+// 不再是通用 MessageDialog（#msgText/#msgOk）。
+const dialogText = await evalJs(
+  `document.querySelector('.plugin-install-dialog')?.textContent || ''`
+);
 check("安装确认弹窗出现", dialogText.includes("UI 测试插件"), dialogText.slice(0, 60));
 
-// 确认安装
-await evalJs(`document.querySelector('#msgOk').click()`);
+// 确认安装（弹窗右下角的 .cfg-btn.primary）
+await evalJs(`document.querySelector('.plugin-install-dialog .cfg-btn.primary').click()`);
 await sleep(800);
 
 const installPayload = await evalJs(`JSON.stringify(window.__installPayload || null)`);

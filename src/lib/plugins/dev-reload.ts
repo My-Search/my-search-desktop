@@ -30,7 +30,7 @@
 
 import type { PluginChangedPayload } from "../plugins/ipc.ts";
 import { parsePluginManifest, type PluginManifest } from "./manifest.ts";
-import { grantPermission, shouldKeepFrontendOnClose, type PluginRecord } from "./registry.ts";
+import { grantPermission, resolveAutoStartOnUpgrade, shouldKeepFrontendOnClose, type PluginRecord } from "./registry.ts";
 import { isKnownPermission, permissionCovers } from "./permissions.ts";
 
 /** 一次重载要做的事情（由调用方执行；纯数据，便于断言） */
@@ -169,8 +169,16 @@ export function planReload(rec: PluginRecord, manifestText: string): ReloadPlan 
     icon: next.icon,
     manifest: next,
     updatedAt: Date.now(),
+    // 自启策略与关界面行为走与升级同一条规则：用户改过就保留，没改过则跟随
+    // 新清单的建议（与 upsertPlugin 共用 resolveAutoStartOnUpgrade，避免口径分叉）。
+    autoStart: resolveAutoStartOnUpgrade({
+      current: rec.autoStart,
+      prevManifest: rec.manifest,
+      nextManifest: next,
+    }),
+    requestedAutoStart: next.backend?.autostart ?? "on-demand",
     // 用户态一律保留（与 upsertPlugin 的保留列表一致）：
-    // enabled / autoStart / closeBehavior / grants / denied / runtime / installedAt
+    // enabled / closeBehavior / grants / denied / runtime / installedAt
     dir: rec.dir,
     source: rec.source,
   };

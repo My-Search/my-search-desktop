@@ -1,5 +1,5 @@
 /**
- * 插件包（`.msplugin` = ZIP）的读写 —— 纯浏览器 API，无第三方依赖。
+ * 插件包（`.mspp` = ZIP）的读写 —— 纯浏览器 API，无第三方依赖。
  *
  * 为什么自己实现：插件安装包必须是普通 ZIP（这样用户和工具链都能直接打开、
  * 审查、重打包），但项目刻意不引入 zip 库；Node 22 与 WebView2（Chromium）
@@ -398,7 +398,7 @@ export function crc32(data: Uint8Array): number {
 }
 
 /* ============================================================
- * 写 ZIP（供工具链打包 .msplugin 用，Node 与浏览器通用）
+ * 写 ZIP（供工具链打包 .mspp 用，Node 与浏览器通用）
  * ============================================================ */
 
 function dosDateTime(d: Date): { time: number; date: number } {
@@ -408,10 +408,21 @@ function dosDateTime(d: Date): { time: number; date: number } {
 }
 
 /**
+ * 打包用的固定时间戳（ZIP DOS 时间可表示的最早值：1980-01-01 00:00:00）。
+ * 用固定值让「相同内容 → 相同字节」，是市场索引 sha256 能被客户端复算的前提。
+ */
+const ZIP_EPOCH = new Date(1980, 0, 1, 0, 0, 0);
+
+/**
  * 打包成 ZIP（deflate 压缩、UTF-8 文件名）。
  * 文件按名字升序写入，保证同样的输入产出同样的字节（便于比对哈希）。
+ *
+ * 时间戳缺省用固定值而非 `new Date()`：ZIP 头里的 DOS 时间是包字节的一部分，
+ * 若随当前时间变化，同样的内容每次打包都会得到不同字节 —— 市场索引的 sha256
+ * 由「打包时的字节」算出，客户端安装时又要对「下载到的字节」复算，两边就会对不上。
+ * 需要真实时间戳（如测试断言）时显式传入 `now`。
  */
-export async function writeZip(files: ZipEntry[], now: Date = new Date()): Promise<Uint8Array> {
+export async function writeZip(files: ZipEntry[], now: Date = ZIP_EPOCH): Promise<Uint8Array> {
   const encoder = new TextEncoder();
   const { time, date } = dosDateTime(now);
   const sorted = [...files].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));

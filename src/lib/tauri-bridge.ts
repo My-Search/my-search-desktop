@@ -154,10 +154,49 @@ export async function quitApp(): Promise<void> {
   }
 }
 
+/**
+ * 把主题上报到原生层：Rust 端同步所有窗口的原生标题栏主题与 WebView 底色，
+ * 并广播 theme-changed 事件让各窗口重应用 CSS 类。
+ *
+ * - `theme`：主题**偏好**（light / dark / system）。强制 light/dark 时 Rust 用
+ *   `set_theme(Some(..))` 钉住原生层；system 时 `set_theme(None)` 恢复实时跟随
+ *   系统——若 system 也钉，tao 会把 WebView2 的 `PreferredColorScheme` 强制成
+ *   同色，matchMedia 不再反映系统偏好，前端解析出的永远是钉住值（自锁）。
+ * - `resolved`：前端按 `matchMedia("(prefers-color-scheme: dark)")` 解析出的
+ *   深浅色，仅供 Rust 铺底窗口背景色用（与 WebView2 渲染同源，防首帧闪白）。
+ *
+ * CSS 类始终由前端的 matchMedia 决定；原生层只负责标题栏/底色，两值分工明确，
+ * 原生标题栏与页面内容不会出现「一深一浅」。
+ */
+export async function applyAppTheme(
+  theme: "light" | "dark" | "system",
+  resolved: "light" | "dark",
+): Promise<void> {
+  if (!isTauri) return;
+  try {
+    await invoke("apply_app_theme", { theme, resolved });
+  } catch (e) {
+    console.warn("应用主题失败:", e);
+  }
+}
+
 /** 打开独立配置窗口（订阅管理） */
 export async function openConfigWindow(): Promise<void> {
   if (isTauri) {
     await invoke("open_config_window");
+  }
+}
+
+/**
+ * 打开某个插件的界面（插件面板的「从插件市场安装」用它打开市场）。
+ *
+ * 插件详情视图只存在于主搜索窗口，Rust 侧负责收起设置窗口、呼出主窗口并广播
+ * open-plugin 事件，由主窗口的前端打开视图；插件是否存在 / 启用 / 有界面的判定
+ * 都在那边完成（与全局快捷键「打开插件」同一条路径）。
+ */
+export async function openPluginView(pluginId: string): Promise<void> {
+  if (isTauri) {
+    await invoke("open_plugin_view", { pluginId });
   }
 }
 
@@ -241,6 +280,105 @@ export async function onShortcutOpenPlugin(
   }
 }
 
+/**
+ * 监听「快速过滤」快捷键事件（Rust 端注册的 quick-filter 热键按下时广播）。
+ * 主窗口据此把常用头填入搜索框并立即搜索。
+ */
+export async function onShortcutQuickFilter(
+  handler: (filter: string) => void
+): Promise<UnlistenFn | null> {
+  if (!isTauri) return null;
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    return await listen<{ filter?: unknown }>("my-search://shortcut-quick-filter", (event) => {
+      const filter = event.payload?.filter;
+      if (typeof filter === "string" && filter.trim() !== "") handler(filter);
+    });
+  } catch (e) {
+    console.warn("监听快速过滤快捷键事件失败:", e);
+    return null;
+  }
+}
+
+/**
+ * 监听「快捷打开项」快捷键事件（Rust 端注册的 quick-open 热键按下时广播）。
+ * 主窗口据此按文本精确匹配数据项并直接打开（多项时列出结果）。
+ */
+export async function onShortcutQuickOpen(
+  handler: (text: string) => void
+): Promise<UnlistenFn | null> {
+  if (!isTauri) return null;
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    return await listen<{ text?: unknown }>("my-search://shortcut-quick-open", (event) => {
+      const text = event.payload?.text;
+      if (typeof text === "string" && text.trim() !== "") handler(text);
+    });
+  } catch (e) {
+    console.warn("监听快捷打开项快捷键事件失败:", e);
+    return null;
+  }
+}
+
+/**
+ * 监听「剪贴板历史」快捷键事件（Rust 端注册的 clipboard 热键按下时广播）。
+ * 主窗口据此打开内置剪贴板历史插件的详情视图。
+ */
+export async function onShortcutClipboard(
+  handler: (pluginId: string) => void
+): Promise<UnlistenFn | null> {
+  if (!isTauri) return null;
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    return await listen<{ pluginId?: unknown }>("my-search://shortcut-clipboard", (event) => {
+      const id = event.payload?.pluginId;
+      if (typeof id === "string" && id !== "") handler(id);
+    });
+  } catch (e) {
+    console.warn("监听剪贴板历史快捷键事件失败:", e);
+    return null;
+  }
+}
+
+/**
+ * 监听「剪贴板历史有更新」事件（Rust 原生监听到剪贴板变更后广播，无 payload）。
+ * 插件视图开着时据此刷新列表；事件本身不带数据，真实内容由前端调
+ * `clipboardHistoryList()` 主动拉取（见插件 ui/index.js）。
+ */
+export async function onClipboardUpdated(handler: () => void): Promise<UnlistenFn | null> {
+  if (!isTauri) return null;
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    return await listen("my-search://clipboard-updated", () => handler());
+  } catch (e) {
+    console.warn("监听剪贴板更新事件失败:", e);
+    return null;
+  }
+}
+
+/**
+ * 监听「Alt+点击文件带入」事件（Rust 端在资源管理器/桌面检测到
+ * Alt+点击文件时广播，此时窗口已显示并完成复位）。主窗口据此把路径
+ * 并入附件——与粘贴/拖入走同一条管线（attachByPaths）。
+ */
+export async function onAttachPaths(
+  handler: (paths: string[]) => void
+): Promise<UnlistenFn | null> {
+  if (!isTauri) return null;
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    return await listen<{ paths?: unknown }>("my-search://attach-paths", (event) => {
+      const raw = event.payload?.paths;
+      if (!Array.isArray(raw)) return;
+      const paths = raw.filter((p): p is string => typeof p === "string" && p !== "");
+      if (paths.length > 0) handler(paths);
+    });
+  } catch (e) {
+    console.warn("监听 Alt+点击带入事件失败:", e);
+    return null;
+  }
+}
+
 /** 浏览器调试环境下的「开机自启动」默认值（与 Rust 端 DEFAULT_AUTOSTART_ENABLED 一致） */
 const DEFAULT_AUTOSTART = true;
 
@@ -265,6 +403,103 @@ export async function getAutostartEnabled(): Promise<boolean> {
 export async function setAutostartEnabled(enabled: boolean): Promise<void> {
   if (isTauri) {
     await invoke("set_autostart_enabled_cmd", { enabled });
+  }
+}
+
+/** 「Alt+点击文件快速带入」默认值（与 Rust 端 DEFAULT_ALT_CLICK_ENABLED 一致） */
+const DEFAULT_ALT_CLICK = true;
+
+/**
+ * 获取「Alt+点击文件快速带入」当前是否开启（供「设置 → 常规设置」展示）。
+ */
+export async function getAltClickEnabled(): Promise<boolean> {
+  if (isTauri) {
+    try {
+      return await invoke<boolean>("get_alt_click_enabled");
+    } catch (e) {
+      console.warn("读取 Alt+点击设置失败:", e);
+    }
+  }
+  return DEFAULT_ALT_CLICK;
+}
+
+/**
+ * 设置「Alt+点击文件快速带入」（Rust 端立即更新钩子开关并持久化偏好）。
+ */
+export async function setAltClickEnabled(enabled: boolean): Promise<void> {
+  if (isTauri) {
+    await invoke("set_alt_click_enabled_cmd", { enabled });
+  }
+}
+
+/* ============================================================
+ * `.mspp` 文件关联（双击插件包 → 打开本程序并弹安装确认）
+ * ============================================================ */
+
+/** 「关联 .mspp 插件包」在浏览器调试环境下的默认值 */
+const DEFAULT_FILE_ASSOC = true;
+
+/**
+ * 获取「关联 .mspp 插件包」当前是否生效。
+ *
+ * Rust 侧返回的是**系统注册表的真实状态**（用户可能在 Windows「默认应用」
+ * 里改过），因此与开关的显示保持一致口径。
+ */
+export async function getFileAssocEnabled(): Promise<boolean> {
+  if (isTauri) {
+    try {
+      return await invoke<boolean>("get_file_assoc_enabled");
+    } catch (e) {
+      console.warn("读取文件关联设置失败:", e);
+    }
+  }
+  return DEFAULT_FILE_ASSOC;
+}
+
+/**
+ * 设置「关联 .mspp 插件包」（Rust 端立即写/清 HKCU 注册表并持久化偏好）。
+ *
+ * 返回**写入后的注册表真实状态**：正式构建下可能因权限/策略被系统拦下，
+ * 靠这个返回值把开关回填成实际生效的样子，而不是前端乐观假设。
+ */
+export async function setFileAssocEnabled(enabled: boolean): Promise<boolean> {
+  if (isTauri) {
+    return await invoke<boolean>("set_file_assoc_enabled_cmd", { enabled });
+  }
+  return enabled;
+}
+
+/**
+ * 监听「打开插件包」事件（双击 .mspp / 命令行传入时由 Rust 广播，无 payload）。
+ *
+ * 事件只负责**叫醒**：真正的路径要调 `takePendingPluginOpen` 拉取。
+ * 这样即使广播早于前端挂监听（冷启动双击的场景）也不会丢——前端挂载时
+ * 会主动拉一次作为兜底。
+ */
+export async function onOpenPluginPackage(
+  handler: () => void
+): Promise<UnlistenFn | null> {
+  if (!isTauri) return null;
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    return await listen("my-search://open-plugin-package", () => handler());
+  } catch (e) {
+    console.warn("监听打开插件包事件失败:", e);
+    return null;
+  }
+}
+
+/**
+ * 取出并清空「待打开的插件包路径」（幂等：取出即清空，重复调用返回 null）。
+ */
+export async function takePendingPluginOpen(): Promise<string | null> {
+  if (!isTauri) return null;
+  try {
+    const path = await invoke<string | null>("take_pending_plugin_open");
+    return typeof path === "string" && path !== "" ? path : null;
+  } catch (e) {
+    console.warn("读取待打开插件包失败:", e);
+    return null;
   }
 }
 
@@ -318,11 +553,233 @@ export function flushWindowHeight(): void {
   if (pendingHeight == null) return;
   const h = pendingHeight;
   pendingHeight = null;
+  // 插件视图拖拽出的自定义宽度优先：`set_window_height` 会在 Rust 侧按屏幕
+  // 分档重算宽度，若继续走它会把用户拖出来的宽度冲掉（见 setWindowWidthOverride）。
+  // 走 override 时改用前端 window API 一次下发宽+高，Rust 命令完全不经手。
+  if (widthOverride != null) {
+    void applyWindowSize(widthOverride, h);
+    return;
+  }
   invoke("set_window_height", { height: h }).catch((e) => {
     console.warn("调整窗口高度失败:", e);
   });
 }
 
+/**
+ * 取消当前**尚未下发**的防抖高度（丢弃 pendingHeight 与定时器）。
+ *
+ * 场景：插件「双击还原」这类需要重新确定高度的过渡——过渡期间可能有旧的
+ * `setWindowHeight` 排在防抖队列里（如布局翻转瞬间 ResizeObserver 触发的
+ * `fit()` 量到半变布局后写进来的小值）。清掉它，保证随后那次权威下发不会被
+ * 早先排队的值覆盖/抢先。
+ *
+ * 只影响尚未落到 Rust 的那一次；已 invoke 出去的无法撤回（也不需要）。
+ */
+export function cancelPendingHeight(): void {
+  if (heightFlushTimer != null) {
+    clearTimeout(heightFlushTimer);
+    heightFlushTimer = null;
+  }
+  pendingHeight = null;
+}
+
+/**
+ * 插件视图自定义宽度覆盖值（逻辑像素，null = 未覆盖，按屏幕分档）。
+ *
+ * 为什么需要它：主窗口宽度一直由 Rust 的 `window_width_for()` 按屏幕比例决定，
+ * 而高度的每次自适应（useDetailHeight 的 ResizeObserver）都会重新调
+ * `set_window_height`，Rust 侧顺手把宽度也重算一遍——插件页拖出来的宽度于是
+ * 会在下一次高度更新时被打回。这里在前端拦一道：只要覆盖值存在，高度下发就
+ * 改走 `applyWindowSize`（宽=覆盖值、高=目标值），不再调用 Rust 命令。
+ *
+ * 仅插件视图期间设置，关闭/切走后必须置回 null（见 App.vue 的
+ * applyPluginViewSize / clearPluginViewSizeState），否则普通搜索也会被锁成
+ * 插件的宽度。
+ */
+let widthOverride: number | null = null;
+
+/**
+ * 设置/清除插件视图的自定义窗口宽度覆盖（逻辑像素）。传 null 清除。
+ *
+ * 清除后不会立即改变窗口——下一次 `setWindowHeight`/`flushWindowHeight` 或
+ * 显式 `applyWindowSize` 才生效；调用方通常紧随其后主动下发一次屏幕分档宽度。
+ */
+export function setWindowWidthOverride(width: number | null): void {
+  widthOverride = width;
+}
+
+/** 当前是否处于插件视图自定义宽度下（调试/测试用） */
+export function getWindowWidthOverride(): number | null {
+  return widthOverride;
+}
+
+/**
+ * 一次下发窗口的**宽 + 高**（逻辑像素），走前端 `getCurrentWindow().setSize()`。
+ *
+ * 与 `set_window_height` 的区别：那个只收高度、宽度由 Rust 按屏幕分档算；
+ * 这个宽高都由调用方给定，用于插件视图的自定义尺寸。使用项目已授权的
+ * `core:window:allow-set-size`，不新增 Rust 命令。
+ */
+export async function applyWindowSize(width: number, height: number): Promise<void> {
+  if (!isTauri) return;
+  try {
+    const { getCurrentWindow, LogicalSize } = await import("@tauri-apps/api/window");
+    await getCurrentWindow().setSize(new LogicalSize(width, height));
+  } catch (e) {
+    console.warn("调整窗口尺寸失败:", e);
+  }
+}
+
+/**
+ * 以动画方式过渡窗口尺寸（逻辑像素）。
+ *
+ * ## 为什么不是前端 rAF 逐帧 setSize
+ *
+ * 早期实现在 rAF 里每帧 fire-and-forget 调 `win.setSize()`：这是 60fps 的跨进程
+ * IPC（JS→wry→tao→Win32）且不等返回就连发下一条，原生端缩放指令会堆积，表现为
+ * 明显卡顿。
+ *
+ * ## 为什么不是「窗口一次性到位 + 内容 transform」
+ *
+ * 那样窗口与内容走两条时间线：窗口先跳到目标尺寸、内容再 scale 放大，用户会看到
+ * 「窗口放大一次、内容放大一次」的二次观感。
+ *
+ * ## 现方案：Rust 原生动画线程
+ *
+ * 只发**一次** IPC `animate_window_size`，由 Rust 在后台线程按帧直接 `set_size`：
+ * 无每帧往返、无堆积；且每帧改的是**窗口**，内容靠 CSS `height:100%` 解析视口自然
+ * 铺满——窗口与内容**同帧变化**，严格跟随，无二次放大。
+ *
+ * **不移动窗口位置**——位置应由调用方在动画**之前**一次到位。
+ *
+ * @param width  目标宽度
+ * @param height 目标高度
+ * @param durationMs 动画时长（毫秒），默认 90（偏快，减少等待感）
+ * @param onFrame 保留参数（当前实现由 Rust 驱动，不再逐帧回调前端）；仅为兼容
+ *   既有调用点签名，忽略即可。
+ */
+export const WINDOW_RESIZE_ANIM_MS = 90;
+
+export async function animateWindowSize(
+  width: number,
+  height: number,
+  durationMs = WINDOW_RESIZE_ANIM_MS,
+  _onFrame?: (w: number, h: number) => void,
+): Promise<void> {
+  if (!isTauri) return;
+  // 目标值非法（NaN/Infinity/非正）：不做动画，也不下发，避免把非法尺寸传给窗口
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return;
+  }
+  try {
+    await invoke("animate_window_size", {
+      fromWidth: window.innerWidth,
+      fromHeight: window.innerHeight,
+      toWidth: width,
+      toHeight: height,
+      durationMs,
+    });
+  } catch (e) {
+    console.warn("窗口尺寸过渡失败:", e);
+  }
+}
+
+/** 取消正在进行的窗口尺寸动画（如用户开始拖拽时打断残余动画） */
+export function cancelWindowResizeAnimation(): void {
+  if (!isTauri) return;
+  void invoke("cancel_window_resize_animation").catch(() => {});
+}
+
+/**
+ * 获取当前显示器下的屏幕分档宽度（逻辑像素）。
+ *
+ * 复用 Rust 侧 `target_window_width` 的计算口径（按屏幕宽度分档取占比，
+ * 限制在 [320px, 屏幕宽度 90%] 内），用于前端过渡动画计算目标宽度。
+ */
+export async function getDefaultWindowWidth(): Promise<number> {
+  if (!isTauri) return window.innerWidth;
+  try {
+    const w = await invoke<number>("get_default_window_width");
+    // 容错：命令缺失/返回非正数时退回当前视口宽度，避免把 NaN/null 喂给动画
+    if (typeof w === "number" && Number.isFinite(w) && w > 0) return w;
+  } catch (e) {
+    console.warn("获取默认窗口宽度失败:", e);
+  }
+  return window.innerWidth;
+}
+
+/**
+ * 把窗口移动到指定逻辑坐标（左上角）。用于插件视图的自定义尺寸居中。
+ * 使用已授权的 `core:window:allow-set-position`。
+ */
+export async function setWindowPosition(x: number, y: number): Promise<void> {
+  if (!isTauri) return;
+  try {
+    const { getCurrentWindow, LogicalPosition } = await import("@tauri-apps/api/window");
+    await getCurrentWindow().setPosition(new LogicalPosition(x, y));
+  } catch (e) {
+    console.warn("调整窗口位置失败:", e);
+  }
+}
+
+/**
+ * 把主窗口位置复位到常态（水平居中 + 顶部约屏高 22%），并把宽度复位成屏幕分档。
+ *
+ * 用于**退出插件视图**：插件页会按自己的规则移动窗口（applyPluginWindowSize 的
+ * setWindowPosition），退出后必须回到普通搜索窗的位置。定位口径在 Rust 侧
+ * （`position_window_top_center`，与 show_main_window 共用），前端不复刻公式，
+ * 避免两处公式不一致导致落点偏差。
+ *
+ * 只改宽度与位置，不改高度；高度由调用方随后按内容下发（set_window_height）。
+ */
+export async function resetMainWindowPosition(): Promise<void> {
+  if (!isTauri) return;
+  try {
+    await invoke("reset_main_window_position");
+  } catch (e) {
+    console.warn("复位窗口位置失败:", e);
+  }
+}
+
+/**
+ * 取主窗口当前所在显示器的信息（逻辑像素），供插件视图居中计算用。
+ *
+ * 返回的 `x/y/width/height` 均已换算成**逻辑像素**（Tauri 的 monitor.size()
+ * 是物理像素，需除以缩放系数），与 `setWindowPosition` 的 LogicalPosition
+ * 口径一致；`scale` 一并返回备用。取不到时返回 null（调用方回退到不定位）。
+ */
+export async function getMainMonitorRect(): Promise<{
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  scale: number;
+} | null> {
+  if (!isTauri) return null;
+  try {
+    const { currentMonitor } = await import("@tauri-apps/api/window");
+    const monitor = await currentMonitor();
+    if (!monitor) return null;
+    const scale = monitor.scaleFactor > 0 ? monitor.scaleFactor : 1;
+    return {
+      x: monitor.position.x / scale,
+      y: monitor.position.y / scale,
+      width: monitor.size.width / scale,
+      height: monitor.size.height / scale,
+      scale,
+    };
+  } catch (e) {
+    console.warn("读取显示器信息失败:", e);
+    return null;
+  }
+}
+
+/**
+ * 「最近添加」条带：把主窗口整体上移 delta（逻辑像素）并等量增高，或反向
+ * 还原（delta 为负）。Rust 侧用一次 SetWindowPos 原子完成「改位 + 改高」——
+ * 分两次调用会产生中间帧，条带悬在窗口上边缘之外时会看到跳变。
+ * delta > 0 展开（顶边上移、底边不动，内容屏幕位置不变）；delta < 0 收起。
+ */
 /** 防抖尾沿时长（ms）——50ms 足以合并不在同一帧内的多次调整 */
 const HEIGHT_DEBOUNCE_MS = 50;
 /** 待下发的目标高度（null = 没有待下发） */
@@ -488,4 +945,36 @@ export async function onUpdateComplete(
 export async function openInstaller(): Promise<void> {
   if (!isTauri) return;
   await invoke("open_installer");
+}
+
+/**
+ * 广播「自动下载更新」开关变化（配置窗口写入设置后调用）。
+ *
+ * 两窗口虽共享 localStorage，但另一窗口不会自动感知写入；若不广播，
+ * 关闭开关后搜索窗口的更新徽章要滞留到下一次呼出或 20 分钟定时点才消失。
+ * 搜索窗口收到后立即按新开关重新求值（见 useUpdateChecker.recheckSetting）。
+ */
+export async function notifyAutoDownloadChanged(): Promise<void> {
+  if (!isTauri) return;
+  try {
+    const { emit } = await import("@tauri-apps/api/event");
+    await emit("my-search://auto-download-update-changed");
+  } catch (e) {
+    console.warn("广播自动下载更新设置变更失败:", e);
+  }
+}
+
+/**
+ * 监听「自动下载更新」开关变化（搜索窗口 useUpdateChecker 注册）。
+ * 收到即重求值：关闭 → 立刻隐藏徽章进入静默；开启 → 立刻检查并下载。
+ */
+export async function onAutoDownloadChanged(handler: () => void): Promise<UnlistenFn | null> {
+  if (!isTauri) return null;
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    return await listen("my-search://auto-download-update-changed", () => handler());
+  } catch (e) {
+    console.warn("监听自动下载更新设置变更失败:", e);
+    return null;
+  }
 }

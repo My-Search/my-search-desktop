@@ -11,19 +11,26 @@
 //! - WebView 数据目录固定化：保证 localStorage（订阅/历史/权重）持久化
 //! - 订阅/配置存储（JSON 文件，基于 tauri-plugin-store）
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
 use tauri_plugin_autostart::{AutoLaunchManager, ManagerExt as AutostartManagerExt};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tauri_plugin_store::StoreExt;
 
+mod alt_click;
+mod attachments;
 mod backup;
 mod builtin;
+mod clipboard_history;
 mod cloud;
+mod file_assoc;
 mod market;
 mod plugin_host;
 mod plugin_watch;
+mod screenshot;
+mod system_proxy;
 
 /// 存储已下载的安装文件路径，供 open_installer 使用
 struct DownloadedInstallerPath(Mutex<Option<String>>);
@@ -40,13 +47,111 @@ const SETTINGS_KEY_TOGGLE_SHORTCUT: &str = "toggle_shortcut";
 /// 设置存储里「快捷键绑定列表」的键名（新版：每条 = 快捷键 + 作用类型 + 作用对象）
 const SETTINGS_KEY_SHORTCUT_BINDINGS: &str = "shortcut_bindings";
 
+/// 设置存储里「截图热键已被用户主动解绑」的键名。
+///
+/// 为什么要单独记一个标记：`read_shortcut_bindings` 会**自愈补齐**缺失的截图
+/// 绑定（老用户的列表里本来就没有它，而热键只有真的注册到系统才生效）。
+/// 但「列表里没有截图绑定」有两种含义——「从没配过」与「用户主动解绑了」。
+/// 前者要补齐，后者必须尊重，否则用户解绑后一重启它又回来，像个关不掉的开关。
+const SETTINGS_KEY_SCREENSHOT_UNBOUND: &str = "screenshot_unbound";
+
+/// 设置存储里「剪贴板历史热键已被用户主动解绑」的键名。
+///
+/// 与 `SETTINGS_KEY_SCREENSHOT_UNBOUND` 同理：`read_shortcut_bindings` 会自愈补齐
+/// 缺失的剪贴板历史绑定，必须能区分「从没配过」（要补）与「用户主动解绑」（要尊重）。
+const SETTINGS_KEY_CLIPBOARD_UNBOUND: &str = "clipboard_unbound";
+
 /// 快捷键作用类型：呼出/隐藏搜索窗（默认，仅允许一条）
 const SHORTCUT_ACTION_TOGGLE_WINDOW: &str = "toggle-window";
 /// 快捷键作用类型：直接打开某个插件（作用对象 = 插件 id）
 const SHORTCUT_ACTION_OPEN_PLUGIN: &str = "open-plugin";
+/// 快捷键作用类型：快速过滤（作用对象 = 常用头文本，如「百度翻译」；
+/// 前端呼出后填入「常用头 + 二次搜索分隔符」并立即进入子搜索）
+const SHORTCUT_ACTION_QUICK_FILTER: &str = "quick-filter";
+/// 快捷键作用类型：快捷打开项（作用对象 = 匹配文本，如「百度翻译」；
+/// 前端按文本精确匹配数据项并直接打开，等价于点击结果项）
+const SHORTCUT_ACTION_QUICK_OPEN: &str = "quick-open";
+/// 快捷键作用类型：截图（抓屏 + 全屏框选，无需作用对象。
+/// 实现见 screenshot.rs；这是唯一「不经过前端」的动作——直接在 Rust 里开遮罩窗口，
+/// 因为遮罩必须是独立窗口，插件详情视图办不到）
+const SHORTCUT_ACTION_SCREENSHOT: &str = "screenshot";
+
+/// 「截图」动作的默认快捷键（首次安装 / 尚未绑定时使用）。
+/// 选 ctrl+alt+x：与微信 Alt+A、QQ Ctrl+Alt+A、Snipaste F1 都不冲突，
+/// 也不占用宿主自己的 ctrl+alt+s。
+const DEFAULT_SCREENSHOT_SHORTCUT: &str = "ctrl+alt+x";
+
+/// 快捷键作用类型：剪贴板历史（无需作用对象）。
+///
+/// 与截图不同，它**走前端**：Rust 只负责把主窗口带到前台 + 广播事件
+/// （`EVENT_CLIPBOARD_UPDATED`），由前端打开内置插件 `com.mysearch.clipboard`
+/// 的详情视图（inlay 能在主 WebView 里开，无需独立窗口）。
+const SHORTCUT_ACTION_CLIPBOARD: &str = "clipboard";
+
+/// 「剪贴板历史」动作的默认快捷键。
+/// 选 ctrl+alt+v：贴近「粘贴」的直觉，且不与宿主 ctrl+alt+s（呼出）、
+/// ctrl+alt+x（截图）冲突。
+const DEFAULT_CLIPBOARD_SHORTCUT: &str = "ctrl+alt+v";
 
 /// 快捷键（open-plugin）触发时向主窗口广播的事件名，payload = { pluginId }
 const EVENT_SHORTCUT_OPEN_PLUGIN: &str = "my-search://shortcut-open-plugin";
+/// 快捷键（quick-filter）触发时向主窗口广播的事件名，payload = { filter }
+const EVENT_SHORTCUT_QUICK_FILTER: &str = "my-search://shortcut-quick-filter";
+/// 快捷键（quick-open）触发时向主窗口广播的事件名，payload = { text }
+const EVENT_SHORTCUT_QUICK_OPEN: &str = "my-search://shortcut-quick-open";
+/// 快捷键（clipboard）触发时向主窗口广播的事件名，payload = { pluginId }
+/// （前端据此打开剪贴板历史插件的详情视图）
+const EVENT_SHORTCUT_CLIPBOARD: &str = "my-search://shortcut-clipboard";
+
+/// 资源管理器「Alt+点击文件」触发时向主窗口广播的事件名，
+/// payload = { paths: string[] }（前端并入附件，与粘贴/拖入同管线）。
+/// 必须在 show_main_window 的「窗口已显示」事件**之后**发出（见 alt_click.rs）。
+const EVENT_ATTACH_PATHS: &str = "my-search://attach-paths";
+
+/// 双击 `.mspp` 插件包（或把路径作为参数传给本程序）时广播的事件名，无 payload。
+///
+/// 前端（设置窗口）收到后调 `take_pending_plugin_open` **拉取**路径——事件只负责「叫醒」，
+/// 真正的数据在幂等的拉取命令里。这样 setup 阶段的广播即使早于前端挂监听
+/// 也不会丢（前端挂载时会主动拉一次，见 config/App.vue 的 handleExternalPluginOpen）。
+const EVENT_OPEN_PLUGIN_PACKAGE: &str = "my-search://open-plugin-package";
+
+/// 待处理的「打开插件包」路径（双击 .mspp 或命令行传入）。
+///
+/// 为什么用全局槽而不是直接随事件带 payload：双击可能发生在**进程启动阶段**
+/// （WebView 还没加载完，监听尚未注册），也可能发生在**已有实例**上（单实例
+/// 插件回调里）。两条路径都往这里放，前端通过幂等的 `take_pending_plugin_open`
+/// 取走（取出即清空），因此不会重复弹窗，也不会丢事件。
+static PENDING_PLUGIN_OPEN: Mutex<Option<String>> = Mutex::new(None);
+
+/// 放入一个待打开的插件包路径（覆盖旧的：连续双击多个包时只处理最后一个，
+/// 与资源管理器「打开」的实际语义一致——用户最后一次操作才是意图）。
+fn set_pending_plugin_open(path: String) {
+    if let Ok(mut guard) = PENDING_PLUGIN_OPEN.lock() {
+        *guard = Some(path);
+    }
+}
+
+/// 取出并清空待处理路径（幂等：重复调用第二次返回 None）
+fn take_pending_plugin_open_inner() -> Option<String> {
+    PENDING_PLUGIN_OPEN
+        .lock()
+        .ok()
+        .and_then(|mut guard| guard.take())
+}
+
+/// 处理「用插件包启动/呼出」：置入待处理槽 → 打开配置窗口（插件面板）→ 广播叫醒事件。
+///
+/// 顺序要紧：先放数据再广播，否则前端可能在事件到达后立刻拉取而拉空。
+fn open_plugin_package(app: &tauri::AppHandle, path: String) {
+    set_pending_plugin_open(path);
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        open_config_window(handle).await;
+    });
+    if let Err(e) = app.emit(EVENT_OPEN_PLUGIN_PACKAGE, ()) {
+        eprintln!("广播插件包打开事件失败: {e}");
+    }
+}
 
 /// 设置存储里「开机自启动」用户偏好的键名
 const SETTINGS_KEY_AUTOSTART_ENABLED: &str = "autostart_enabled";
@@ -54,9 +159,250 @@ const SETTINGS_KEY_AUTOSTART_ENABLED: &str = "autostart_enabled";
 /// 用户可在「设置 → 常规设置」里关闭。
 const DEFAULT_AUTOSTART_ENABLED: bool = true;
 
+/// 设置存储里「Alt+点击文件快速带入」的键名（资源管理器/桌面中
+/// 按住 Alt 点击文件 → 呼出搜索框并自动附加该文件）
+const SETTINGS_KEY_ALT_CLICK: &str = "alt_click_attach";
+/// 「Alt+点击文件快速带入」默认值（可在「设置 → 常规设置」关闭）
+const DEFAULT_ALT_CLICK_ENABLED: bool = true;
+
+/// 设置存储里「关联 .mspp 插件包」的键名（写 HKCU 文件关联，双击即安装）
+const SETTINGS_KEY_FILE_ASSOC: &str = "file_assoc_mspp";
+/// 「关联 .mspp 插件包」默认值（可在「设置 → 常规设置」关闭）
+const DEFAULT_FILE_ASSOC_ENABLED: bool = true;
+
+/// 程序化呼出后的「失焦抑制」截止时刻（毫秒级 UNix 时间戳，0 = 不抑制）。
+///
+/// 为什么需要：主窗口规则是**失焦即隐藏**。但 Alt+点击发生在资源管理器里——
+/// 点击本身让资源管理器成为前台窗口，而我们随后 `show()`+`set_focus()` 时，
+/// Windows 的前台锁定（foreground lock）常常不允许后台进程夺焦，于是窗口刚
+/// 显示就收到 `Focused(false)`，被失焦规则立刻隐藏 => 表现为「点了没反应」。
+///
+/// 处理：程序化呼出（show_main_window）时登记一个短暂抑制窗口，期间的失焦
+/// 事件一律忽略——把「呼出后立即被点击残留的失焦吃掉」与「用户主动点到别的
+/// 窗口」区分开。抑制窗口过后，正常的失焦隐藏规则照旧。
+static SUPPRESS_BLUR_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
+
+/// 失焦抑制时长：足够覆盖 show → 前台锁定抖动 → 用户看到窗口这一小段时间，
+/// 又短到不会误挡用户真正的切换动作。
+const BLUR_SUPPRESS_MS: u64 = 600;
+
+/// 当前 UNIX 毫秒时间戳（取不到则 0）
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// 本次会话是否已经应用过「开机自启动」偏好。
 /// 注册表等系统级写操作只在首次运行时做一次，之后启动不再重复写。
 static AUTOSTART_APPLIED: AtomicBool = AtomicBool::new(false);
+
+/// 主题变更事件名（通知所有 WebView 窗口同步主题样式）
+const EVENT_THEME_CHANGED: &str = "my-search://theme-changed";
+
+/// 设置存储里「主题」的键名（存主题**偏好**："light" / "dark" / "system"。
+/// 老版本写的是已解析的 light/dark，值域兼容，按偏好解析即可）。
+const SETTINGS_KEY_THEME: &str = "theme";
+
+/// 主题偏好：用户在设置里的三档选择。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ThemePref {
+    Light,
+    Dark,
+    /// 跟随系统：原生层**不钉主题**（`set_theme(None)`），实时随系统变化
+    System,
+}
+
+/// 当前主题状态（单锁原子读写，避免「偏好」与「解析值」分别更新产生竞态）。
+///
+/// 主题偏好存于 WebView 的 localStorage，Rust 进程读不到，由前端
+/// `apply_app_theme` 上报**（偏好, 已解析深浅色）**两值：
+/// - **偏好**决定原生层钉不钉主题：强制 light/dark → `set_theme(Some(..))` 钉住；
+///   system → `set_theme(None)` 恢复实时跟随。钉住会经 tao → ThemeChanged → wry
+///   把 WebView2 的 `PreferredColorScheme` 一并锁死（钉住期间 tao 还会忽略系统
+///   主题变化）——system 模式若也钉，前端 `matchMedia` 读回的永远是钉住值，
+///   形成「切回跟随系统后停留在旧颜色」的自锁闭环。
+/// - **已解析值**仅供窗口底色铺底（防首帧闪白）：来自前端 `matchMedia`，与
+///   WebView2 渲染同源；system 模式下 Rust 只能读注册表（非 Windows 读不到），
+///   以上报值更准。两者为 None = 尚未上报。
+struct ThemeState {
+    pref: Option<ThemePref>,
+    resolved_dark: Option<bool>,
+}
+
+static APP_THEME: Mutex<ThemeState> = Mutex::new(ThemeState {
+    pref: None,
+    resolved_dark: None,
+});
+
+/// 把主题字符串解析为**偏好**（仅接受 light / dark / system）
+fn parse_theme_pref(theme: &str) -> Option<ThemePref> {
+    match theme {
+        "light" => Some(ThemePref::Light),
+        "dark" => Some(ThemePref::Dark),
+        "system" => Some(ThemePref::System),
+        _ => None,
+    }
+}
+
+/// 把**已解析**的深浅色字符串解析为 bool（仅接受 light / dark，拒绝 system——
+/// 解析值必须是二选一，不能把 system 透到这里当颜色用）
+fn parse_resolved(resolved: &str) -> Option<bool> {
+    match resolved {
+        "dark" => Some(true),
+        "light" => Some(false),
+        _ => None,
+    }
+}
+
+/// 读取已落盘的主题偏好（冷启动 / 创建设置窗口时用于铺底）
+fn read_theme_pref(app: &tauri::AppHandle) -> Option<ThemePref> {
+    settings_store(app)
+        .and_then(|store| store.get(SETTINGS_KEY_THEME))
+        .and_then(|v| v.as_str().and_then(parse_theme_pref))
+}
+
+/// 把主题**偏好**写入 settings store（store 不可用时静默跳过，与自启动设置同款降级）
+fn write_theme_pref(app: &tauri::AppHandle, pref: ThemePref) {
+    let value = match pref {
+        ThemePref::Light => "light",
+        ThemePref::Dark => "dark",
+        ThemePref::System => "system",
+    };
+    if let Some(store) = settings_store(app) {
+        store.set(SETTINGS_KEY_THEME, serde_json::Value::String(value.to_string()));
+        if let Err(e) = store.save() {
+            eprintln!("保存主题设置失败: {e}");
+        }
+    }
+}
+
+/// 系统当前是否为深色（读注册表 AppsUseLightTheme，与 WebView2 的
+/// `prefers-color-scheme` 同源）。仅在尚未收到前端上报时用作兜底。
+#[cfg(windows)]
+fn system_is_dark() -> bool {
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
+    use winreg::RegKey;
+
+    RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey_with_flags(
+            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+            KEY_READ,
+        )
+        .ok()
+        .and_then(|key| key.get_value::<u32, _>("AppsUseLightTheme").ok())
+        .map(|light| light == 0)
+        .unwrap_or(false)
+}
+
+/// 非 Windows 平台没有该注册表项：默认浅色（前端上报后即以上报值为准）
+#[cfg(not(windows))]
+fn system_is_dark() -> bool {
+    false
+}
+
+/// 当前主题状态：偏好优先内存中前端上报值，其次落盘偏好，最后 system；
+/// 解析值优先上报值（与 WebView2 渲染同源），否则按偏好现算。
+fn current_theme(app: &tauri::AppHandle) -> (ThemePref, bool) {
+    let state = APP_THEME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let pref = state
+        .pref
+        .or_else(|| read_theme_pref(app))
+        .unwrap_or(ThemePref::System);
+    let resolved_dark = state.resolved_dark.unwrap_or_else(|| resolve_is_dark(pref));
+    (pref, resolved_dark)
+}
+
+/// 偏好 → 深浅色：强制档直接取值；system 读注册表 AppsUseLightTheme
+/// （与 WebView2 的 `prefers-color-scheme` 默认值同源）。用于铺底背景色
+/// 与尚未收到前端上报时的兜底。
+fn resolve_is_dark(pref: ThemePref) -> bool {
+    match pref {
+        ThemePref::Dark => true,
+        ThemePref::Light => false,
+        ThemePref::System => system_is_dark(),
+    }
+}
+
+/// 偏好 → 原生窗口主题：None = 清掉钉住、实时跟随系统（**system 档专用**）
+fn native_theme(pref: ThemePref) -> Option<tauri::Theme> {
+    match pref {
+        ThemePref::System => None,
+        ThemePref::Dark => Some(tauri::Theme::Dark),
+        ThemePref::Light => Some(tauri::Theme::Light),
+    }
+}
+
+/// 把主题应用到**所有窗口**的原生层：原生框架主题（Windows 标题栏 DWM 深/浅色、
+/// macOS 外观）+ WebView 底色。
+/// - 强制 light/dark：`set_theme(Some(..))` 显式钉住（不依赖 OS 自动跟踪），
+///   保证标题栏与页面内容始终同色。
+/// - system：`set_theme(None)` **恢复实时跟随系统**。钉住期间 tao 会忽略系统
+///   主题变化、并经 ThemeChanged → wry 把 WebView2 的 PreferredColorScheme 一并
+///   锁死（前端 matchMedia 失灵，无法感知系统变化），因此 system 档绝不能钉。
+fn apply_theme_to_windows(app: &tauri::AppHandle, pref: ThemePref, resolved_dark: bool) {
+    use tauri::window::Color;
+
+    let native = native_theme(pref);
+    for (label, win) in app.webview_windows() {
+        let _ = win.set_theme(native);
+        // 浅色下各窗口底色不同：主窗口 html/body 是纯白，设置窗口是 --surface #f5f6f8
+        let background = if resolved_dark {
+            Color(23, 25, 29, 255) // #17191d —— 与深色主题一致
+        } else if label == "main" {
+            Color(255, 255, 255, 255)
+        } else {
+            Color(245, 246, 248, 255) // #f5f6f8 —— 与浅色主题 --surface 一致
+        };
+        let _ = win.set_background_color(Some(background));
+    }
+}
+
+/// 应用主题（前端上报**（偏好, 已解析深浅色）**）到原生层，并广播 CSS 同步事件。
+///
+/// - `theme`：主题**偏好** "light" / "dark" / "system" —— 决定原生层钉不钉主题
+///   （system → `set_theme(None)` 实时跟随，详见 `apply_theme_to_windows`）
+/// - `resolved`：仅 "light" / "dark"（前端已按系统偏好解析）—— 只用于窗口底色铺底
+/// - 记录到内存 + settings.json（供冷启动与创建设置窗口时铺底）
+/// - 同步所有窗口的原生标题栏主题与 WebView 底色
+/// - 广播 theme-changed 事件，让各窗口前端重新应用 CSS 类
+///
+/// 幂等保护：（偏好, 解析值）均未变时跳过 apply_theme_to_windows + emit
+///（避免设置窗口初始化时 setThemeReporter → applyAppTheme 触发冗余的
+/// set_background_color / set_theme / 事件广播，导致 WebView2 重绘闪烁）。
+/// 仅偏好变化（如 light → system 而两档解析值相同）也必须执行——那正是
+/// 「解钉」的时刻，漏掉便会停留在强制主题上。
+#[tauri::command]
+fn apply_app_theme(app: tauri::AppHandle, theme: String, resolved: String) -> Result<(), String> {
+    let Some(pref) = parse_theme_pref(&theme) else {
+        return Err(format!("无效主题: {theme}（仅接受 light / dark / system）"));
+    };
+    let Some(resolved_dark) = parse_resolved(&resolved) else {
+        return Err(format!("无效解析主题: {resolved}（仅接受已解析的 light / dark）"));
+    };
+    // 在同一锁作用域下完成读旧值与写新值，避免并发竞态
+    let unchanged = {
+        let mut guard = APP_THEME
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let unchanged =
+            guard.pref == Some(pref) && guard.resolved_dark == Some(resolved_dark);
+        guard.pref = Some(pref);
+        guard.resolved_dark = Some(resolved_dark);
+        unchanged
+    };
+    write_theme_pref(&app, pref);
+    // 主题未变：只更新持久化值，跳过重绘与广播（避免首帧闪烁/重绘循环）
+    if unchanged {
+        return Ok(());
+    }
+    apply_theme_to_windows(&app, pref, resolved_dark);
+    app.emit(EVENT_THEME_CHANGED, ()).map_err(|e| e.to_string())?;
+    Ok(())
+}
 
 /// 主窗口每次显示时向前端广播的事件名（前端据此清理残留状态）
 const EVENT_MAIN_WINDOW_SHOWN: &str = "my-search://main-window-shown";
@@ -129,6 +475,13 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
     let _ = window.show();
     let _ = window.set_focus();
+    // 呼出后短时间内抑制「失焦即隐藏」：见 SUPPRESS_BLUR_UNTIL_MS 的说明。
+    SUPPRESS_BLUR_UNTIL_MS.store(now_ms() + BLUR_SUPPRESS_MS, Ordering::Relaxed);
+    // 强行带到前台：Alt+点击场景下点击已让资源管理器取得前台，单纯的
+    // show()+set_focus() 会被 Windows 前台锁定拒绝（见 force_foreground 注释）。
+    if let Ok(hwnd) = window.hwnd() {
+        alt_click::force_foreground(windows::Win32::Foundation::HWND(hwnd.0 as *mut _));
+    }
     // 通知前端：窗口重新显示（前端据此复位残留的详情/结果视图与高度，
     // 避免“上次搜过之后再次呼出，下面空着一大块”的问题；
     // 输入框内容属于用户会话，前端会保留并重新触发搜索）
@@ -170,6 +523,94 @@ fn open_plugin_by_shortcut(app: &tauri::AppHandle, plugin_id: &str) {
     );
 }
 
+/// 从设置窗口打开某插件的界面（插件面板的「从插件市场安装」按钮）。
+///
+/// 插件详情视图只存在于主搜索窗口的 WebView 里，因此这里：收起设置窗口 →
+/// 走与全局快捷键**完全相同**的 `open_plugin_by_shortcut`（呼出主窗口 + 广播
+/// open-plugin 事件）。插件是否存在 / 是否启用 / 有没有界面这些判断都在前端
+/// 注册表侧完成（Rust 不持有注册表），这里只负责窗口编排。
+///
+/// 复用 `open_plugin_by_shortcut` 而不是自己 show+emit：它内部的 `show_main_window`
+/// 会先广播「窗口已显示」（前端据此复位残留视图），之后才发 open-plugin 事件，
+/// 顺序反了会被复位清掉。
+#[tauri::command]
+fn open_plugin_view(app: tauri::AppHandle, plugin_id: String) {
+    if let Some(cfg) = app.get_webview_window("config") {
+        if cfg.is_visible().unwrap_or(false) {
+            let _ = cfg.hide();
+        }
+    }
+    open_plugin_by_shortcut(&app, &plugin_id);
+}
+
+/// 「剪贴板历史」快捷键的落地：确保主窗口可见，然后广播事件由前端打开插件详情视图。
+///
+/// 与 `open_plugin_by_shortcut` 同构，只是固定作用于内置剪贴板插件：
+/// Rust 侧负责把窗口带到前台 + 投递事件；插件是否存在/启用/有权限都在前端判定。
+/// 单独用一个事件名（而非复用 open-plugin）：前端可据此把「热键呼出」与
+/// 「用户在设置里绑了 open-plugin」区分开，做不同的展示处理。
+fn clipboard_by_shortcut(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        if !window.is_visible().unwrap_or(false) {
+            show_main_window(app);
+        } else {
+            let _ = window.set_focus();
+        }
+    }
+    let _ = app.emit(
+        EVENT_SHORTCUT_CLIPBOARD,
+        serde_json::json!({ "pluginId": clipboard_history::CLIPBOARD_PLUGIN_ID }),
+    );
+}
+
+/// 「快速过滤」快捷键的落地：确保主窗口可见，然后广播常用头由前端填入搜索框并立即搜索。
+///
+/// 与 `open_plugin_by_shortcut` 同构：Rust 侧只负责把窗口带到前台与投递事件；
+/// 拼接二次搜索分隔符、光标定位、触发搜索都在前端（那里才持有输入框与搜索状态）。
+/// 事件必须在 `show_main_window` 的内部广播（窗口已显示）**之后**发出：前端收到后
+/// 复位视图再填入内容，顺序反了会被复位清掉。
+fn quick_filter_by_shortcut(app: &tauri::AppHandle, filter: &str) {
+    let filter = filter.trim();
+    if filter.is_empty() {
+        return;
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        if !window.is_visible().unwrap_or(false) {
+            // 隐藏状态下按快速过滤快捷键：先按呼出逻辑显示窗口（含窗口已显示事件的复位）
+            show_main_window(app);
+        } else {
+            let _ = window.set_focus();
+        }
+    }
+    let _ = app.emit(
+        EVENT_SHORTCUT_QUICK_FILTER,
+        serde_json::json!({ "filter": filter }),
+    );
+}
+
+/// 「快捷打开项」快捷键的落地：确保主窗口可见，然后广播匹配文本由前端精确匹配并打开。
+///
+/// 与 `quick_filter_by_shortcut` 同构：Rust 侧只负责把窗口带到前台与投递事件；
+/// 匹配、打开、多项时列结果都在前端（那里才持有引擎与结果视图）。
+fn quick_open_by_shortcut(app: &tauri::AppHandle, text: &str) {
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        if !window.is_visible().unwrap_or(false) {
+            // 隐藏状态下按快捷打开快捷键：先按呼出逻辑显示窗口（含窗口已显示事件的复位）
+            show_main_window(app);
+        } else {
+            let _ = window.set_focus();
+        }
+    }
+    let _ = app.emit(
+        EVENT_SHORTCUT_QUICK_OPEN,
+        serde_json::json!({ "text": text }),
+    );
+}
+
 /// 持有当前已注册的全部快捷键绑定，便于重新设置时先 unregister。
 struct ActiveShortcutState(Mutex<Vec<ShortcutBinding>>);
 
@@ -204,6 +645,61 @@ fn write_autostart_pref(app: &tauri::AppHandle, enabled: bool) {
         if let Err(e) = store.save() {
             eprintln!("保存自启动设置失败: {e}");
         }
+    }
+}
+
+/// 从 settings store 中读取「Alt+点击文件快速带入」偏好。
+/// 返回 None 表示从未写入过（首次运行，按 `DEFAULT_ALT_CLICK_ENABLED` 处理）。
+fn read_alt_click_pref(app: &tauri::AppHandle) -> Option<bool> {
+    settings_store(app)
+        .and_then(|store| store.get(SETTINGS_KEY_ALT_CLICK))
+        .and_then(|v| v.as_bool())
+}
+
+/// 把「Alt+点击文件快速带入」偏好写入 settings store（store 不可用时静默跳过：
+/// 本次已生效，重启后回落到默认值，与其它设置项的降级策略一致）。
+fn write_alt_click_pref(app: &tauri::AppHandle, enabled: bool) {
+    if let Some(store) = settings_store(app) {
+        store.set(SETTINGS_KEY_ALT_CLICK, serde_json::Value::Bool(enabled));
+        if let Err(e) = store.save() {
+            eprintln!("保存 Alt+点击设置失败: {e}");
+        }
+    }
+}
+
+/// 读取「关联 .mspp 插件包」偏好（None = 从未写过，按默认值处理）。
+fn read_file_assoc_pref(app: &tauri::AppHandle) -> Option<bool> {
+    settings_store(app)
+        .and_then(|store| store.get(SETTINGS_KEY_FILE_ASSOC))
+        .and_then(|v| v.as_bool())
+}
+
+/// 写入「关联 .mspp 插件包」偏好。
+fn write_file_assoc_pref(app: &tauri::AppHandle, enabled: bool) {
+    if let Some(store) = settings_store(app) {
+        store.set(SETTINGS_KEY_FILE_ASSOC, serde_json::Value::Bool(enabled));
+        if let Err(e) = store.save() {
+            eprintln!("保存文件关联设置失败: {e}");
+        }
+    }
+}
+
+/// 按偏好把 `.mspp` 文件关联登记/注销到系统（幂等）。
+///
+/// dev 与正式构建**同样**登记：开发期也需要「双击 .mspp → 安装确认」的完整体验，
+/// 因此不再对 dev 构建设限（早期版本曾默认禁止 dev 写注册表以免把关联指向
+/// `target/debug/...exe`、顶掉已安装正式版，但那会逼着开发时只能手动配环境变量，
+/// 与「开发环境也要能关联」的需求相悖）。
+/// 注销不受限制：任何构建下关掉开关都应能清干净（dev 下若之前注册过，关开关即清除）。
+///
+/// **注意方向不对称**：开启可能失败，关闭不会。失败必须**如实向上报错**，
+/// 不能静默吞掉——否则前端会误以为生效并把偏好写成 `true`，与注册表实际状态
+/// 长期矛盾（见 `set_file_assoc_enabled_cmd` 的写入时机）。
+fn apply_file_assoc_preference(app: &tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    if enabled {
+        file_assoc::register(app)
+    } else {
+        file_assoc::unregister()
     }
 }
 
@@ -367,17 +863,26 @@ fn apply_autostart_preference(app: &tauri::AppHandle) {
 /// ```json
 /// { "shortcut": "ctrl+alt+s", "action": "toggle-window", "target": null }
 /// { "shortcut": "ctrl+alt+1", "action": "open-plugin",   "target": "com.x.y" }
+/// { "shortcut": "alt+f",      "action": "quick-filter",  "target": "百度翻译" }
+/// { "shortcut": "alt+o",      "action": "quick-open",    "target": "百度翻译" }
 /// ```
 #[derive(Debug, Clone, PartialEq)]
-struct ShortcutBinding {
+pub(crate) struct ShortcutBinding {
     /// 组合键字符串（小写、+ 连接、修饰键在前，如 "ctrl+alt+s"）
-    shortcut: String,
-    /// 作用类型：toggle-window / open-plugin
-    action: String,
-    /// 作用对象：open-plugin 时为插件 id，toggle-window 时为 None
-    target: Option<String>,
+    pub(crate) shortcut: String,
+    /// 作用类型：toggle-window / open-plugin / quick-filter / quick-open
+    pub(crate) action: String,
+    /// 作用对象：open-plugin 时为插件 id，quick-filter 时为常用头文本，
+    /// quick-open 时为匹配文本，toggle-window 时为 None
+    pub(crate) target: Option<String>,
 }
 
+/// 该作用类型是否**需要**作用对象（缺了就不可执行）。
+fn action_requires_target(action: &str) -> bool {
+    action == SHORTCUT_ACTION_OPEN_PLUGIN
+        || action == SHORTCUT_ACTION_QUICK_FILTER
+        || action == SHORTCUT_ACTION_QUICK_OPEN
+}
 impl ShortcutBinding {
     /// 反序列化一条记录；字段缺失 / 作用类型未知时返回 None（跳过该条）。
     fn from_value(v: &serde_json::Value) -> Option<Self> {
@@ -394,8 +899,8 @@ impl ShortcutBinding {
             .and_then(|t| t.as_str())
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
-        if action == SHORTCUT_ACTION_OPEN_PLUGIN && target.is_none() {
-            // 缺少作用对象（插件 id）的绑定无法执行，直接丢弃
+        if action_requires_target(&action) && target.is_none() {
+            // 缺少作用对象（插件 id / 常用头）的绑定无法执行，直接丢弃
             return None;
         }
         Some(Self {
@@ -406,7 +911,7 @@ impl ShortcutBinding {
     }
 
     /// 序列化为 JSON（写 settings.json 用）
-    fn to_value(&self) -> serde_json::Value {
+    pub(crate) fn to_value(&self) -> serde_json::Value {
         serde_json::json!({
             "shortcut": self.shortcut,
             "action": self.action,
@@ -417,7 +922,12 @@ impl ShortcutBinding {
 
 /// 是否是已知的快捷键作用类型
 fn is_known_shortcut_action(action: &str) -> bool {
-    action == SHORTCUT_ACTION_TOGGLE_WINDOW || action == SHORTCUT_ACTION_OPEN_PLUGIN
+    action == SHORTCUT_ACTION_TOGGLE_WINDOW
+        || action == SHORTCUT_ACTION_OPEN_PLUGIN
+        || action == SHORTCUT_ACTION_QUICK_FILTER
+        || action == SHORTCUT_ACTION_QUICK_OPEN
+        || action == SHORTCUT_ACTION_SCREENSHOT
+        || action == SHORTCUT_ACTION_CLIPBOARD
 }
 
 /// 绑定列表长度上限（防止设置文件被写爆 / 注册过多全局热键）
@@ -442,7 +952,7 @@ fn parse_shortcut_bindings_strict(value: &serde_json::Value) -> Result<Vec<Short
     for (i, item) in arr.iter().enumerate() {
         let no = i + 1;
         let binding = ShortcutBinding::from_value(item).ok_or_else(|| {
-            format!("第 {no} 条快捷键不完整（需要「快捷键 + 作用类型」，打开插件还需要选择插件）")
+            format!("第 {no} 条快捷键不完整（需要「快捷键 + 作用类型」，打开插件需选择插件，快速过滤 / 快捷打开项需填写文本）")
         })?;
         if out.iter().any(|b| b.shortcut == binding.shortcut) {
             return Err(format!("快捷键「{}」重复了，请换一个", binding.shortcut));
@@ -485,6 +995,86 @@ fn parse_shortcut_bindings(value: &serde_json::Value) -> Vec<ShortcutBinding> {
     out
 }
 
+/// 记录/清除「用户主动解绑截图热键」标记（见 `SETTINGS_KEY_SCREENSHOT_UNBOUND`）。
+///
+/// 由插件前台的「解绑」按钮与重新绑定走（`screenshot_set_shortcut`）。
+/// 写失败只记日志：本次绑定已生效，重启后最坏是默认热键被补回来。
+pub(crate) fn set_screenshot_unbound(app: &tauri::AppHandle, unbound: bool) {
+    if let Some(store) = settings_store(app) {
+        store.set(SETTINGS_KEY_SCREENSHOT_UNBOUND, serde_json::Value::Bool(unbound));
+        if let Err(e) = store.save() {
+            eprintln!("保存截图快捷键解绑标记失败: {e}");
+        }
+    }
+}
+
+
+///
+/// **为什么需要这一步**：截图热键由宿主注册，而宿主只注册 settings.json 里
+/// `shortcut_bindings` 列出的条目。老用户的列表里只有呼出/打开插件那几条，
+/// 若只把默认键当「没绑定时返回的展示值」，插件前台会显示 Ctrl+Alt+X 而系统里
+/// 根本没注册这个热键——按下去毫无反应（真实踩到过的故障）。
+///
+/// 自愈补齐后「显示的热键」与「已注册的热键」必然一致。三种情况不补：
+///   - 已经有了（用户自己绑的，或上次已补过）；
+///   - 用户**主动解绑**过（`screenshot_unbound` 标记，见插件前台「解绑」按钮）；
+///   - 默认键已被列表里别的动作占用（改动过设置的极小概率）——宁可暂时没有
+///     截图热键（插件前台显示「未设置」，用户可自行绑一个），也不能悄悄抢键。
+fn ensure_screenshot_binding(bindings: &mut Vec<ShortcutBinding>, unbound: bool) {
+    if unbound {
+        return;
+    }
+    if bindings.iter().any(|b| b.action == SHORTCUT_ACTION_SCREENSHOT) {
+        return;
+    }
+    if bindings
+        .iter()
+        .any(|b| b.shortcut == DEFAULT_SCREENSHOT_SHORTCUT)
+    {
+        return;
+    }
+    bindings.push(ShortcutBinding {
+        shortcut: DEFAULT_SCREENSHOT_SHORTCUT.to_string(),
+        action: SHORTCUT_ACTION_SCREENSHOT.to_string(),
+        target: None,
+    });
+}
+
+/// 记录/清除「用户主动解绑剪贴板历史热键」标记（与截图版同构）。
+pub(crate) fn set_clipboard_unbound(app: &tauri::AppHandle, unbound: bool) {
+    if let Some(store) = settings_store(app) {
+        store.set(SETTINGS_KEY_CLIPBOARD_UNBOUND, serde_json::Value::Bool(unbound));
+        if let Err(e) = store.save() {
+            eprintln!("保存剪贴板历史快捷键解绑标记失败: {e}");
+        }
+    }
+}
+
+/// 自愈补齐缺失的「剪贴板历史」绑定（与 `ensure_screenshot_binding` 同构）。
+///
+/// 理由完全一致：剪贴板历史热键由宿主注册，只把默认键当「展示值」是不够的——
+/// 老用户的 settings.json 里没有这一条，插件前台却会显示 Ctrl+Alt+V，按下去没反应。
+/// 三种情况不补：已有、用户主动解绑过、默认键已被别的动作占用。
+fn ensure_clipboard_binding(bindings: &mut Vec<ShortcutBinding>, unbound: bool) {
+    if unbound {
+        return;
+    }
+    if bindings.iter().any(|b| b.action == SHORTCUT_ACTION_CLIPBOARD) {
+        return;
+    }
+    if bindings
+        .iter()
+        .any(|b| b.shortcut == DEFAULT_CLIPBOARD_SHORTCUT)
+    {
+        return;
+    }
+    bindings.push(ShortcutBinding {
+        shortcut: DEFAULT_CLIPBOARD_SHORTCUT.to_string(),
+        action: SHORTCUT_ACTION_CLIPBOARD.to_string(),
+        target: None,
+    });
+}
+
 /// 读「呼出/隐藏」快捷键（从绑定列表里找；列表里没有时回落到默认值）。
 ///
 /// 兼容旧版：列表键不存在时读旧的单键 `toggle_shortcut`（用户升级后不丢配置）。
@@ -499,31 +1089,58 @@ fn read_toggle_shortcut(app: &tauri::AppHandle) -> String {
 
 /// 从 settings store 读取全部快捷键绑定。
 ///
-/// 三种情况：
-///   1. 存了绑定列表 → 原样解析（列表里可以没有 toggle-window，此时呼出键回落到默认值）；
+/// 四种情况：
+///   1. 存了绑定列表 → 原样解析，再补上缺失的截图绑定（见 `ensure_screenshot_binding`）；
 ///   2. 没存过绑定列表、但存过旧版单键 → 迁移成一条 toggle-window（只读，不写回）；
-///   3. 什么都没存（首次运行）→ 一条默认的 toggle-window。
+///   3. 什么都没存（首次运行）→ 一条默认的 toggle-window，再补截图绑定；
+///   4. 存了列表但**少了截图绑定** → 补一条默认截图热键（用户主动解绑过则不补）。
+///
+/// 第 4 条为什么必需：截图热键是宿主的 `screenshot` 动作，动作要生效必须**真的
+/// 注册到系统**。只把 `DEFAULT_SCREENSHOT_SHORTCUT` 当作「没绑定时返回的展示值」
+/// 是不够的——老用户的 settings.json 里没有这一条，插件前台却会显示 Ctrl+Alt+X，
+/// 用户按下去毫无反应（真实踩到过的故障）。
+///
+/// 补齐只作用于**返回值**（本函数是纯读）；下次任何一次 `apply_shortcut_bindings`
+/// 落盘时自然写回，无需在此处额外写文件。
 fn read_shortcut_bindings(app: &tauri::AppHandle) -> Vec<ShortcutBinding> {
     let Some(store) = settings_store(app) else {
-        return vec![ShortcutBinding {
+        let mut bindings = vec![ShortcutBinding {
             shortcut: DEFAULT_TOGGLE_SHORTCUT.to_string(),
             action: SHORTCUT_ACTION_TOGGLE_WINDOW.to_string(),
             target: None,
         }];
+        ensure_screenshot_binding(&mut bindings, false);
+        ensure_clipboard_binding(&mut bindings, false);
+        return bindings;
     };
+    let unbound = store
+        .get(SETTINGS_KEY_SCREENSHOT_UNBOUND)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let clipboard_unbound = store
+        .get(SETTINGS_KEY_CLIPBOARD_UNBOUND)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     if let Some(value) = store.get(SETTINGS_KEY_SHORTCUT_BINDINGS) {
-        return parse_shortcut_bindings(&value);
+        let mut bindings = parse_shortcut_bindings(&value);
+        ensure_screenshot_binding(&mut bindings, unbound);
+        ensure_clipboard_binding(&mut bindings, clipboard_unbound);
+        return bindings;
     }
-    // 旧版单键迁移：把「呼出/隐藏」变成一条绑定
+    // 旧版单键迁移：把「呼出/隐藏」变成一条绑定（同样补上截图/剪贴板绑定：
+    // 迁移期的用户也该拿到可用的热键）
     let legacy = store
         .get(SETTINGS_KEY_TOGGLE_SHORTCUT)
         .and_then(|v| v.as_str().map(|s| s.trim().to_string()))
         .filter(|s| !s.is_empty());
-    vec![ShortcutBinding {
+    let mut bindings = vec![ShortcutBinding {
         shortcut: legacy.unwrap_or_else(|| DEFAULT_TOGGLE_SHORTCUT.to_string()),
         action: SHORTCUT_ACTION_TOGGLE_WINDOW.to_string(),
         target: None,
-    }]
+    }];
+    ensure_screenshot_binding(&mut bindings, unbound);
+    ensure_clipboard_binding(&mut bindings, clipboard_unbound);
+    bindings
 }
 
 /// 写入绑定列表到 settings store（写失败只记日志：本次已生效，重启后回落旧值）。
@@ -556,7 +1173,8 @@ fn shortcut_to_caps(shortcut: &str) -> String {
 
 /// 尝试把一组绑定注册到系统（全部成功才算成功，否则回滚已注册的部分）。
 ///
-/// 每个键的 handler 按「作用类型」分发：呼出/隐藏窗口，或直接打开某个插件。
+/// 每个键的 handler 按「作用类型」分发：呼出/隐藏窗口、直接打开某个插件、
+/// 呼出并填入常用头进入快速过滤，或按文本精确匹配并打开某项（快捷打开项）。
 fn register_binding_handlers(app: &tauri::AppHandle, bindings: &[ShortcutBinding]) -> Result<(), String> {
     let gs = app.global_shortcut();
     let mut registered: Vec<ShortcutBinding> = Vec::new();
@@ -583,6 +1201,22 @@ fn register_binding_handlers(app: &tauri::AppHandle, bindings: &[ShortcutBinding
                 if let Some(plugin_id) = target.as_deref() {
                     open_plugin_by_shortcut(app, plugin_id);
                 }
+            } else if action == SHORTCUT_ACTION_QUICK_FILTER {
+                if let Some(filter) = target.as_deref() {
+                    quick_filter_by_shortcut(app, filter);
+                }
+            } else if action == SHORTCUT_ACTION_QUICK_OPEN {
+                if let Some(text) = target.as_deref() {
+                    quick_open_by_shortcut(app, text);
+                }
+            } else if action == SHORTCUT_ACTION_SCREENSHOT {
+                // 截图是唯一在 Rust 里就地完成的动作：遮罩必须是独立全屏窗口，
+                // 而插件详情视图（inlay）开不了窗口。内部自己 spawn，不阻塞事件循环。
+                screenshot::start_overlay_from_shortcut(app);
+            } else if action == SHORTCUT_ACTION_CLIPBOARD {
+                // 剪贴板历史**走前端**（inlay 详情视图能开在主 WebView 里）：
+                // 这里只把主窗口带到前台并广播事件，由前端打开内置插件详情视图。
+                clipboard_by_shortcut(app);
             } else {
                 toggle_window(app);
             }
@@ -657,10 +1291,13 @@ fn register_shortcut_bindings(app: &tauri::AppHandle, bindings: &[ShortcutBindin
 }
 
 // ===================== HTTP 代理（多级回退） =====================
+/// 构建 HTTP 客户端。**跟随系统代理**（见 `system_proxy` 模块）：每次构建时
+/// 现场读系统代理，系统开代理则走代理、关代理则直连，无需重启应用。
 pub(crate) fn build_client(timeout_secs: u64, ua: &str) -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
+    let builder = reqwest::Client::builder()
         .user_agent(ua)
-        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .timeout(std::time::Duration::from_secs(timeout_secs));
+    crate::system_proxy::apply_system_proxy(builder)
         .build()
         .map_err(|e| e.to_string())
 }
@@ -947,11 +1584,140 @@ fn set_window_height(app: tauri::AppHandle, height: f64) {
     }
 }
 
+/// 获取当前显示器下的屏幕分档宽度（逻辑像素），供前端过渡动画计算目标宽度。
+#[tauri::command]
+fn get_default_window_width(app: tauri::AppHandle) -> f64 {
+    if let Some(window) = app.get_webview_window("main") {
+        window_width_for(&window)
+    } else {
+        MIN_WINDOW_WIDTH
+    }
+}
+
+/// 当前生效的窗口尺寸动画令牌（0 = 无动画）。
+///
+/// 每次 `animate_window_size` 递增它并把新值交给自己的线程；线程每帧比对
+/// 「自己的令牌 == 全局当前令牌」，不等则说明已有更新的动画抢占了它，线程立即
+/// 退出（不碰窗口），从而避免多个动画同时改尺寸互相打架。语义与前端
+/// `cancelWindowResizeAnimation` 对齐：新动画天然取消旧动画。
+static WINDOW_ANIM_TOKEN: AtomicU64 = AtomicU64::new(0);
+/// 递增该令牌即可取消当前动画（前端 cancelWindowResizeAnimation 调用）。
+#[tauri::command]
+fn cancel_window_resize_animation() {
+    WINDOW_ANIM_TOKEN.fetch_add(1, Ordering::SeqCst);
+}
+
+/// 以动画方式把主窗口从 (w0,h0) 过渡到 (w1,h1)，时长 duration_ms。
+///
+/// ## 为什么放在 Rust 而不是前端 rAF
+///
+/// 早期前端实现每帧 fire-and-forget 调 `getCurrentWindow().setSize()`：60fps 的
+/// 跨进程 IPC（JS→wry→tao→Win32）不等返回就连发，原生端缩放指令堆积，表现为
+/// 明显卡顿。这里把逐帧循环搬到**原生线程**：前端只发一次 IPC，此后由 Rust 按帧
+/// 直接 `set_size`，无往返、无堆积。
+///
+/// ## 为什么能「严格内容跟随」
+///
+/// 每帧改的是**窗口**尺寸，内容（`#my_search_box` 等）靠 CSS `height:100%` 解析
+/// WebView 视口自然铺满——窗口与内容同帧变化，不会出现「窗口先放大、内容再放大」
+/// 的二次观感（那正是「窗口一次性到位 + 内容 transform 补间」方案的问题）。
+///
+/// 令牌机制见 `WINDOW_ANIM_TOKEN`：新动画抢占旧动画。
+#[tauri::command]
+fn animate_window_size(
+    app: tauri::AppHandle,
+    from_width: f64,
+    from_height: f64,
+    to_width: f64,
+    to_height: f64,
+    duration_ms: f64,
+) {
+    // 目标非法直接忽略（与前端守卫一致）
+    if !to_width.is_finite() || !to_height.is_finite() || to_width <= 0.0 || to_height <= 0.0 {
+        return;
+    }
+    // 领取新令牌：旧动画线程会在下一帧发现令牌不匹配而自行退出
+    let token = WINDOW_ANIM_TOKEN.fetch_add(1, Ordering::SeqCst) + 1;
+    let start_w = if from_width.is_finite() && from_width > 0.0 {
+        from_width
+    } else {
+        to_width
+    };
+    let start_h = if from_height.is_finite() && from_height > 0.0 {
+        from_height
+    } else {
+        to_height
+    };
+    let duration = duration_ms.max(1.0);
+    std::thread::spawn(move || {
+        let step = std::time::Duration::from_millis(16);
+        let begin = std::time::Instant::now();
+        loop {
+            // 被更新的动画抢占 → 立即退出，不再碰窗口
+            if WINDOW_ANIM_TOKEN.load(Ordering::SeqCst) != token {
+                return;
+            }
+            let Some(window) = app.get_webview_window("main") else {
+                return;
+            };
+            let elapsed = begin.elapsed().as_secs_f64() * 1000.0;
+            let t = (elapsed / duration).min(1.0);
+            // ease-out cubic：快起慢收，与前端既有体感一致
+            let ease = 1.0 - (1.0 - t).powi(3);
+            let w = start_w + (to_width - start_w) * ease;
+            let h = start_h + (to_height - start_h) * ease;
+            let _ = window.set_size(tauri::LogicalSize::new(w, h));
+            if t >= 1.0 {
+                return;
+            }
+            std::thread::sleep(step);
+        }
+    });
+}
+
 /// 把主窗口收回到搜索框高度（隐藏时调用，避免下次呼出残留上次的高窗口）
 fn collapse_main_window(window: &tauri::WebviewWindow) {
     let width = window_width_for(window);
     let _ = window.set_size(tauri::LogicalSize::new(width, COLLAPSED_WINDOW_HEIGHT));
 }
+
+/// 把主窗口位置复位到常态（水平居中 + 顶部约屏高 22%），并把宽度复位成屏幕分档。
+///
+/// 用途：退出**插件视图**时调用。插件页允许用户拖拽改窗口大小并会按自己的
+/// 规则把窗口移到自定义位置（见前端 App.vue 的 applyPluginWindowSize），退出后
+/// 必须回到普通搜索窗的位置——否则窗口会停在插件页那次居中/拖拽留下的位置。
+///
+/// 为什么放在 Rust 而不是前端复刻公式：常态定位口径（含多显示器 origin 偏移、
+/// 高 DPI 缩放换算、y = min(屏高×0.22, 屏高−窗高)）已经在 `position_window_top_center`
+/// 里实现且被 `show_main_window` 使用；复用它能保证「退出插件」与「呼出窗口」
+/// 落点完全一致。前端 centeredPosition 的 y 用的是「剩余空间×0.22」，两者不同，
+/// 不能互相替代。
+///
+/// 只改宽度与位置，**不改高度**——高度仍由前端随后按内容下发（保持既有节奏）。
+/// y 的计算需要当前窗口高度参与（min 的那一项），这里先用当前实际高度参与定位，
+/// 前端紧接着的 set_window_height 只改尺寸不改位置，最终落点即为常态位置。
+#[tauri::command]
+fn reset_main_window_position(app: tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let logical_width = window_width_for(&window);
+        // 用当前实际高度参与居中（只影响 y 的 min 分支，退出瞬间高度通常已由前端
+        // 定好；即便略有偏差也只是几像素，下一次 set_window_height 不再动位置）。
+        let scale = window.scale_factor().unwrap_or(1.0);
+        let scale = if scale > 0.0 { scale } else { 1.0 };
+        let logical_height = window
+            .outer_size()
+            .map(|s| s.height as f64 / scale)
+            .unwrap_or(COLLAPSED_WINDOW_HEIGHT);
+        let _ = window.set_size(tauri::LogicalSize::new(logical_width, logical_height));
+        if let Some(monitor) = target_monitor(&window) {
+            position_window_top_center(&window, &monitor, logical_width);
+        } else {
+            // 取不到显示器时退回系统居中（与 show_main_window 的兜底一致）
+            let _ = window.center();
+        }
+    }
+}
+
 
 // ===================== 命令 =====================
 /// 打开外部链接（默认浏览器）
@@ -994,21 +1760,28 @@ async fn open_config_window(app: tauri::AppHandle) {
         }
     }
 
+    let (pref, is_dark) = current_theme(&app);
+    let native = native_theme(pref);
+
     if let Some(win) = app.get_webview_window("config") {
+        // 先设置原生主题与底色再 show：WebView2 的 prefers-color-scheme 跟随窗口主题，
+        // 如果 show 后再 set_theme，页面内联脚本读到的 matchMedia 值与实际不匹配，
+        // 导致 initTheme 时发生 class 切换 + 事件派发 = 频闪。
+        // （system 档 native=None：跟随系统，与页面内联脚本读到的 matchMedia 同源）
+        let _ = win.set_theme(native);
+        let _ = win.set_background_color(Some(if is_dark {
+            Color(23, 25, 29, 255) // #17191d —— 与深色主题 --surface 一致
+        } else {
+            Color(245, 246, 248, 255) // #f5f6f8 —— 与浅色主题 --surface 一致
+        }));
         let _ = win.show();
         let _ = win.set_focus();
         return;
     }
 
-    // 按系统当前深浅色给 WebView 铺一层同色底：
-    // 页面首帧渲染前（HTML/JS 尚未执行）露出的是 WebView 自身的背景色，
-    // 默认是白色，会在深色系统下造成「先白一下再变深色」的闪白。
-    // 这里取主窗口的系统主题决定底色，与 config.html 内联脚本 / CSS 变量保持一致。
-    let is_dark = app
-        .get_webview_window("main")
-        .and_then(|w| w.theme().ok())
-        .map(|t| matches!(t, tauri::Theme::Dark))
-        .unwrap_or(false);
+    // 按当前主题给 WebView 铺一层同色底：页面首帧渲染前（HTML/JS 尚未执行）
+    // 露出的是 WebView 自身的背景色，默认是白色，会在深色下造成「先白一下
+    // 再变深色」的闪白。取自前端上报值 / 落盘偏好 / 系统兜底（见 current_theme）。
     let background = if is_dark {
         Color(23, 25, 29, 255) // #17191d —— 与深色主题 --surface 一致
     } else {
@@ -1025,7 +1798,10 @@ async fn open_config_window(app: tauri::AppHandle) {
     // 导致用户无法通过鼠标拖拽调整订阅顺序。
     // 详见 Tauri 文档 dragDropEnabled：Disabling it is required to use
     // HTML5 drag and drop on the frontend on Windows.
-    let builder = WebviewWindowBuilder::new(&app, "config", config_url)
+    //
+    // 不设 .visible(true)：先 build 并在 show 前设好 set_theme，确保页面内联脚本
+    // 读到与 background_color 一致的 prefers-color-scheme，避免首帧类不匹配。
+    let win = WebviewWindowBuilder::new(&app, "config", config_url)
         .disable_drag_drop_handler()
         .title("我的搜索 - 设置")
         // 设置窗口：横向布局（左菜单 + 右内容），宽度明显大于高度
@@ -1035,10 +1811,19 @@ async fn open_config_window(app: tauri::AppHandle) {
         .center()
         .decorations(true)
         .background_color(background)
-        .visible(true);
-    if let Err(e) = builder.build() {
-        eprintln!("创建配置窗口失败: {e}");
-    }
+        .build();
+    let win = match win {
+        Ok(win) => win,
+        Err(e) => {
+            eprintln!("创建配置窗口失败: {e}");
+            return;
+        }
+    };
+    // 在显示窗口前设置原生主题：使 WebView2 的 prefers-color-scheme 与 background
+    // 从一开始就一致，页面内联脚本不会读到错误的值。
+    let _ = win.set_theme(native);
+    let _ = win.show();
+    let _ = win.set_focus();
 }
 
 // ===================== 版本更新 =====================
@@ -1338,6 +2123,61 @@ fn set_autostart_enabled_cmd(app: tauri::AppHandle, enabled: bool) -> Result<(),
     Ok(())
 }
 
+/// 获取「Alt+点击文件快速带入」开关（供「设置 → 常规设置」展示）
+#[tauri::command]
+fn get_alt_click_enabled() -> bool {
+    alt_click::is_enabled()
+}
+
+/// 设置「Alt+点击文件快速带入」并立即生效（钩子常驻，内存置位即切换，
+/// 无需重装钩子；偏好落盘供下次启动读取）
+#[tauri::command]
+fn set_alt_click_enabled_cmd(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    alt_click::set_enabled(enabled);
+    write_alt_click_pref(&app, enabled);
+    Ok(())
+}
+
+/// 获取「关联 .mspp 插件包」开关（供「设置 → 常规设置」展示）。
+///
+/// 以**系统注册表的真实状态**为准（而非内存偏好）：用户可能在 Windows
+/// 「默认应用」里改过，或另一个版本的程序写过——与 `is_autostart_enabled`
+/// 同一口径，面板显示的必须是真正生效的状态。
+#[tauri::command]
+fn get_file_assoc_enabled() -> bool {
+    file_assoc::is_registered()
+}
+
+/// 设置「关联 .mspp 插件包」并立即写/清注册表（偏好落盘供下次启动自愈）。
+///
+/// 返回值是**写完后的注册表真实状态**（而非请求的 `enabled`）：前端拿它回填开关，
+/// 于是面板显示的永远是真正生效的状态。
+///
+/// 写入顺序刻意是「先动注册表、成功后再落偏好」：
+///   - 若先写偏好再写注册表，注册表失败（权限/被策略拦）会留下 `true` 偏好 +
+///     空注册表的矛盾组合，下次启动还会拿这个脏值去自愈（本项目实际踩过）；
+///   - 失败时**偏好保持原样**，注册表与偏好都仍是旧状态，两者一致。
+fn set_file_assoc_enabled_inner(app: &tauri::AppHandle, enabled: bool) -> Result<bool, String> {
+    apply_file_assoc_preference(app, enabled)?;
+    write_file_assoc_pref(app, enabled);
+    Ok(file_assoc::is_registered())
+}
+
+/// 设置「关联 .mspp 插件包」命令（见 `set_file_assoc_enabled_inner`）
+#[tauri::command]
+fn set_file_assoc_enabled_cmd(app: tauri::AppHandle, enabled: bool) -> Result<bool, String> {
+    set_file_assoc_enabled_inner(&app, enabled)
+}
+
+/// 取出并清空「待打开的插件包路径」（双击 .mspp / 命令行传入）。
+///
+/// 幂等：取出即清空，重复调用返回 None。前端在**收到叫醒事件**与**自身挂载时**
+/// 各调一次，两条路径共用这一个消费点，因此不会重复弹窗也不会漏。
+#[tauri::command]
+fn take_pending_plugin_open() -> Option<String> {
+    take_pending_plugin_open_inner()
+}
+
 /// 获取默认订阅（内置官方订阅原文本，与油猴版一致）
 #[tauri::command]
 fn get_default_subscribe_text() -> String {
@@ -1403,6 +2243,10 @@ fn set_toggle_shortcut(app: tauri::AppHandle, shortcut: String) -> Result<(), St
 ///
 /// 校验通过后整体重新注册；任一条注册失败（被其它程序占用等）会回滚到
 /// 改动前的状态且**不落盘**，并返回错误信息。
+///
+/// 与插件前台的解绑保持同一口径：面板里删掉截图绑定时也要记「用户主动解绑」，
+/// 否则读绑定时的自愈补齐会在下次启动把它加回来（**两个入口的行为必须一致**，
+/// 否则用户会发现「面板里删了、插件里还在」）。
 #[tauri::command]
 fn set_shortcut_bindings(
     app: tauri::AppHandle,
@@ -1413,7 +2257,17 @@ fn set_shortcut_bindings(
     if parsed == read_shortcut_bindings(&app) {
         return Ok(());
     }
-    apply_shortcut_bindings(&app, &parsed)
+    let has_screenshot = parsed
+        .iter()
+        .any(|b| b.action == SHORTCUT_ACTION_SCREENSHOT);
+    let has_clipboard = parsed
+        .iter()
+        .any(|b| b.action == SHORTCUT_ACTION_CLIPBOARD);
+    apply_shortcut_bindings(&app, &parsed)?;
+    // 只有注册+落盘都成功后，才把「解绑」意图记下来
+    set_screenshot_unbound(&app, !has_screenshot);
+    set_clipboard_unbound(&app, !has_clipboard);
+    Ok(())
 }
 
 /// 注册整套绑定并持久化（注册失败时回滚且不落盘）。
@@ -1421,6 +2275,39 @@ fn apply_shortcut_bindings(app: &tauri::AppHandle, bindings: &[ShortcutBinding])
     register_shortcut_bindings(app, bindings)?;
     write_shortcut_bindings(app, bindings);
     Ok(())
+}
+
+// ===================== 插件侧快捷键桥接（screenshot / clipboard 用） =====================
+//
+// 插件的「设置自己的热键」不该自己存一份键值：权威存储是宿主
+// settings.json 的 shortcut_bindings。于是插件 API 走这里读改写，
+// 复用宿主既有的严格校验 / 注册回滚 / 落盘链路，两边永远一致。
+//
+// **必须原样携带 target**：绑定列表里可能同时存在 open-plugin / quick-filter /
+// quick-open 这些「需要作用对象」的条目。桥接若把它们的作用对象丢掉（统一写成
+// null），严格解析会因为「缺作用对象」整体报错——用户只是改一个自己的键，
+// 却因为列表里别的绑定而失败（真实踩到过的故障）。因此这里用完整的
+// `ShortcutBinding` 往返，不降级成 (action, shortcut) 二元组。
+
+/// 读当前绑定列表（完整结构，供插件侧读改写；不丢 target）。
+pub(crate) fn read_shortcut_bindings_for_plugin(app: &tauri::AppHandle) -> Vec<ShortcutBinding> {
+    read_shortcut_bindings(app)
+}
+
+/// 写回绑定列表：严格校验 + 注册 + 落盘。
+///
+/// 与 `apply_shortcut_bindings` 同一条链路，但入口处先做一次「原样序列化」，
+/// 把插件给出的完整绑定（含 target）交给严格解析——不再硬编码 null。
+pub(crate) fn apply_shortcut_bindings_for_plugin(
+    app: &tauri::AppHandle,
+    bindings: &[ShortcutBinding],
+) -> Result<(), String> {
+    let value = serde_json::Value::Array(bindings.iter().map(|b| b.to_value()).collect());
+    let parsed = parse_shortcut_bindings_strict(&value)?;
+    if parsed == read_shortcut_bindings(app) {
+        return Ok(());
+    }
+    apply_shortcut_bindings(app, &parsed)
 }
 
 // ===================== 备份 / 导入 / 还原 =====================
@@ -1437,6 +2324,7 @@ fn apply_shortcut_bindings(app: &tauri::AppHandle, bindings: &[ShortcutBinding])
 const BACKUP_SETTINGS_KEYS: &[&str] = &[
     SETTINGS_KEY_SHORTCUT_BINDINGS,
     SETTINGS_KEY_AUTOSTART_ENABLED,
+    SETTINGS_KEY_ALT_CLICK,
 ];
 
 /// 读取可备份的设置项（返回一个 JSON 对象）
@@ -1486,6 +2374,13 @@ pub(crate) fn write_backup_settings(
         if let Err(e) = set_autostart_enabled(app, enabled) {
             eprintln!("还原后应用开机自启动失败: {e}");
         }
+    }
+    // Alt+点击带入：同步内存开关（落盘已在上面的循环里完成）
+    if let Some(enabled) = values
+        .get(SETTINGS_KEY_ALT_CLICK)
+        .and_then(|v| v.as_bool())
+    {
+        alt_click::set_enabled(enabled);
     }
     Ok(())
 }
@@ -1749,6 +2644,20 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // 单实例必须注册为**第一个**插件（官方要求：它要在其它插件初始化之前
+        // 抢到命名互斥体，否则第二个实例已经把快捷键/托盘建好了才发现该退出）。
+        //
+        // 回调在**第二个实例启动**时于**第一个实例**里执行，argv 是第二个实例的
+        // 命令行。两种情况：
+        //   - 带 .mspp 路径（双击插件包）→ 走「打开插件包」：置入待处理槽 + 打开配置窗口 + 广播；
+        //   - 其它（用户又点了一次图标 / 开机自启与手工启动撞车）→ 只呼出窗口，
+        //     与点托盘图标同效，不重复起进程。
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            match file_assoc::plugin_path_from_args(&argv) {
+                Some(path) => open_plugin_package(app, path),
+                None => show_main_window(app),
+            }
+        }))
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -1763,8 +2672,13 @@ pub fn run() {
             http_get,
             http_request,
             set_window_height,
+            get_default_window_width,
+            animate_window_size,
+            cancel_window_resize_animation,
+            reset_main_window_position,
             open_url,
             quit_app,
+            apply_app_theme,
             open_config_window,
             get_default_subscribe_text,
             get_toggle_shortcut,
@@ -1773,6 +2687,13 @@ pub fn run() {
             set_shortcut_bindings,
             get_autostart_enabled,
             set_autostart_enabled_cmd,
+            get_alt_click_enabled,
+            set_alt_click_enabled_cmd,
+            get_file_assoc_enabled,
+            set_file_assoc_enabled_cmd,
+            take_pending_plugin_open,
+            // 设置窗口「从插件市场安装」：收起设置窗 + 呼出主窗 + 打开插件界面
+            open_plugin_view,
             check_update,
             start_update_download,
             open_installer,
@@ -1799,11 +2720,62 @@ pub fn run() {
             plugin_host::plugin_read_dev_manifest,
             // 目录挂载插件（开发模式）的自动重载：登记/取消源目录监听
             plugin_host::plugin_watch_dir,
+            // ---------- 搜索框附件（粘贴/拖入的文件与文件夹） ----------
+            attachments::clipboard_file_paths,
+            attachments::fs_describe_paths,
+            attachments::attachments_sync,
+            attachments::attachment_read,
+            attachments::attachment_preview,
+            attachments::attachment_list,
+            attachments::attachment_list_cancel,
+            attachments::attachment_open,
+            attachments::attachment_reveal,
+            // 系统文件图标（资源管理器同款）：输入框附件 chip 用
+            attachments::attachment_file_icons,
             // ---------- 插件市场 ----------
             market::market_fetch_raw,
+            // ---------- 截图（热键框选 + 标注 + 剪贴板 + 插件画廊） ----------
+            // 抓屏与遮罩：遮罩页 / 快捷键动作调用
+            screenshot::screenshot_capture,
+            screenshot::screenshot_open_overlay,
+            screenshot::screenshot_close_overlay,
+            screenshot::screenshot_overlay_image,
+            screenshot::screenshot_crop,
+            screenshot::screenshot_selection_image,
+            // 插件：一次调用完成「开遮罩 → 拖选 → 关遮罩」，回物理像素矩形
+            screenshot::screenshot_pick_region,
+            // 产出：写剪贴板 / 落盘 / 广播
+            screenshot::screenshot_copy_image,
+            screenshot::screenshot_copy_text,
+            screenshot::screenshot_save_shot,
+            // 产出的「另存为」：弹系统保存框让用户选目录/文件名
+            screenshot::screenshot_save_shot_as,
+            screenshot::screenshot_notify_saved,
+            // 画廊：列/读/删/清理（都在插件私有目录内，路径已做穿越校验）
+            screenshot::screenshot_list_shots,
+            screenshot::screenshot_shots_dir,
+            screenshot::screenshot_read_shot,
+            screenshot::screenshot_delete_shot,
+            screenshot::screenshot_prune_shots,
+            // 插件侧：读/改「截图」快捷键（权威存储是宿主的 shortcut_bindings）
+            screenshot::screenshot_get_shortcut,
+            screenshot::screenshot_set_shortcut,
+            // ---------- 剪贴板历史（原生监听 + 只读抓取 + 插件私有目录落盘） ----------
+            // 列表/读图/删除/清空/复制回剪贴板（复制是唯一的写剪贴板路径，用户显式触发）
+            clipboard_history::clipboard_history_list,
+            // 分页列表（每页 30 条、触底加载更多；支持「仅收藏」与关键词过滤后再分页）
+            clipboard_history::clipboard_history_page,
+            clipboard_history::clipboard_history_read_image,
+            clipboard_history::clipboard_history_delete,
+            clipboard_history::clipboard_history_clear,
+            clipboard_history::clipboard_history_copy,
+            // 收藏 / 取消收藏（收藏条目永久保留，不参与上限淘汰与默认清空）
+            clipboard_history::clipboard_history_set_favorite,
+            // 插件侧：读/改「剪贴板历史」快捷键
+            clipboard_history::clipboard_history_get_shortcut,
+            clipboard_history::clipboard_history_set_shortcut,
             // ---------- 内置插件 ----------
-            builtin::builtin_list,
-            builtin::builtin_mark_removed,
+            builtin::builtin_list,            builtin::builtin_mark_removed,
             builtin::builtin_clear_removed,
             builtin::builtin_resource_path,
             // ---------- 备份 / 导入 / 还原 ----------
@@ -1824,6 +2796,19 @@ pub fn run() {
             cloud::sync_clear_credentials,
         ])
         .setup(|app| {
+            // 冷启动：先把落盘/系统兜底的主题状态记入内存，使后续前端上报时的幂等
+            // 校验（偏好 + 解析值均未变即跳过）能正确命中——否则首次上报时 APP_THEME
+            // 全为 None，即使主题没变也会走完 apply_theme_to_windows + emit，
+            // 对刚创建的设置窗口造成冗余的 set_background_color / set_theme 而频闪。
+            let boot_pref = read_theme_pref(app.handle()).unwrap_or(ThemePref::System);
+            let boot_dark = resolve_is_dark(boot_pref);
+            {
+                let mut guard = APP_THEME
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                guard.pref = Some(boot_pref);
+                guard.resolved_dark = Some(boot_dark);
+            }
             // 主窗口使用固定 WebView 数据目录（localStorage 持久化）
             if let Some(main) = app.get_webview_window("main") {
                 // 初始定宽与定位（尚未显示，真正呼出时会按当时所在屏幕再算一次）
@@ -1833,20 +2818,69 @@ pub fn run() {
                     position_window_top_center(&main, &monitor, width);
                 }
             }
+            // 冷启动先把上次的主题铺到原生层：窗口首次显示时若 WebView 尚未绘制，
+            // 露出的是窗口底色（tauri.conf.json 里配的是白色），深色下会闪白。
+            // 此刻前端还没上报，取落盘偏好 / 系统兜底；前端挂载后会立即以
+            // 真实偏好 + `prefers-color-scheme` 解析值覆盖（两者同源，通常一致）。
+            apply_theme_to_windows(app.handle(), boot_pref, boot_dark);
             // 读取自定义快捷键绑定（无自定义则用默认呼出键），逐条注册
             let bindings = read_shortcut_bindings(app.handle());
             if let Err(e) = register_shortcut_bindings(app.handle(), &bindings) {
                 eprintln!("注册全局快捷键失败: {e}");
             }
+            // Alt+点击资源管理器文件快速带入：先读偏好再装全局鼠标钩子
+            // （钩子只观察不吞点击；回调极轻，解析在异步任务里做，见 alt_click.rs）
+            alt_click::set_enabled(
+                read_alt_click_pref(app.handle()).unwrap_or(DEFAULT_ALT_CLICK_ENABLED),
+            );
+            alt_click::install(app.handle().clone());
+            // 剪贴板历史监听：建隐藏 message-only 窗口挂 AddClipboardFormatListener。
+            // 必须在带消息循环的主线程装（本处满足）；失败只记日志，不阻断启动。
+            clipboard_history::install(app.handle().clone());
             apply_autostart_preference(app.handle());
-            // 插件后台进程：只拉起「开机自启」已开启的插件（其它按需启动）
-            plugin_host::autostart_enabled_backends(app.handle());
+            // `.mspp` 文件关联：按偏好登记（正式构建 / dev 逃生门）或清除。
+            // 登记是幂等的自愈写入——exe 换位置、图标资源更新都会在这里被纠正。
+            // 失败只记日志，不阻断启动（文件关联不是核心功能）。
+            //
+            // 失败只记日志，不阻断启动（文件关联不是核心功能）。
+            if let Err(e) = apply_file_assoc_preference(
+                app.handle(),
+                read_file_assoc_pref(app.handle()).unwrap_or(DEFAULT_FILE_ASSOC_ENABLED),
+            ) {
+                eprintln!("应用 .mspp 文件关联设置失败（不影响启动）: {e}");
+            }
+            // 本次启动是否由「双击插件包」触发：把路径放进待处理槽，并延迟打开配置窗口。
+            //
+            // 为什么要延迟：setup 阶段 WebView 还没加载完，前端监听尚未注册，
+            // 此刻广播会被丢掉。等约 400ms（覆盖 WebView 首帧 + 前端挂载）再打开
+            // 并广播——前端挂载时也会主动拉一次，两条路径都指向同一个幂等命令，
+            // 因此这个延时只是「让界面更早出现」，不是正确性的依赖。
+            if let Some(path) = file_assoc::plugin_path_from_args(&std::env::args().collect::<Vec<_>>())
+            {
+                set_pending_plugin_open(path);
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(400));
+                    let cfg_handle = handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        open_config_window(cfg_handle).await;
+                    });
+                    let _ = handle.emit(EVENT_OPEN_PLUGIN_PACKAGE, ());
+                });
+            }
+            // 托盘先建好：它与全局快捷键是「呼出」的两条入口，必须赶在任何可能
+            // 阻塞的初始化之前就绪（否则事件循环被拖住时，用户连托盘都看不到）。
+            setup_tray(app.handle())?;
             // 内置插件引导（广播应装未装的插件 id，前端接收后走既有安装管线）
             let boot = builtin::bootstrap(app.handle());
             if !boot.installable.is_empty() || !boot.skipped_removed.is_empty() {
                 let _ = app.emit("builtin://available", &boot);
             }
-            setup_tray(app.handle())?;
+            // 插件后台进程放最后且**不阻塞**：只拉起「开机自启」已开启的插件
+            // （其它按需启动）。spawn + 握手在后台线程完成，setup 立即返回，
+            // 应用能马上被全局快捷键呼出——否则一个握手失败的插件会把用户
+            // 挡在 startupTimeoutMs（最长 30s）之外。
+            plugin_host::autostart_enabled_backends(app.handle());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -1861,6 +2895,12 @@ pub fn run() {
             let tauri::WindowEvent::Focused(false) = event else {
                 return;
             };
+            // 呼出后短暂抑制：Alt+点击发生的呼出常常刚 show 就被前台锁定
+            // 的抖动夺焦，此刻隐藏等于「点了没反应」。抑制期内的失焦忽略。
+            let until = SUPPRESS_BLUR_UNTIL_MS.load(Ordering::Relaxed);
+            if until != 0 && now_ms() < until {
+                return;
+            }
             // 隐藏时把窗口收回到搜索框高度，
             // 这样下次呼出不会残留上一次搜索时的高窗口（下方空一大块）
             if let Some(main) = window.app_handle().get_webview_window("main") {
@@ -1875,6 +2915,8 @@ pub fn run() {
             if let tauri::RunEvent::Exit = event {
                 plugin_watch::stop_dispatch();
                 plugin_watch::unwatch_all();
+                // 卸掉剪贴板监听并销毁监听窗口
+                clipboard_history::uninstall();
             }
         });
 }
@@ -1901,6 +2943,25 @@ mod tests {
     #[test]
     fn default_toggle_shortcut_is_valid() {
         assert!(Shortcut::try_from(super::DEFAULT_TOGGLE_SHORTCUT).is_ok());
+    }
+
+    #[test]
+    fn theme_strings_parse_into_pref_and_resolved() {
+        use super::{parse_resolved, parse_theme_pref, ThemePref};
+
+        // 偏好接受三档；老 settings.json 里的 light/dark（旧契约写的是已解析值）
+        // 值域兼容，按强制档读取，前端首个上报帧会改写为真实偏好
+        assert_eq!(parse_theme_pref("light"), Some(ThemePref::Light));
+        assert_eq!(parse_theme_pref("dark"), Some(ThemePref::Dark));
+        assert_eq!(parse_theme_pref("system"), Some(ThemePref::System));
+        assert_eq!(parse_theme_pref("System"), None);
+        assert_eq!(parse_theme_pref(""), None);
+
+        // 解析值只接受二色，system 不得当颜色透传
+        assert_eq!(parse_resolved("dark"), Some(true));
+        assert_eq!(parse_resolved("light"), Some(false));
+        assert_eq!(parse_resolved("system"), None);
+        assert_eq!(parse_resolved("auto"), None);
     }
 
     #[test]
@@ -2000,6 +3061,294 @@ mod tests {
             { "shortcut": "ctrl+alt+9", "action": SHORTCUT_ACTION_TOGGLE_WINDOW }
         ]))
         .is_err());
+    }
+
+    /// 截图动作：无作用对象，且默认键不能与宿主默认的呼出键冲突。
+    ///
+    /// 这两条都是「注册得上去但用户按了没反应」类故障的防线：
+    /// 缺作用对象本应被判非法（但它不需要），默认键撞车则会让 toggle 注册失败。
+    #[test]
+    fn screenshot_action_needs_no_target() {
+        use super::{
+            is_known_shortcut_action, parse_shortcut_bindings_strict, DEFAULT_SCREENSHOT_SHORTCUT,
+            DEFAULT_TOGGLE_SHORTCUT, SHORTCUT_ACTION_SCREENSHOT, SHORTCUT_ACTION_TOGGLE_WINDOW,
+        };
+
+        assert!(is_known_shortcut_action(SHORTCUT_ACTION_SCREENSHOT));
+
+        // 没有 target 也合法（与 open-plugin / quick-* 相反）
+        let parsed = parse_shortcut_bindings_strict(&serde_json::json!([
+            { "shortcut": DEFAULT_TOGGLE_SHORTCUT, "action": SHORTCUT_ACTION_TOGGLE_WINDOW },
+            { "shortcut": DEFAULT_SCREENSHOT_SHORTCUT, "action": SHORTCUT_ACTION_SCREENSHOT }
+        ]))
+        .unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[1].action, SHORTCUT_ACTION_SCREENSHOT);
+        assert_eq!(parsed[1].target, None);
+
+        // 默认截图键必须与默认呼出键不同，否则开箱即用就会注册冲突
+        assert_ne!(DEFAULT_SCREENSHOT_SHORTCUT, DEFAULT_TOGGLE_SHORTCUT);
+    }
+
+    /// 截图绑定自愈补齐：老用户的列表里没有它，必须被补上才能真正注册。
+    ///
+    /// 这是「插件前台显示 Ctrl+Alt+X，按下去没反应」那个故障的根因防线：
+    /// 热键只有进了绑定列表才会被 `register_binding_handlers` 注册到系统。
+    #[test]
+    fn ensure_screenshot_binding_self_heals() {
+        use super::{
+            ensure_screenshot_binding, parse_shortcut_bindings, DEFAULT_SCREENSHOT_SHORTCUT,
+            SHORTCUT_ACTION_SCREENSHOT, SHORTCUT_ACTION_TOGGLE_WINDOW,
+        };
+
+        // 老用户的列表（只有呼出键、没有截图）→ 补上
+        let mut old = parse_shortcut_bindings(&serde_json::json!([
+            { "shortcut": "ctrl+alt+s", "action": SHORTCUT_ACTION_TOGGLE_WINDOW }
+        ]));
+        assert_eq!(old.len(), 1);
+        ensure_screenshot_binding(&mut old, false);
+        assert_eq!(old.len(), 2);
+        assert_eq!(old[1].action, SHORTCUT_ACTION_SCREENSHOT);
+        assert_eq!(old[1].shortcut, DEFAULT_SCREENSHOT_SHORTCUT);
+        assert_eq!(old[1].target, None);
+
+        // 幂等：已经有就不再补（重复补会因「组合键重复」导致整体注册失败）
+        ensure_screenshot_binding(&mut old, false);
+        assert_eq!(old.len(), 2);
+
+        // 用户主动解绑过 → 尊重，不补
+        let mut unbound = parse_shortcut_bindings(&serde_json::json!([
+            { "shortcut": "ctrl+alt+s", "action": SHORTCUT_ACTION_TOGGLE_WINDOW }
+        ]));
+        ensure_screenshot_binding(&mut unbound, true);
+        assert_eq!(unbound.len(), 1);
+
+        // 默认截图键已被别的动作占用 → 跳过（宁可没有，也不静默抢键）
+        let mut taken = parse_shortcut_bindings(&serde_json::json!([
+            { "shortcut": "ctrl+alt+s", "action": SHORTCUT_ACTION_TOGGLE_WINDOW },
+            { "shortcut": DEFAULT_SCREENSHOT_SHORTCUT, "action": "quick-open", "target": "某常用头" }
+        ]));
+        ensure_screenshot_binding(&mut taken, false);
+        assert_eq!(taken.len(), 2, "不抢已被占用的键");
+        assert!(!taken
+            .iter()
+            .any(|b| b.action == SHORTCUT_ACTION_SCREENSHOT));
+    }
+
+    /// 剪贴板历史动作：无作用对象，默认键与宿主其它默认键都不冲突。
+    #[test]
+    fn clipboard_action_needs_no_target() {
+        use super::{
+            is_known_shortcut_action, parse_shortcut_bindings_strict,
+            DEFAULT_CLIPBOARD_SHORTCUT, DEFAULT_SCREENSHOT_SHORTCUT, DEFAULT_TOGGLE_SHORTCUT,
+            SHORTCUT_ACTION_CLIPBOARD, SHORTCUT_ACTION_TOGGLE_WINDOW,
+        };
+
+        assert!(is_known_shortcut_action(SHORTCUT_ACTION_CLIPBOARD));
+
+        // 没有 target 也合法
+        let parsed = parse_shortcut_bindings_strict(&serde_json::json!([
+            { "shortcut": DEFAULT_TOGGLE_SHORTCUT, "action": SHORTCUT_ACTION_TOGGLE_WINDOW },
+            { "shortcut": DEFAULT_CLIPBOARD_SHORTCUT, "action": SHORTCUT_ACTION_CLIPBOARD }
+        ]))
+        .unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[1].action, SHORTCUT_ACTION_CLIPBOARD);
+        assert_eq!(parsed[1].target, None);
+
+        // 三个默认键两两不同，否则开箱即用就会注册冲突
+        assert_ne!(DEFAULT_CLIPBOARD_SHORTCUT, DEFAULT_TOGGLE_SHORTCUT);
+        assert_ne!(DEFAULT_CLIPBOARD_SHORTCUT, DEFAULT_SCREENSHOT_SHORTCUT);
+        assert_ne!(DEFAULT_SCREENSHOT_SHORTCUT, DEFAULT_TOGGLE_SHORTCUT);
+    }
+
+    /// 剪贴板历史绑定自愈补齐（与截图版同构，故障场景也一样）。
+    #[test]
+    fn ensure_clipboard_binding_self_heals() {
+        use super::{
+            ensure_clipboard_binding, parse_shortcut_bindings, DEFAULT_CLIPBOARD_SHORTCUT,
+            SHORTCUT_ACTION_CLIPBOARD, SHORTCUT_ACTION_TOGGLE_WINDOW,
+        };
+
+        // 老用户的列表（只有呼出键）→ 补上
+        let mut old = parse_shortcut_bindings(&serde_json::json!([
+            { "shortcut": "ctrl+alt+s", "action": SHORTCUT_ACTION_TOGGLE_WINDOW }
+        ]));
+        assert_eq!(old.len(), 1);
+        ensure_clipboard_binding(&mut old, false);
+        assert_eq!(old.len(), 2);
+        assert_eq!(old[1].action, SHORTCUT_ACTION_CLIPBOARD);
+        assert_eq!(old[1].shortcut, DEFAULT_CLIPBOARD_SHORTCUT);
+        assert_eq!(old[1].target, None);
+
+        // 幂等
+        ensure_clipboard_binding(&mut old, false);
+        assert_eq!(old.len(), 2);
+
+        // 用户主动解绑过 → 尊重，不补
+        let mut unbound = parse_shortcut_bindings(&serde_json::json!([
+            { "shortcut": "ctrl+alt+s", "action": SHORTCUT_ACTION_TOGGLE_WINDOW }
+        ]));
+        ensure_clipboard_binding(&mut unbound, true);
+        assert_eq!(unbound.len(), 1);
+
+        // 默认键已被别的动作占用 → 跳过，不静默抢键
+        let mut taken = parse_shortcut_bindings(&serde_json::json!([
+            { "shortcut": "ctrl+alt+s", "action": SHORTCUT_ACTION_TOGGLE_WINDOW },
+            { "shortcut": DEFAULT_CLIPBOARD_SHORTCUT, "action": "quick-open", "target": "某常用头" }
+        ]));
+        ensure_clipboard_binding(&mut taken, false);
+        assert_eq!(taken.len(), 2, "不抢已被占用的键");
+        assert!(!taken.iter().any(|b| b.action == SHORTCUT_ACTION_CLIPBOARD));
+    }
+
+    /// 桥接读写**必须保留每条绑定的作用对象**。
+    ///
+    /// 回归防线：曾经的实现把绑定降级成 (action, shortcut) 二元组、写回时统一
+    /// `target: null`。于是列表里只要有 open-plugin / quick-filter / quick-open 的
+    /// 条目，严格解析就会因「缺作用对象」整体报错——用户只是改一个自己的热键，
+    /// 却因为别的绑定而失败（「组合键修改时重新录入不了」的根因）。
+    #[test]
+    fn plugin_shortcut_bridge_preserves_targets() {
+        use super::{
+            parse_shortcut_bindings, parse_shortcut_bindings_strict, ShortcutBinding,
+            SHORTCUT_ACTION_CLIPBOARD, SHORTCUT_ACTION_OPEN_PLUGIN, SHORTCUT_ACTION_TOGGLE_WINDOW,
+        };
+
+        // 一个「真实世界」的列表：呼出 + 打开插件（带 target）+ 剪贴板历史
+        let list: Vec<ShortcutBinding> = parse_shortcut_bindings(&serde_json::json!([
+            { "shortcut": "ctrl+alt+s", "action": SHORTCUT_ACTION_TOGGLE_WINDOW },
+            { "shortcut": "ctrl+alt+1", "action": SHORTCUT_ACTION_OPEN_PLUGIN, "target": "com.a.b" },
+            { "shortcut": "ctrl+alt+v", "action": SHORTCUT_ACTION_CLIPBOARD }
+        ]));
+        assert_eq!(list.len(), 3);
+
+        // 模拟「把剪贴板历史改绑成 ctrl+alt+j」后经桥接写回：
+        // 用完整 ShortcutBinding 序列化（即 apply_shortcut_bindings_for_plugin 的做法）
+        let mut edited = list.clone();
+        for b in edited.iter_mut() {
+            if b.action == SHORTCUT_ACTION_CLIPBOARD {
+                b.shortcut = "ctrl+alt+j".into();
+            }
+        }
+        let value = serde_json::Value::Array(edited.iter().map(|b| b.to_value()).collect());
+
+        // 关键断言：带 target 的 open-plugin 条目能通过严格解析（不会因它整单失败）
+        let parsed = parse_shortcut_bindings_strict(&value)
+            .expect("含作用对象的完整绑定必须能通过严格解析");
+        assert_eq!(parsed.len(), 3);
+        let plugin = parsed
+            .iter()
+            .find(|b| b.action == SHORTCUT_ACTION_OPEN_PLUGIN)
+            .expect("open-plugin 条目应保留");
+        assert_eq!(plugin.target.as_deref(), Some("com.a.b"), "作用对象不能丢");
+        let clip = parsed
+            .iter()
+            .find(|b| b.action == SHORTCUT_ACTION_CLIPBOARD)
+            .expect("剪贴板条目应保留");
+        assert_eq!(clip.shortcut, "ctrl+alt+j", "目标键应已改绑");
+
+        // 反证：旧的「统一 target=null」写法会让整单解析失败（正是当初的故障）
+        let degraded: Vec<serde_json::Value> = list
+            .iter()
+            .map(|b| serde_json::json!({ "shortcut": b.shortcut, "action": b.action, "target": null }))
+            .collect();
+        assert!(
+            parse_shortcut_bindings_strict(&serde_json::Value::Array(degraded)).is_err(),
+            "丢掉作用对象后必须被严格解析拒绝（证明修复确有必要）"
+        );
+    }
+
+    /// 「快速过滤」绑定必须带作用对象（常用头），并原样保留中文文本。
+    #[test]
+    fn quick_filter_binding_requires_target() {
+        use super::{
+            parse_shortcut_bindings, parse_shortcut_bindings_strict, ShortcutBinding,
+            SHORTCUT_ACTION_QUICK_FILTER, SHORTCUT_ACTION_TOGGLE_WINDOW,
+        };
+
+        // 缺常用头 → 拒绝（否则按下去不知道该填入什么）
+        assert!(parse_shortcut_bindings_strict(&serde_json::json!([
+            { "shortcut": "alt+f", "action": SHORTCUT_ACTION_QUICK_FILTER }
+        ]))
+        .is_err());
+
+        // 带常用头 → 通过，且 target 保留原文（两侧空白被裁掉）
+        let raw = serde_json::json!([
+            { "shortcut": "ctrl+alt+s", "action": SHORTCUT_ACTION_TOGGLE_WINDOW },
+            { "shortcut": "alt+f", "action": SHORTCUT_ACTION_QUICK_FILTER, "target": " 百度翻译 " }
+        ]);
+        let parsed = parse_shortcut_bindings_strict(&raw).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[1].target.as_deref(), Some("百度翻译"));
+
+        // 序列化往返一致（settings.json 读写）
+        let values: Vec<serde_json::Value> = parsed.iter().map(|b| b.to_value()).collect();
+        assert_eq!(
+            parse_shortcut_bindings(&serde_json::Value::Array(values)),
+            parsed
+        );
+
+        // to_value 的字段形态（前端按这些字段名解析）
+        let b = ShortcutBinding {
+            shortcut: "alt+f".into(),
+            action: SHORTCUT_ACTION_QUICK_FILTER.into(),
+            target: Some("百度翻译".into()),
+        };
+        assert_eq!(
+            b.to_value(),
+            serde_json::json!({
+                "shortcut": "alt+f",
+                "action": "quick-filter",
+                "target": "百度翻译",
+            })
+        );
+    }
+
+    /// 「快捷打开项」绑定必须带匹配文本，并原样保留（含空格 AND 的多个词）。
+    #[test]
+    fn quick_open_binding_requires_target() {
+        use super::{
+            parse_shortcut_bindings, parse_shortcut_bindings_strict, ShortcutBinding,
+            SHORTCUT_ACTION_QUICK_OPEN, SHORTCUT_ACTION_TOGGLE_WINDOW,
+        };
+
+        // 缺匹配文本 → 拒绝（否则按下去不知道该找哪一项）
+        assert!(parse_shortcut_bindings_strict(&serde_json::json!([
+            { "shortcut": "alt+o", "action": SHORTCUT_ACTION_QUICK_OPEN }
+        ]))
+        .is_err());
+
+        // 带匹配文本 → 通过；两侧空白裁掉，内部空格（AND 语义）保留
+        let raw = serde_json::json!([
+            { "shortcut": "ctrl+alt+s", "action": SHORTCUT_ACTION_TOGGLE_WINDOW },
+            { "shortcut": "alt+o", "action": SHORTCUT_ACTION_QUICK_OPEN, "target": "  百度 翻译 " }
+        ]);
+        let parsed = parse_shortcut_bindings_strict(&raw).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[1].target.as_deref(), Some("百度 翻译"));
+
+        // 序列化往返一致
+        let values: Vec<serde_json::Value> = parsed.iter().map(|b| b.to_value()).collect();
+        assert_eq!(
+            parse_shortcut_bindings(&serde_json::Value::Array(values)),
+            parsed
+        );
+
+        // to_value 的字段形态
+        let b = ShortcutBinding {
+            shortcut: "alt+o".into(),
+            action: SHORTCUT_ACTION_QUICK_OPEN.into(),
+            target: Some("百度翻译".into()),
+        };
+        assert_eq!(
+            b.to_value(),
+            serde_json::json!({
+                "shortcut": "alt+o",
+                "action": "quick-open",
+                "target": "百度翻译",
+            })
+        );
     }
 
     #[test]
@@ -2288,4 +3637,5 @@ mod tests {
         .unwrap();
         assert_eq!((owner, repo, branch, path.as_str()), ("o", "r", "main", "a.md"));
     }
+
 }

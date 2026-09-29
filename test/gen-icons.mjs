@@ -166,6 +166,54 @@ function write(file, buf) {
   console.log(`  ${path.relative(ROOT, file).replace(/\\/g, '/')}  (${buf.length} bytes)`);
 }
 
+/**
+ * 组装多尺寸 ICO（PNG 压缩条目）。
+ *
+ * Windows Vista+ 的 ICO 允许目录项直接内嵌 PNG（而非 BMP+掩码），
+ * 我们手上正好只有 PNG（resvg 出的），因此省掉位图/掩码拼装：
+ *
+ *    ICONDIR (6 字节)  reserved=0 / type=1 / count=N
+ *    ICONDIRENTRY × N  (每项 16 字节)
+ *    PNG 数据块 × N    按目录顺序紧随其后
+ *
+ * 目录项里的宽高字段是**单字节**：256 必须写 0（规范如此），
+ * 因此尺寸集合只取到 256 为止。
+ */
+function buildIco(pngBuffers, sizes) {
+  const HEADER = 6;
+  const ENTRY = 16;
+  const count = pngBuffers.length;
+  const dirSize = HEADER + ENTRY * count;
+  const total = dirSize + pngBuffers.reduce((n, b) => n + b.length, 0);
+  const out = Buffer.alloc(total);
+
+  out.writeUInt16LE(0, 0);        // reserved
+  out.writeUInt16LE(1, 2);        // type: 1 = icon
+  out.writeUInt16LE(count, 4);    // 图像数量
+
+  let dataOffset = dirSize;
+  for (let i = 0; i < count; i++) {
+    const size = sizes[i];
+    const png = pngBuffers[i];
+    const p = HEADER + i * ENTRY;
+    // 256 写 0：单字节字段放不下 256，规范约定用 0 表示
+    out.writeUInt8(size >= 256 ? 0 : size, p + 0); // width
+    out.writeUInt8(size >= 256 ? 0 : size, p + 1); // height
+    out.writeUInt8(0, p + 2);                      // 调色板数（真彩色为 0）
+    out.writeUInt8(0, p + 3);                      // reserved
+    out.writeUInt16LE(1, p + 4);                   // 色彩平面
+    out.writeUInt16LE(32, p + 6);                  // 位深
+    out.writeUInt32LE(png.length, p + 8);          // 数据字节数
+    out.writeUInt32LE(dataOffset, p + 12);         // 数据偏移
+    dataOffset += png.length;
+  }
+  pngBuffers.forEach((png, i) => {
+    const p = HEADER + i * ENTRY;
+    png.copy(out, out.readUInt32LE(p + 12));
+  });
+  return out;
+}
+
 // ===================== 主流程 =====================
 const lw = leafBox.maxX - leafBox.minX;
 const lh = leafBox.maxY - leafBox.minY;
@@ -181,6 +229,19 @@ const monoSvg = svgWrap(leafGroup({
   box: leafBox, cx: CANVAS / 2, cy: CANVAS / 2, width: CANVAS * MONO_GLYPH_W, fill: '#000000',
 }));
 
+/**
+ * `.mspp` 插件包的文件类型图标：透明背景的**纯叶子**（无白色圆角底板）。
+ *
+ * 为什么不用应用图标：资源管理器里 16px 下带底板的图标会糊成一枚白方块，
+ * 叶子本身才是可辨识的形状；而且文件类型图标与「应用本体」区分开更清楚
+ * （与托盘图标同一取舍，见 TRAY_GLYPH_W 的说明）。
+ */
+const MSPP_GLYPH_W = 0.94; // 文件图标比托盘略收一点，避免小尺寸贴边
+const MSPP_SIZES = [16, 24, 32, 48, 64, 128, 256];
+const msppSvg = svgWrap(leafGroup({
+  box: leafBox, cx: CANVAS / 2, cy: CANVAS / 2, width: CANVAS * MSPP_GLYPH_W,
+}));
+
 console.log('生成资源：');
 write(path.join(OUT_DIR, 'icon-master.svg'), Buffer.from(macSvg, 'utf8'));
 write(path.join(OUT_DIR, 'icon-master-win.svg'), Buffer.from(winSvg, 'utf8'));
@@ -190,6 +251,12 @@ write(path.join(OUT_DIR, 'icon-master.png'), render(macSvg, CANVAS));
 write(path.join(OUT_DIR, 'icon-master-win.png'), render(winSvg, CANVAS));
 write(path.join(ICON_DIR, 'tray.png'), render(traySvg, TRAY_SIZE));
 write(path.join(ICON_DIR, 'tray-mono.png'), render(monoSvg, MONO_SIZE));
+// .mspp 文件类型图标：母版 PNG（便于人工核对）+ 随包分发的多尺寸 ICO
+write(path.join(OUT_DIR, 'mspp-master.png'), render(msppSvg, CANVAS));
+write(
+  path.join(ROOT, 'src-tauri', 'resources', 'mspp.ico'),
+  buildIco(MSPP_SIZES.map((s) => render(msppSvg, s)), MSPP_SIZES),
+);
 
 console.log(
   '\n下一步：\n' +

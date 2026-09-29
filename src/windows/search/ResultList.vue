@@ -9,14 +9,11 @@
  */
 import ResultItem from "./ResultItem.vue";
 import type { SearchResult } from "../../lib/search-engine";
-import type { SearchItem } from "../../types/index";
 
 const props = defineProps<{
   results: SearchResult[];
   /** 当前键盘选中项（-1 = 无选中） */
   activeIndex: number;
-  /** 临时展示项使用同一 index 展开原项（如 <new> 的结果） */
-  resolveRefItem: (item: SearchItem) => SearchItem;
 }>();
 
 const emit = defineEmits<{
@@ -32,8 +29,6 @@ const emit = defineEmits<{
       v-for="(result, i) in props.results"
       :key="i"
       :item="result.item"
-      :ref-item="props.resolveRefItem(result.item)"
-      :index="i"
       :active="i === props.activeIndex"
       :result-index="i"
       @open="(idx: number) => emit('open', idx)"

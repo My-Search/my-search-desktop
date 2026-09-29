@@ -153,6 +153,7 @@ defineExpose({
   /** 脚本视图挂载完成回调（插件视图也走它：两者都是「外部 DOM + 高度自适应」） */
   onScriptMounted,
   fitHeight: detailHeight.fit,
+  measureHeight: detailHeight.measure,
   flushHeight: detailHeight.flush,
   resetHeightCache: detailHeight.resetCache,
   /** #text_show 元素（脚本样式需挂在它下面，与原版 cssFillPrefix 一致） */

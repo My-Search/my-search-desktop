@@ -72,6 +72,9 @@ html, body {
   display: flex;
   align-items: center;
   flex-wrap: nowrap;
+  /* 兜底：附件名极端超长、压缩到输入框保底宽度仍放不下时，从右侧溢出裁掉
+     （此时先牺牲的是 logo/输入区，左侧的附件名保持完整——名字完整优先）。 */
+  overflow: hidden;
   -webkit-app-region: drag; /* 拖拽区域 */
 }
 
@@ -82,6 +85,10 @@ html, body {
   align-items: center;
   height: 100%;
   -webkit-app-region: no-drag;
+  /* 附件 chips：不设宽度上限、不裁剪——文件夹名必须完整显示。
+     名称过长时让出的空间由输入框压缩承担（#my_search_input 有 min-width 保底）。 */
+  flex: 0 0 auto;
+  min-width: 0;
 }
 
 #ms-input-files .ms-input-file {
@@ -98,10 +105,296 @@ html, body {
   background: #d3d3d3;
 }
 
+/* 附件 chip（粘贴/拖入的文件、文件夹）：完全方块（直角）+ 名称完整显示 */
+#ms-input-files .ms-input-file {
+  flex: 0 0 auto;
+  gap: 4px;
+  height: 26px;
+  /* 方块之间、以及与右侧输入区之间都留出可见间距 */
+  margin-right: 8px;
+  padding: 0 4px 0 7px;
+  box-sizing: border-box;
+  border-radius: 0;
+  background: #eef0f4;
+  border: 1px solid #d7dbe2;
+  color: #3c4148;
+  font-size: 12px;
+  line-height: 1;
+}
+
+#ms-input-files .ms-input-file .chip-icon {
+  flex: 0 0 auto;
+  color: #6b7280;
+}
+
+/* 图片附件的缩略图：直接显示图片本体（不显示文件名） */
+#ms-input-files .ms-input-file .chip-thumb {
+  flex: 0 0 auto;
+  height: 22px;
+  width: 22px;
+  object-fit: cover;
+  display: block;
+  border: 1px solid #c9ced6;
+  background: #fff;
+}
+
+#ms-input-files .ms-input-file.is-image {
+  padding-left: 3px;
+}
+
+#ms-input-files .ms-input-file.is-folder .chip-icon {
+  color: #d99411; /* 文件夹用暖色区分 */
+}
+
+/* 系统文件图标（资源管理器同款）：PNG data URL，自带颜色与透明底，
+   所以不吃 chip-icon 的 currentColor，也不加底色/边框。
+   尺寸按 chip 高度取（原生大图标 32px，这里显示成 16px 由 img 等比缩放）。
+
+   选择器带上 `img.` 是必须的：上面的 `#ms-input-files .ms-input-file img`
+   给所有 chip 图配了灰底 + 内边距（老式「图标底片」用），而它比单纯的
+   `.chip-sys-icon` 特异度更高，会压到透明图标上——图标坐进灰方块里还被
+   padding 缩小。加上类型选择器后本规则更高，正常生效；深色主题里那条
+   `html.theme-dark … img` 又要高一层，所以在深色区另有一条对应覆盖。 */
+#ms-input-files .ms-input-file img.chip-sys-icon {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  display: block;
+  object-fit: contain;
+}
+
+#ms-input-files .ms-input-file .chip-name {
+  flex: 0 0 auto;
+  white-space: nowrap; /* 单行完整显示：宽度随名称自适应，不加省略号 */
+}
+
+/* 移除按钮：默认**不占位**（display:none），鼠标移入所属方块时才出现。
+   即“不显示就不占着位置”：未悬停时方块只由图标 + 名称决定宽度。
+   键盘用户走 Backspace 逐个移除附件（搜索框空输入时），不依赖这个按钮。 */
+#ms-input-files .ms-input-file .chip-x {
+  display: none;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: #8a9099;
+  font-size: 14px;
+  line-height: 14px;
+  cursor: pointer;
+  border-radius: 0;
+}
+
+#ms-input-files .ms-input-file:hover .chip-x {
+  display: block;
+}
+
+#ms-input-files .ms-input-file .chip-x:hover {
+  color: #c22;
+  background: rgba(0, 0, 0, 0.08);
+}
+
+/* 系统向窗口拖入文件时的高亮（Tauri 拖拽事件驱动） */
+#searchBox.drag-over {
+  outline: 2px dashed #5b5bd6;
+  outline-offset: -2px;
+  background: #f2f3ff;
+}
+
+/* .mspp 插件包 chip：叶子图标 + 可点击（hover 表示可交互） */
+#ms-input-files .ms-input-file.is-plugin-package {
+  background: #f0f4ff;
+  border-color: #c5d1f0;
+  cursor: pointer;
+}
+#ms-input-files .ms-input-file.is-plugin-package:hover {
+  background: #e2ecff;
+  border-color: #9eb4e8;
+}
+#ms-input-files .ms-input-file.is-plugin-package .leaf-icon {
+  width: 14px;
+  height: 14px;
+  object-fit: contain;
+}
+
+/* 「最近添加」条带（按 Alt 切换）：搜索框**正下方**的普通流内一行，盒子内
+   正常布局（有底色、与上下的分界靠一条淡分割线），窗口随之向下长高。
+   必须参与 VIEW_PART_IDS 高度实测（漏了就会被窗口裁掉）；隐藏时 display:none →
+   offsetHeight=0 天然不计入，收起逻辑不用改。 */
+#recentStrip {
+  display: none;
+  min-height: 42px;
+  box-sizing: border-box;
+  /* 左 12px = 搜索框自身 10px 内距 + 视觉对齐余量：条目与搜索框行左对齐 */
+  padding: 0 12px;
+  background: #ffffff;
+  border-top: 1px solid #e3e6ea;
+  align-items: center;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-app-region: no-drag;
+  /* 横向溢出走触摸板 / Shift+滚轮：藏掉滚动条，免得它吃掉行高 */
+  scrollbar-width: none;
+}
+
+#recentStrip::-webkit-scrollbar {
+  display: none;
+}
+
+#recentStrip.show {
+  display: flex;
+}
+
+/* 固定条目：始终排最前、永不被 30 条上限淘汰——用暖底 + 左侧强调条区分 */
+#recentStrip .recent-item.is-pinned {
+  background: #fff7e6;
+  border-color: #efd39a;
+  box-shadow: inset 3px 0 0 #e0a33a;
+}
+
+#recentStrip .recent-item.is-pinned:hover {
+  background: #fff2d8;
+  border-color: #e4c47f;
+}
+
+/* 条带条目：与搜索框 chips 同一套视觉（方块 / 调色 / hover 出 ×） */
+#recentStrip .recent-item {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  margin-right: 8px;
+  padding: 0 4px 0 7px;
+  box-sizing: border-box;
+  border-radius: 0;
+  background: #eef0f4;
+  border: 1px solid #d7dbe2;
+  color: #3c4148;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+#recentStrip .recent-item:hover {
+  border-color: #b9c0ca;
+  background: #e7eaf0;
+}
+
+#recentStrip .recent-item .chip-icon {
+  flex: 0 0 auto;
+  color: #6b7280;
+}
+
+#recentStrip .recent-item.is-folder .chip-icon {
+  color: #d99411; /* 文件夹用暖色区分（与 chips 同款） */
+}
+
+/* 条带条目的系统文件图标（与输入框 chips 同款约定，见 .chip-sys-icon） */
+#recentStrip .recent-item .chip-sys-icon {
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+}
+
+/* 名称截断 + title 显示全路径。与「名称完整优先」的单行 chips 不同：
+   条带是多条并排的列表，宁可截断也不让单条撑爆整行。 */
+#recentStrip .recent-item .recent-name {
+  flex: 0 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 180px;
+}
+
+/* 移除按钮：默认不占位，悬停条目时出现（同 chips 的 chip-x 约定） */
+#recentStrip .recent-item .chip-x {
+  display: none;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: #8a9099;
+  font-size: 14px;
+  line-height: 14px;
+  cursor: pointer;
+  border-radius: 0;
+}
+
+#recentStrip .recent-item:hover .chip-x {
+  display: block;
+}
+
+#recentStrip .recent-item .chip-x:hover {
+  color: #c22;
+  background: rgba(0, 0, 0, 0.08);
+}
+
+/* 固定按钮：未固定时悬停才出现；已固定的常驻显示并高亮（提示当前是固定态） */
+#recentStrip .recent-item .chip-pin {
+  display: none;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: #8a9099;
+  cursor: pointer;
+  border-radius: 0;
+}
+
+#recentStrip .recent-item:hover .chip-pin {
+  display: flex;
+}
+
+#recentStrip .recent-item .chip-pin.on {
+  display: flex;
+  color: #d99411; /* 与「固定」暖色一致 */
+}
+
+#recentStrip .recent-item .chip-pin:hover {
+  color: #b37700;
+  background: rgba(0, 0, 0, 0.08);
+}
+
+/* 条带条目进出（点条目后它进输入框、从条带消失）的轻微过渡：
+   配合 TransitionGroup 的 FLIP（move 类）让剩余条目平滑补位。 */
+.chip-move-enter-active,
+.chip-move-leave-active,
+.chip-move-move {
+  transition: transform 0.22s cubic-bezier(0.22, 0.61, 0.36, 1), opacity 0.18s ease;
+}
+
+.chip-move-enter-from {
+  opacity: 0;
+  transform: translateY(-8px) scale(0.94);
+}
+
+.chip-move-leave-to {
+  opacity: 0;
+  transform: scale(0.94);
+}
+
+.chip-move-leave-active {
+  position: absolute;
+}
+
 /* 搜索输入框（还原 #my_search_input） */
 #my_search_input {
   text-align: left;
   width: 100%;
+  /* 附件名很长时输入区被压缩的保底宽度（保证始终可继续输入 xxx : yyy） */
+  min-width: 140px;
   height: 100%;
   border: none;
   outline: none;
@@ -158,6 +451,8 @@ html, body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  /* 不参与压缩：附件名/输入区占满时 logo 也保持可见 */
+  flex: 0 0 auto;
   width: 25px;
   height: 25px;
   margin: 0px 4px 0px 0px;
@@ -480,6 +775,15 @@ html, body {
   color: #d93025;
 }
 
+/* 关键词定位高亮（scrollToText 注入 .highlight-text）。文字色必须显式写死：
+   深色主题下 #text_show 文字继承为浅色（#e4e6ea），压在浅黄底上对比度仅
+   ~1.5:1 会看不清；两个主题共用浅黄底 + 深墨字（与深色下 favicon 保留浅色
+   底板同一取向），对比度恒 ≥ 10:1。 */
+#text_show .highlight-text {
+  background: #ffe58f;
+  color: #24292f;
+}
+
 #text_show .markdown-body h1,
 #text_show .markdown-body h2,
 #text_show .markdown-body h3,
@@ -644,6 +948,178 @@ html, body {
   display: none;
 }
 
+/* 脚本视图执行失败时，宿主在 #text_show 顶部插入的提示条
+ * （view:html 照常显示，但 view:js 抛错，见 useScriptHost / App.vue）。 */
+#text_show .script-view-tip {
+  margin: 0 0 10px;
+  padding: 6px 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #b45a00;
+  background: #fff7e6;
+  border: 1px solid #ffd8a8;
+  border-radius: 6px;
+}
+
+html.theme-dark #text_show .script-view-tip {
+  color: #ffb366;
+  background: #2a2010;
+  border-color: #5c4018;
+}
+
+/* ========== 插件拉伸态（.plugin-sized） ==========
+ *
+ * 由 App.vue 的 setPluginSizedClass() 在 #my_search_box 上切换：
+ * “插件自定义窗口尺寸”期间，内容随窗口整体铺满（不再按内容自适应）。
+ *
+ * 布局契约（与 App.vue 注释、market-scroll 测试一致）：
+ *   - #my_search_box 变成定高 flex 竖列 —— 窗口尺寸由宿主显式下发，
+ *     视口即窗口，height:100% 解析到下发高度；
+ *   - #text_show 从「可滚动容器」翻转为 overflow:hidden + height:100%，
+ *     滚动责任整个下放给插件自己的内部容器（否则宿主与插件都想滚，
+ *     就会出现「拖大窗口后下面还有内容却滚不动」）；
+ *   - .plugin-view / .ms-plugin-session / 插件根节点逐级 height:100% 撑满，
+ *     保证插件拿到的是一块确定高度、可自行滚动的区域。
+ *
+ * 注意：#text_show 带**内联** `display:block`（DetailView 的 :style 控制显隐），
+ * 内联样式优先级高于本表，无法把它改成 display:flex。因此这里不依赖它当 flex
+ * 容器，而是给它确定高度（由 #my_search_view 的 flex 分配），再让子级用
+ * height:100% 逐级继承——对 `#text_show { display:block }` 同样成立。
+ *
+ * 未启用拉伸时（无 .plugin-sized）以上规则不生效，外观与从前完全一致：
+ * #text_show 仍是 max-height:510px 的滚动容器。
+ */
+#my_search_box.plugin-sized {
+  display: flex;
+  flex-direction: column;
+  /* 用 CSS 变量钉死高度（App.vue 在每次下发窗口尺寸时同步写入 --plugin-view-height），
+     而不是依赖 height:100% ——拖拽实时改变窗口时 WebView2 视口更新滞后于窗口
+     尺寸，100% 会解析到旧的更小视口，导致搜索框+插件被压在顶部、下方留白。
+     变量为空时退回 100%（如冷启动/还原路径，布局由内容自适应）。 */
+  height: var(--plugin-view-height, 100%);
+  overflow: hidden;
+}
+
+/* 搜索框固定高度，剩余空间全部给内容区 */
+#my_search_box.plugin-sized > #my_search_view {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* 输入框那一行在拉伸态必须**不可收缩**（flex: 0 0 auto）。
+ *
+ * 根因：本容器在拉伸态是 flex 竖列，而 #searchBox 是它的 flex 项。默认
+ * `flex: 0 1 auto` 允许收缩，且它带 `overflow: hidden` —— 按 flex 规范，
+ * 「非 visible 的 overflow」会把自动最小尺寸从 min-content 换成 0，于是它
+ * **可以被压到 0**。插件内容一旦比窗口高（异步出结果、列表增长），超出部分
+ * 就被折算成负剩余空间，按各 flex 项的基准尺寸比例分摊：#searchBox 基准
+ * 44px、`#text_show` 基准 = 内容高度（可能上千 px），于是输入框行被分摊掉
+ * 绝大部分收缩量（实测 44px → 2.8px，输入框几乎贴成一条线）。
+ *
+ * 修复即把这一行钉死：高度全部由内容区（`#text_show` 带 min-height:0 +
+ * overflow:hidden）承担收缩，插件在它自己的容器里滚动。
+ * 只作用于拉伸态——常态下本容器不是 flex，规则无副作用。 */
+#my_search_box.plugin-sized #searchBox {
+  flex: 0 0 auto;
+}
+
+/* 内容区：拉伸态下不再自身滚动，交给插件内部。
+ * #my_search_view 是 flex 列 → 本元素 flex:1 拿到确定高度；
+ * overflow:hidden 禁掉它自己的滚动（滚动下放到插件根节点）。 */
+#my_search_box.plugin-sized #text_show {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  overflow: hidden;
+  /* 拉伸态清零 padding：
+   *
+   * 常态下 #text_show 的 padding（10px 16px 16px）给文本详情留白，插件视图再用
+   * `margin: -10px -16px -16px` 抵消它、铺满整个盒子。
+   * 但拉伸态插件视图改用 `height: 100%` 拿高度，而 % 是相对 **content-box**
+   * 解析的——此时「负 margin 外扩」与「固定 content 高度」互相打架：
+   * 视图被上移 10px 铺满顶部，高度却只剩 content 高，于是**底部空出
+   * (10+16)px**，表现为「内容整体上移、顶部贴边、底部一块空白」（拖大窗口后
+   * 尤其明显）。
+   *
+   * 直接把 padding 归零，content-box 即 border-box，`height:100%` 自然铺满
+   * 整个内容区，负 margin 也无处可抵消——顶部/底部都不再有多余空白。 */
+  padding: 0;
+}
+
+/* 插件视图铺满内容区高度（height:100% 相对 #text_show 的确定高度解析）。
+ *
+ * 负 margin 必须归零（覆盖上面那条 `margin: -10px -16px -16px`）：那条规则是为
+ * 抵消常态下 #text_show 的 padding 而写的；拉伸态 padding 已归零（见上），
+ * 留着负 margin 反而会把视图顶出容器、被 overflow:hidden 裁掉。
+ * 两处配合，插件视图正好 = #text_show 的整个内容区，上下无空白、边缘不被裁。 */
+#my_search_box.plugin-sized #text_show .plugin-view {
+  height: 100%;
+  margin: 0;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+#my_search_box.plugin-sized #text_show .plugin-view > .ms-plugin-session {
+  height: 100%;
+  overflow: hidden;
+}
+
+/* 插件自己的根节点：撑满会话高度并成为（或容纳）滚动容器 */
+#my_search_box.plugin-sized #text_show .plugin-view > .ms-plugin-session > * {
+  height: 100%;
+  box-sizing: border-box;
+}
+
+/* 插件视图右下角的「拖拽改尺寸」手柄 + 「恢复默认」入口。
+ * 绝对定位在 #my_search_box（已 position:relative）的右下角，
+ * 因此贴的是整个悬浮窗的右下角，而非插件内容区。
+ * z-index 与弹层同量级：手柄必须永远可点，不能被插件自绘 UI 盖住。 */
+.plugin-resize-handle {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  z-index: 2147483647;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  padding: 2px;
+  box-sizing: border-box;
+  cursor: nwse-resize;
+  color: #b6bcc6;
+  -webkit-app-region: no-drag;
+  transition: color 0.12s ease;
+}
+
+.plugin-resize-handle:hover,
+.plugin-resize-handle.is-dragging {
+  color: #5b5bd6;
+}
+
+/* 手柄图形：右下角一小段对角斜纹（用边框画，随尺寸缩放） */
+.plugin-resize-grip {
+  width: 9px;
+  height: 9px;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  border-radius: 0 0 2px 0;
+  pointer-events: none;
+}
+
+/* 深色主题下的手柄配色 */
+html.theme-dark .plugin-resize-handle {
+  color: #5a616b;
+}
+
+html.theme-dark .plugin-resize-handle:hover,
+html.theme-dark .plugin-resize-handle.is-dragging {
+  color: #8b8cf0;
+}
+
 /* ========== 滚动条（极简风格） ========== */
 
 #text_show::-webkit-scrollbar {
@@ -783,6 +1259,9 @@ html.ms-config-root {
   --field: #fbfbfd;
   --chip: #fafbfc;
   --chip-count: #aab0ba;
+  /* 未选中标签文字：比 --muted 更深，保证在 #fafbfc 上对比度 ≥ 4.5 */
+  --chip-text: #626a76;
+  --chip-count-text: #6b7280;
   --hover-border: #c9ccd4;
   --hover-bg: #f7f8fa;
   --code-bg: #eef0f4;
@@ -791,11 +1270,12 @@ html.ms-config-root {
   --accent-soft-bg: #eef0ff;
   --accent-soft-border: #c7c8f5;
   --accent-soft-count: #8a8ce0;
-  /* 选中标签：中性色，不带任何彩色倾向 */
-  --chip-on-bg: #3a3f47;
-  --chip-on-border: #3a3f47;
-  --chip-on-text: #ffffff;
-  --chip-on-count: rgba(255, 255, 255, 0.72);
+  /* 选中标签：品牌浅色底 + 品牌色文字，与设置窗口其它选中态（导航 / 按钮）一致 */
+  --chip-on-bg: #eef0ff;
+  --chip-on-border: #c7c8f5;
+  --chip-on-text: #4a4ab8;
+  --chip-on-count: #5f63c6;
+  --chip-check: #4a4ab8;
   --divider-soft: #f2f3f6;
   --ok: #1a9c5b;
   --err: #e02424;
@@ -816,6 +1296,8 @@ html.ms-config-root {
     --field: #1a1c21;
     --chip: #1e2126;
     --chip-count: #7f8792;
+    --chip-text: #aab2bd;
+    --chip-count-text: #8b93a0;
     --hover-border: #4a4f58;
     --hover-bg: #2a2d33;
     --code-bg: #2a2d33;
@@ -829,12 +1311,214 @@ html.ms-config-root {
     --chip-on-border: #4a505a;
     --chip-on-text: #f2f4f7;
     --chip-on-count: #b9c0ca;
+    --chip-check: #4a505a;
     --divider-soft: #2b2e34;
     --ok: #3ddc84;
     --err: #ff6b6b;
     --btn-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
     --dialog-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
   }
+}
+
+/* 强制浅色主题（覆盖系统偏好） */
+html.ms-config-root.theme-light {
+  --brand: #5b5bd6;
+  --brand-hover: #4a4ab8;
+  --line: #e6e8ec;
+  --text: #1f2329;
+  --muted: #7a828e;
+  --surface: #f5f6f8;
+  --card: #ffffff;
+  --field: #fbfbfd;
+  --chip: #fafbfc;
+  --chip-count: #aab0ba;
+  /* 未选中标签文字：比 --muted 更深，保证在 #fafbfc 上对比度 ≥ 4.5 */
+  --chip-text: #626a76;
+  --chip-count-text: #6b7280;
+  --hover-border: #c9ccd4;
+  --hover-bg: #f7f8fa;
+  --code-bg: #eef0f4;
+  --seg-bg: #eef0f4;
+  --accent: #4a4ab8;
+  --accent-soft-bg: #eef0ff;
+  --accent-soft-border: #c7c8f5;
+  --accent-soft-count: #8a8ce0;
+  --chip-on-bg: #eef0ff;
+  --chip-on-border: #c7c8f5;
+  --chip-on-text: #4a4ab8;
+  --chip-on-count: #5f63c6;
+  --chip-check: #4a4ab8;
+  --divider-soft: #f2f3f6;
+  --ok: #1a9c5b;
+  --err: #e02424;
+  --btn-shadow: 0 1px 3px rgba(91, 91, 214, 0.3);
+  --dialog-shadow: 0 12px 40px rgba(0, 0, 0, 0.2);
+}
+
+/* 强制深色主题（覆盖系统偏好） */
+html.ms-config-root.theme-dark {
+  --brand: #6c6ce0;
+  --brand-hover: #7f7ff2;
+  --line: #33363d;
+  --text: #e4e6ea;
+  --muted: #98a0ab;
+  --surface: #17191d;
+  --card: #212429;
+  --field: #1a1c21;
+  --chip: #1e2126;
+  --chip-count: #7f8792;
+  --chip-text: #aab2bd;
+  --chip-count-text: #8b93a0;
+  --hover-border: #4a4f58;
+  --hover-bg: #2a2d33;
+  --code-bg: #2a2d33;
+  --seg-bg: #2a2d33;
+  --accent: #a5a6ff;
+  --accent-soft-bg: #2c2d4a;
+  --accent-soft-border: #3f4170;
+  --accent-soft-count: #9a9cf0;
+  --chip-on-bg: #363b43;
+  --chip-on-border: #4a505a;
+  --chip-on-text: #f2f4f7;
+  --chip-on-count: #b9c0ca;
+  --chip-check: #4a505a;
+  --divider-soft: #2b2e34;
+  --ok: #3ddc84;
+  --err: #ff6b6b;
+  --btn-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --dialog-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+}
+
+/* 强制主题时同步 color-scheme（原生控件配色）。
+   背景：config.html / index.html 里写着 <meta name="color-scheme" content="light dark">，
+   与 `html.ms-config-root { color-scheme: light dark }`——「两者皆可」意味着原生控件
+   （复选框、单选按钮、滚动条、输入框光标、默认文字选中色）永远跟随**系统**偏好，
+   而不跟随用户强制的主题。用户把主题设为「浅色」而系统是深色时，设置窗口
+   「关注标签」里未勾选的复选框会被系统渲染成深灰实心方块（与浅色 chip 底冲突，
+   看起来像已勾选）；反之系统浅色 + 强制深色时，深色卡片上会出现刺眼的白方块。
+   下面两条把 color-scheme 与强制主题对齐，搜索窗口与设置窗口共用同一份样式，
+   因此写在这里对两个窗口同时生效。 */
+html.theme-light {
+  color-scheme: light;
+}
+
+html.theme-dark {
+  color-scheme: dark;
+}
+
+/* ========== 插件共享主题变量（搜索窗口 / 内嵌插件视图） ==========
+   背景：上面的变量集只挂在 html.ms-config-root（设置窗口）上，搜索窗口的深色
+   适配全是写死的 `html.theme-dark …` 规则——内嵌插件（#text_show .plugin-view）
+   里的 `var(--text)` 解析不到值，插件界面无法跟随主题。
+
+   契约：
+   - 浅色基准值定义在 `html`，`html.theme-dark` 覆盖为深色，`html.theme-light`
+     与基准相同（对称保留，防止未来加 media 查询块时被系统性覆盖）。
+     theme.ts 保证 `<html>` 上恒有且仅有一个 theme-light / theme-dark 类
+     （system 模式按系统偏好解析后同样落类），与搜索窗口既有的
+     `html.theme-dark …` 写死规则保持同一开关联动。
+   - 插件 CSS 用 `var(--text, #333)` 这种「宿主 token + 兜底值」方式引用即可
+     自动跟随主题；兜底值取插件自身默认外观（独立开发环境无宿主变量时不变样）。
+   - 取值与上面 ms-config-root 的浅色 / 深色块逐一对应（单一取值来源））
+     改那里时这里要同步改。设置窗口不受影响（html.ms-config-root 更具体且同值）。
+   - 宿主自身 UI 不用这套变量（仍走字面量），它们只服务插件。 */
+html {
+  --brand: #5b5bd6;
+  --brand-hover: #4a4ab8;
+  --line: #e6e8ec;
+  --text: #1f2329;
+  --muted: #7a828e;
+  --surface: #f5f6f8;
+  --card: #ffffff;
+  --field: #fbfbfd;
+  --chip: #fafbfc;
+  --chip-count: #aab0ba;
+  --chip-text: #626a76;
+  --chip-count-text: #6b7280;
+  --hover-border: #c9ccd4;
+  --hover-bg: #f7f8fa;
+  --code-bg: #eef0f4;
+  --seg-bg: #eef0f4;
+  --accent: #4a4ab8;
+  --accent-soft-bg: #eef0ff;
+  --accent-soft-border: #c7c8f5;
+  --accent-soft-count: #8a8ce0;
+  --chip-on-bg: #eef0ff;
+  --chip-on-border: #c7c8f5;
+  --chip-on-text: #4a4ab8;
+  --chip-on-count: #5f63c6;
+  --chip-check: #4a4ab8;
+  --divider-soft: #f2f3f6;
+  --ok: #1a9c5b;
+  --err: #e02424;
+  --btn-shadow: 0 1px 3px rgba(91, 91, 214, 0.3);
+  --dialog-shadow: 0 12px 40px rgba(0, 0, 0, 0.2);
+}
+
+html.theme-light {
+  --brand: #5b5bd6;
+  --brand-hover: #4a4ab8;
+  --line: #e6e8ec;
+  --text: #1f2329;
+  --muted: #7a828e;
+  --surface: #f5f6f8;
+  --card: #ffffff;
+  --field: #fbfbfd;
+  --chip: #fafbfc;
+  --chip-count: #aab0ba;
+  --chip-text: #626a76;
+  --chip-count-text: #6b7280;
+  --hover-border: #c9ccd4;
+  --hover-bg: #f7f8fa;
+  --code-bg: #eef0f4;
+  --seg-bg: #eef0f4;
+  --accent: #4a4ab8;
+  --accent-soft-bg: #eef0ff;
+  --accent-soft-border: #c7c8f5;
+  --accent-soft-count: #8a8ce0;
+  --chip-on-bg: #eef0ff;
+  --chip-on-border: #c7c8f5;
+  --chip-on-text: #4a4ab8;
+  --chip-on-count: #5f63c6;
+  --chip-check: #4a4ab8;
+  --divider-soft: #f2f3f6;
+  --ok: #1a9c5b;
+  --err: #e02424;
+  --btn-shadow: 0 1px 3px rgba(91, 91, 214, 0.3);
+  --dialog-shadow: 0 12px 40px rgba(0, 0, 0, 0.2);
+}
+
+html.theme-dark {
+  --brand: #6c6ce0;
+  --brand-hover: #7f7ff2;
+  --line: #33363d;
+  --text: #e4e6ea;
+  --muted: #98a0ab;
+  --surface: #17191d;
+  --card: #212429;
+  --field: #1a1c21;
+  --chip: #1e2126;
+  --chip-count: #7f8792;
+  --chip-text: #aab2bd;
+  --chip-count-text: #8b93a0;
+  --hover-border: #4a4f58;
+  --hover-bg: #2a2d33;
+  --code-bg: #2a2d33;
+  --seg-bg: #2a2d33;
+  --accent: #a5a6ff;
+  --accent-soft-bg: #2c2d4a;
+  --accent-soft-border: #3f4170;
+  --accent-soft-count: #9a9cf0;
+  --chip-on-bg: #363b43;
+  --chip-on-border: #4a505a;
+  --chip-on-text: #f2f4f7;
+  --chip-on-count: #b9c0ca;
+  --chip-check: #4a505a;
+  --divider-soft: #2b2e34;
+  --ok: #3ddc84;
+  --err: #ff6b6b;
+  --btn-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --dialog-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
 }
 
 #ms-config-view {
@@ -1321,12 +2005,13 @@ html.ms-config-root {
   color: #d24a4a;
 }
 
-@media (prefers-color-scheme: dark) {
-  #ms-config-view .sub-item .sub-op.danger:hover {
-    border-color: #5c3a3a;
-    background: #3a2b2b;
-    color: #ff7b7b;
-  }
+/* 深色态判定改用 <html> 类（theme.ts 保证恒有 theme-light/theme-dark 之一）：
+   原 @media prefers-color-scheme 只看系统偏好，「强制浅色 + 系统深色」时
+   会把这处深色样式错带过来，与强制主题打架。 */
+html.theme-dark #ms-config-view .sub-item .sub-op.danger:hover {
+  border-color: #5c3a3a;
+  background: #3a2b2b;
+  color: #ff7b7b;
 }
 
 /* 添加订阅：折叠的输入行 */
@@ -1469,7 +2154,7 @@ html.ms-config-root {
   border-radius: 999px;
   font-size: 12.5px;
   background: var(--chip);
-  color: var(--muted);
+  color: var(--chip-text);
   cursor: pointer;
   user-select: none;
   transition: all 0.12s ease;
@@ -1483,7 +2168,7 @@ html.ms-config-root {
 
 #ms-config-view .tag-chip .tag-count {
   font-size: 11px;
-  color: var(--chip-count);
+  color: var(--chip-count-text);
 }
 
 #ms-config-view .tag-chip:hover {
@@ -1504,7 +2189,7 @@ html.ms-config-root {
 
 #ms-config-view .tag-chip input {
   margin: 0;
-  accent-color: var(--chip-on-border);
+  accent-color: var(--chip-check);
 }
 
 #ms-config-view .tags-empty {
@@ -1553,6 +2238,55 @@ html.ms-config-root {
   background: var(--brand-hover);
 }
 
+/* label / 标题右侧的可点击提示图标（问号 + 气泡） */
+#ms-config-view .cfg-hint-trigger {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-left: 4px;
+  color: var(--muted);
+  cursor: pointer;
+  opacity: 0.55;
+  transition: opacity 0.15s ease, color 0.15s ease;
+  vertical-align: middle;
+}
+#ms-config-view .cfg-hint-trigger:hover {
+  opacity: 1;
+  color: var(--text);
+}
+#ms-config-view .cfg-hint-popover {
+  position: absolute;
+  z-index: 100;
+  top: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: 240px;
+  padding: 8px 10px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.10);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+  pointer-events: none;
+  /* 多行说明（如快捷键作用类型说明）按 \n 换行；单行提示不受影响 */
+  white-space: pre-line;
+}
+#ms-config-view .cfg-hint-popover::before {
+  content: "";
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-bottom-color: var(--line);
+}
+
 /* 卡片底部说明文字（仓库 / 缓存面板共用） */
 #ms-config-view .cfg-note {
   margin-top: 12px;
@@ -1562,13 +2296,32 @@ html.ms-config-root {
 }
 
 /* ---- 快捷键 ---- */
+/* 行共享网格：所有行的列轨统一在此定义（subgrid），逐行严格对齐 */
+#ms-config-view .shortcut-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content max-content max-content;
+  column-gap: 12px;
+}
+
 #ms-config-view .shortcut-row {
-  display: flex;
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
   align-items: center;
-  justify-content: space-between;
-  gap: 16px;
   padding: 12px 0;
   border-bottom: 1px solid var(--divider-soft);
+}
+
+/* 第四列操作按钮容器：固定在该列中，不受内部按钮宽度影响 */
+#ms-config-view .shortcut-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  height: 32px;
+}
+
+#ms-config-view .shortcut-actions > button {
+  flex-shrink: 0;
 }
 
 #ms-config-view .shortcut-row:last-of-type {
@@ -1578,8 +2331,9 @@ html.ms-config-root {
 #ms-config-view .shortcut-info {
   min-width: 0;
   display: flex;
-  flex-direction: column;
-  gap: 3px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
 }
 
 #ms-config-view .shortcut-label {
@@ -1587,23 +2341,10 @@ html.ms-config-root {
   font-weight: 500;
 }
 
-#ms-config-view .shortcut-desc {
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--muted);
-}
-
-/* 作用类型 / 作用对象（插件）下拉：并排一行，窄屏自动换行 */
-#ms-config-view .shortcut-selects {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 2px;
-}
-
+/* 作用类型 / 作用对象（插件）下拉：样式在此；横向排布由 .shortcut-info 控制 */
 #ms-config-view .shortcut-select {
-  max-width: 220px;
+  width: 160px;
+  max-width: 160px;
   padding: 4px 8px;
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -1631,6 +2372,67 @@ html.ms-config-root {
   border-color: var(--accent);
 }
 
+/* 「快速过滤」的常用头输入：输入框 + 自动追加的分隔符后缀（视觉上连成一体） */
+#ms-config-view .shortcut-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  min-width: 0;
+}
+
+#ms-config-view .shortcut-input {
+  width: 160px;
+  max-width: 160px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px 0 0 6px;
+  border-right: none;
+  background: var(--card);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+#ms-config-view .shortcut-input::placeholder {
+  color: var(--chip-count);
+}
+
+#ms-config-view .shortcut-input:hover {
+  border-color: var(--hover-border);
+}
+
+#ms-config-view .shortcut-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* 无分隔符后缀的输入框（快捷打开项）：四角圆角 + 补齐右边框 */
+#ms-config-view .shortcut-input.solo {
+  border-radius: 6px;
+  border-right: 1px solid var(--line);
+}
+
+#ms-config-view .shortcut-input.solo:hover {
+  border-color: var(--hover-border);
+}
+
+#ms-config-view .shortcut-input.solo:focus {
+  border-color: var(--accent);
+}
+
+/* 分隔符后缀：显示触发时会自动追加的「 : 」，点击不参与输入 */
+#ms-config-view .shortcut-header-suffix {
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 0 6px 6px 0;
+  background: var(--field);
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+  user-select: none;
+}
+
 /* 新增一行快捷键 */
 #ms-config-view .shortcut-add-row {
   display: flex;
@@ -1640,17 +2442,12 @@ html.ms-config-root {
   margin-top: 12px;
 }
 
-#ms-config-view .shortcut-value {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-/* 当前快捷键的键帽展示（kbd 胶囊） */
+/* 当前快捷键的键帽展示（kbd 胶囊）：列宽由所有行里最长的组合键撑开，
+   右对齐让短组合（Alt+P）也贴着录入框，各行键帽右缘对齐 */
 #ms-config-view .shortcut-caps {
   display: inline-flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 4px;
   min-height: 20px;
 }
@@ -2238,6 +3035,43 @@ html.ms-config-root {
   pointer-events: none;
 }
 
+/* 主题选择分段器（与 search-type.segmented 同构，支持图标/文字） */
+#ms-config-view .theme-segmented.segmented {
+  display: inline-flex;
+  padding: 3px;
+  background: var(--seg-bg);
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+
+#ms-config-view .theme-segmented.segmented label {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 14px;
+  font-size: 13px;
+  color: var(--muted);
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+#ms-config-view .theme-segmented.segmented label:has(input:checked),
+#ms-config-view .theme-segmented.segmented label.on {
+  background: var(--card);
+  color: var(--text);
+  font-weight: 500;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+#ms-config-view .theme-segmented.segmented input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
 #ms-config-view .tis-hub .result-list {
   /* 结果列表撑满卡片（搜索区）以外的剩余高度：窗口拉高/拉低时列表跟着变高，
      条目多时在列表内部滚动，而不是整页一起滚、底部留一大片空白。
@@ -2319,6 +3153,19 @@ html.ms-config-root {
 
 /* ---- Token 输入弹层 ---- */
 /* 设置窗口弹层 */
+/*
+ * 层叠保证：**双重**。
+ *
+ * 1) 元素带 `popover="manual"`（见 MessageDialog.vue），浏览器把它送进
+ *    **top layer**：永远压在所有 z-index 之上，不受任何层叠上下文 /
+ *    transform / filter 影响。这是宿主模态层应有的硬保证。
+ * 2) 下面的 z-index: 2147483647 只是**兼容兜底**（环境不支持 popover 时）。
+ *    单靠它不够：插件 UI 与宿主弹窗处在同一个层叠上下文，插件作者可以写
+ *    同样大的 z-index（右下角缩放手柄就是 2147483647），且顶格后再比 DOM 顺序。
+ *
+ * [popover] 的浏览器默认样式要给清掉（margin:auto / border / padding /背景…），
+ * 否则会破坏 .token-overlay 本来的铺满遮罩 + flex 居中布局。
+ */
 #ms-config-view .token-overlay {
   position: fixed;
   inset: 0;
@@ -2326,8 +3173,23 @@ html.ms-config-root {
   display: none;
   align-items: center;
   justify-content: center;
-  z-index: 10;
+  z-index: 2147483647;
   backdrop-filter: blur(2px);
+}
+
+/* 清掉 [popover] 的 UA 默认值（margin/border/padding/background/overflow） */
+#ms-config-view .token-overlay[popover],
+#my_search_box .token-overlay[popover] {
+  margin: 0;
+  border: 0;
+  padding: 0;
+  width: 100%;
+  max-width: none;
+  height: 100%;
+  max-height: none;
+  overflow: hidden;
+  inset: 0;
+  color: inherit;
 }
 
 #ms-config-view .token-overlay.show {
@@ -2432,7 +3294,8 @@ html.ms-config-root {
   display: none;
   align-items: center;
   justify-content: center;
-  z-index: 10;
+  /* 与设置窗口一致：top layer（popover）+ z-index 兜底，盖过插件自绘 UI */
+  z-index: 2147483647;
   backdrop-filter: blur(2px);
 }
 
@@ -2660,6 +3523,12 @@ html.ms-config-root {
   color: var(--accent);
 }
 
+#ms-config-view .btn-sm:disabled {
+  opacity: 0.55;
+  cursor: default;
+  pointer-events: none;
+}
+
 #ms-config-view .btn-tiny {
   border: 1px solid var(--line);
   background: var(--card);
@@ -2695,12 +3564,11 @@ html.ms-config-root {
   color: #d24a4a;
 }
 
-@media (prefers-color-scheme: dark) {
-  #ms-config-view .btn-warn:hover {
-    border-color: #5c3a3a;
-    background: #3a2b2b;
-    color: #ff7b7b;
-  }
+/* 深色态判定改用 <html> 类（理由同上） */
+html.theme-dark #ms-config-view .btn-warn:hover {
+  border-color: #5c3a3a;
+  background: #3a2b2b;
+  color: #ff7b7b;
 }
 
 /* 插件列表 */
@@ -2892,6 +3760,38 @@ html.ms-config-root {
   font-family: Consolas, Menlo, monospace;
   font-size: 12px;
   color: var(--muted);
+}
+
+/* 环境变量授权：已授权项做成小胶囊，右侧一个「选择变量…」 */
+#ms-config-view .env-grant-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+#ms-config-view .env-grant-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+#ms-config-view .env-grant-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 4px 1px 2px;
+  border-radius: 999px;
+  background: var(--accent-soft-bg);
+  border: 1px solid var(--accent-soft-border);
+}
+#ms-config-view .env-grant-chip code {
+  background: transparent;
+  padding: 0 2px;
+  color: var(--accent);
+  font-weight: 600;
+}
+#ms-config-view .env-grant-chip .btn-link {
+  font-size: 11px;
 }
 
 #ms-config-view .plugin-info-row a {
@@ -3282,6 +4182,9 @@ html.ms-config-root {
   flex-shrink: 0;
   font-size: 13px;
   color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 #ms-config-view .page.sync .cfg-row .cfg-input,
 #ms-config-view .page.sync .cfg-row .cfg-select {
@@ -3330,15 +4233,16 @@ html.ms-config-root {
   background-repeat: no-repeat;
   background-position: right 10px center;
 }
-@media (prefers-color-scheme: dark) {
-  #ms-config-view .page.sync .cfg-select {
-    background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.5L6 8l3.5-3.5' fill='none' stroke='%2398a0ab' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-  }
-  /* 深色下 <option> 由系统绘制，显式给底色避免白底黑字 */
-  #ms-config-view .page.sync .cfg-select option {
-    background: var(--card);
-    color: var(--text);
-  }
+/* 深色态判定改用 <html> 类（theme.ts 保证恒有 theme-light/theme-dark 之一）：
+   原 @media prefers-color-scheme 只看系统偏好，「强制浅色 + 系统深色」时
+   会把这处深色样式错带过来，与强制主题打架。 */
+html.theme-dark #ms-config-view .page.sync .cfg-select {
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.5L6 8l3.5-3.5' fill='none' stroke='%2398a0ab' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+/* 深色下 <option> 由系统绘制，显式给底色避免白底黑字 */
+html.theme-dark #ms-config-view .page.sync .cfg-select option {
+  background: var(--card);
+  color: var(--text);
 }
 
 /* 兜底间隔：选项很短，不需要占满整行
@@ -3373,4 +4277,1024 @@ html.ms-config-root {
 }
 #ms-config-view .page.sync .cfg-hint.errorColor {
   color: var(--err);
+}
+
+/* ========== 环境变量面板（设置 → 环境变量） ==========
+ * 一份集中配置、多插件共用；这里是唯一可见明文的地方。
+ * 表单/列表沿用卡片 + 行体系的既有观感，只补本面板特有的排布。 */
+
+#ms-config-view .page.env .env-note {
+  margin-top: 6px;
+  margin-bottom: 0;
+}
+#ms-config-view .page.env .env-note b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* 说明段落默认收纳：点标题展开，收起时卡片头下只留一行入口 */
+#ms-config-view .page.env .env-note-wrap {
+  margin-bottom: 12px;
+}
+#ms-config-view .page.env .env-note-wrap > summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+  font-size: 12px;
+  color: var(--muted);
+}
+/* WebView2 里 ::marker 不完全可控，显式去掉原生三角再自绘 */
+#ms-config-view .page.env .env-note-wrap > summary::-webkit-details-marker {
+  display: none;
+}
+#ms-config-view .page.env .env-note-wrap > summary::before {
+  content: "▸";
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 0.12s ease;
+}
+#ms-config-view .page.env .env-note-wrap[open] > summary::before {
+  transform: rotate(90deg);
+}
+#ms-config-view .page.env .env-note-wrap > summary:hover {
+  color: var(--text);
+}
+
+/* 工具条：搜索框占满 + 右侧新增按钮 */
+#ms-config-view .page.env .env-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+#ms-config-view .page.env .env-search {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 行内表单：与 sync 面板同款「标签 + 控件」排布 */
+#ms-config-view .page.env .cfg-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--divider-soft);
+}
+#ms-config-view .page.env .cfg-row:last-child {
+  border-bottom: none;
+}
+#ms-config-view .page.env .cfg-row-label {
+  width: 88px;
+  flex-shrink: 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+#ms-config-view .page.env .cfg-row .cfg-input {
+  flex: 1;
+  min-width: 0;
+}
+#ms-config-view .page.env .env-form {
+  padding: 4px 0 10px;
+  margin-bottom: 8px;
+  border-bottom: 1px dashed var(--line);
+}
+#ms-config-view .page.env .env-secret-hint {
+  font-size: 12px;
+  color: var(--muted);
+}
+#ms-config-view .page.env .env-secret-switch {
+  flex-shrink: 0;
+}
+#ms-config-view .page.env .env-form-actions {
+  margin-top: 12px;
+}
+
+/* 输入框（与 sync 面板一致的圆角描边风格） */
+#ms-config-view .page.env .cfg-input {
+  box-sizing: border-box;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--field);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 7px 10px;
+  outline: none;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+#ms-config-view .page.env .cfg-input::placeholder {
+  color: var(--chip-count);
+}
+#ms-config-view .page.env .cfg-input:hover {
+  border-color: var(--hover-border);
+}
+#ms-config-view .page.env .cfg-input:focus {
+  border-color: var(--brand);
+  background: var(--card);
+}
+#ms-config-view .page.env .cfg-input.is-invalid {
+  border-color: var(--err);
+}
+#ms-config-view .page.env .env-error {
+  margin: 4px 0 2px 100px;
+  font-size: 12px;
+  color: var(--err);
+}
+#ms-config-view .page.env .env-value-input {
+  font-family: Consolas, Menlo, monospace;
+}
+
+/* 列表行：名字/说明 | 值 | 操作 */
+#ms-config-view .page.env .env-list {
+  display: flex;
+  flex-direction: column;
+}
+#ms-config-view .page.env .env-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--divider-soft);
+}
+#ms-config-view .page.env .env-item:last-child {
+  border-bottom: none;
+}
+#ms-config-view .page.env .env-item.editing {
+  background: var(--accent-soft-bg);
+  border-radius: 8px;
+  padding: 9px 10px;
+}
+#ms-config-view .page.env .env-item-main {
+  flex: 1;
+  min-width: 0;
+}
+#ms-config-view .page.env .env-item-name {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+#ms-config-view .page.env .env-item-name code {
+  font-family: Consolas, Menlo, monospace;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--code-bg);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+#ms-config-view .page.env .env-item-desc-icon {
+  cursor: help;
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1;
+  user-select: none;
+}
+#ms-config-view .page.env .env-item-value {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  max-width: 42%;
+}
+#ms-config-view .page.env .env-value {
+  font-family: Consolas, Menlo, monospace;
+  font-size: 12.5px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#ms-config-view .page.env .env-value.literal {
+  color: var(--text);
+}
+#ms-config-view .page.env .env-item-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+#ms-config-view .page.env .env-badge.granted {
+  background: var(--chip-on-bg);
+  color: var(--chip-on-text);
+}
+#ms-config-view .page.env .env-empty {
+  padding: 22px 8px;
+  text-align: center;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--muted);
+}
+
+/* ========== 环境变量授权选择器（宿主绘制的居中面板） ==========
+ * 两个窗口共用一份：插件界面在搜索窗口（inlay）里跑，设置窗口也可能调它。
+ * 因此规则写两份作用域（照 .token-overlay/.token-dialog 的既有做法）。
+ *
+ * 定位必须 position: fixed —— 设置窗口的 .cfg-body 是 overflow-y:auto，
+ * 绝对定位的浮层会被裁剪（.cfg-hint-popover 就吃过这个亏）。
+ * z-index 取 30：高于 .cfg-toast(20) 与 .token-overlay(10)。 */
+.env-picker-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(17, 20, 26, 0.45);
+  backdrop-filter: blur(2px);
+}
+.env-picker-overlay.show {
+  display: flex;
+}
+.env-picker-dialog {
+  display: flex;
+  flex-direction: column;
+  width: 460px;
+  max-width: 92vw;
+  max-height: 76vh;
+  box-sizing: border-box;
+  padding: 18px 20px 14px;
+  background: var(--card, #fff);
+  color: var(--text, #1f2329);
+  border: 1px solid var(--line, #e6e8ec);
+  border-radius: 12px;
+  box-shadow: var(--dialog-shadow, 0 12px 40px rgba(0, 0, 0, 0.2));
+}
+.env-picker-head h3 {
+  margin: 0 0 4px;
+  font-size: 15px;
+  font-weight: 600;
+}
+.env-picker-sub {
+  margin: 0 0 12px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--muted, #7a828e);
+}
+.env-picker-search {
+  margin-bottom: 10px;
+}
+.env-picker-dialog .cfg-input {
+  box-sizing: border-box;
+  width: 100%;
+  border: 1px solid var(--line, #e6e8ec);
+  border-radius: 7px;
+  background: var(--field, #fbfbfd);
+  color: var(--text, #1f2329);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 7px 10px;
+  outline: none;
+}
+.env-picker-dialog .cfg-input:focus {
+  border-color: var(--brand, #5b5bd6);
+  background: var(--card, #fff);
+}
+.env-picker-list {
+  flex: 1;
+  min-height: 60px;
+  overflow-y: auto;
+  margin: 0 -4px;
+  padding: 0 4px;
+}
+.env-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.env-picker-row.active {
+  background: var(--hover-bg, #f7f8fa);
+}
+.env-picker-row.granted.active {
+  background: var(--accent-soft-bg, #eef0ff);
+}
+.env-picker-row-main {
+  flex: 1;
+  min-width: 0;
+}
+.env-picker-name {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+.env-picker-name code {
+  font-family: Consolas, Menlo, monospace;
+  font-size: 13px;
+  font-weight: 600;
+  background: var(--code-bg, #eef0f4);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+.env-picker-badge {
+  font-size: 10px;
+  height: 16px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--chip-on-bg, #eef0ff);
+  color: var(--chip-on-text, #4a4ab8);
+}
+.env-picker-desc {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--muted, #7a828e);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.env-picker-mask {
+  flex-shrink: 0;
+  font-family: Consolas, Menlo, monospace;
+  font-size: 12px;
+  color: var(--chip-count, #aab0ba);
+  letter-spacing: 1px;
+}
+.env-picker-action {
+  flex-shrink: 0;
+  min-width: 44px;
+  text-align: right;
+}
+.env-picker-arrow {
+  font-size: 12px;
+  color: var(--accent, #4a4ab8);
+}
+.env-picker-empty {
+  padding: 22px 8px;
+  text-align: center;
+  font-size: 12.5px;
+  line-height: 1.8;
+  color: var(--muted, #7a828e);
+}
+/* 行内授权确认条 */
+.env-picker-confirm {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: var(--accent-soft-bg, #eef0ff);
+  border: 1px solid var(--accent-soft-border, #c7c8f5);
+}
+.env-picker-confirm-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.env-picker-confirm-text code {
+  font-family: Consolas, Menlo, monospace;
+  font-weight: 600;
+}
+.env-picker-confirm-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.env-picker-dialog .btn-sm {
+  border: 1px solid var(--line, #e6e8ec);
+  background: var(--card, #fff);
+  color: var(--text, #1f2329);
+  border-radius: 6px;
+  height: 26px;
+  padding: 0 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.env-picker-dialog .btn-sm:hover {
+  border-color: var(--hover-border, #c9ccd4);
+  background: var(--hover-bg, #f7f8fa);
+}
+.env-picker-dialog .btn-sm:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.env-picker-dialog .btn-sm.env-picker-allow {
+  background: var(--brand, #5b5bd6);
+  border-color: var(--brand, #5b5bd6);
+  color: #fff;
+}
+.env-picker-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--divider-soft, #f2f3f6);
+}
+.env-picker-dialog .btn-link {
+  border: none;
+  background: none;
+  padding: 0;
+  font-size: 12px;
+  color: var(--accent, #4a4ab8);
+  cursor: pointer;
+}
+.env-picker-manual {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.env-picker-manual-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.env-picker-dialog .cfg-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line, #e6e8ec);
+  background: var(--card, #fff);
+  border-radius: 7px;
+  font-size: 13px;
+  padding: 7px 14px;
+  color: var(--text, #1f2329);
+  cursor: pointer;
+}
+.env-picker-dialog .cfg-btn.ghost {
+  color: var(--muted, #7a828e);
+}
+.env-picker-dialog .cfg-btn.primary {
+  background: var(--brand, #5b5bd6);
+  border-color: var(--brand, #5b5bd6);
+  color: #fff;
+}
+.env-picker-dialog .cfg-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* ========== 搜索窗口深色主题 ========== */
+html.theme-dark,
+html.theme-dark body {
+  background: #17191d;
+}
+
+html.theme-dark #my_search_box {
+  background: #17191d;
+  border-color: #33363d;
+}
+
+html.theme-dark #searchBox {
+  background: #17191d;
+}
+
+html.theme-dark #my_search_input {
+  background: #17191d;
+  color: rgba(228, 230, 234, 0.87);
+}
+
+html.theme-dark #my_search_input::placeholder {
+  color: #7f8792;
+}
+
+html.theme-dark #matchResult li {
+  color: #4aa8d8;
+}
+
+html.theme-dark #matchResult li.active {
+  background: #1e3a5f;
+}
+
+/* 结果项图标：**底板跟随主题**（与插件市场的插件 icon 同口径）。
+
+   底板（background + padding:3px）给 favicon / 内置图标一个稳定的承载面。
+   深色下取 --surface 往白提亮约 26% 的中性深色 #55575a（而不是纯白/浅灰的
+   #e8eaed）——纯浅色底板在深色浮窗里是刺眼的白方块；但仍比行底色亮，保证
+   深色字形（内置 sketch/script 图标为 #231815）压在上面仍清晰可见（≥2.3:1）。
+   简言之：底板整体降为深色档，只保留“比行底亮一点”的区别度。
+   回归测试：test/dark-theme-ui.test.mjs（锁死底板亮度 <0.30、与行底对比≥1.8、
+   与深色字形对比≥2.3）。 */
+html.theme-dark #matchResult img {
+  background: #55575a;
+  box-shadow: 0 0 3px rgba(0, 0, 0, 0.45);
+  border-radius: 30%;
+}
+
+html.theme-dark #matchResult .item_title {
+  color: #8ab4f8;
+}
+
+html.theme-dark #matchResult .obsolete {
+  color: #7f8792;
+}
+
+html.theme-dark #matchResult .item_desc {
+  color: #98a0ab;
+}
+
+html.theme-dark .related-links > a {
+  background: #1a2340;
+  color: #8ab4f8;
+}
+
+html.theme-dark .related-links > a:hover {
+  background: #152035;
+  border-color: #2a3a5a;
+  color: #a5c4f8;
+}
+
+html.theme-dark #text_show {
+  color: #e4e6ea;
+}
+
+html.theme-dark #text_show .text-head {
+  color: #98a0ab;
+  border-bottom-color: #33363d;
+}
+
+html.theme-dark #text_show .markdown-body blockquote {
+  color: #98a0ab;
+  border-left-color: #33363d;
+  background: #1e2126;
+}
+
+html.theme-dark #text_show .markdown-body code {
+  background: #1e2126;
+}
+
+html.theme-dark #text_show .markdown-body pre {
+  background: #1e2126;
+}
+
+html.theme-dark #text_show .markdown-body pre .copy-btn {
+  background: #4a4f58;
+  color: #e4e6ea;
+}
+
+html.theme-dark #text_show .markdown-body pre .copy-btn:hover {
+  background: #5a5f68;
+}
+
+html.theme-dark #text_show .markdown-body pre .copy-btn:active {
+  background: #6a6f78;
+}
+
+html.theme-dark #text_show .markdown-body hr {
+  border-top-color: #33363d;
+}
+
+html.theme-dark #text_show .markdown-body a {
+  color: #58a6ff;
+}
+
+html.theme-dark #text_show .markdown-body th,
+html.theme-dark #text_show .markdown-body td {
+  border-color: #33363d;
+}
+
+html.theme-dark #text_show .markdown-body th {
+  background: #1e2126;
+}
+
+html.theme-dark #text_show .markdown-body tr:nth-child(2n) td {
+  background: #1e2126;
+}
+
+html.theme-dark #text_show::-webkit-scrollbar-track {
+  background-color: #1e2126;
+}
+
+html.theme-dark #text_show::-webkit-scrollbar-thumb {
+  background-color: #4a4f58;
+  border-color: #1e2126;
+}
+
+html.theme-dark #text_show::-webkit-scrollbar-thumb:hover {
+  background-color: #5a5f68;
+}
+
+html.theme-dark #text_show::-webkit-scrollbar-thumb:active {
+  background-color: #6a6f78;
+}
+
+html.theme-dark #text_show .markdown-body pre::-webkit-scrollbar-thumb {
+  background-color: rgba(255, 255, 255, 0.12);
+}
+
+html.theme-dark #text_show .markdown-body pre::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(255, 255, 255, 0.2);
+}
+
+/* 搜索窗口弹层深色主题 */
+html.theme-dark #my_search_box > .cfg-toast {
+  background: #212429;
+  border-color: #33363d;
+  color: #e4e6ea;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+html.theme-dark #my_search_box > .cfg-toast.ok {
+  color: #3ddc84;
+}
+
+html.theme-dark #my_search_box > .cfg-toast.error {
+  color: #ff6b6b;
+}
+
+html.theme-dark #my_search_box .token-overlay {
+  background: rgba(0, 0, 0, 0.6);
+}
+
+html.theme-dark #my_search_box .token-dialog {
+  background: #212429;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
+}
+
+html.theme-dark #my_search_box .token-dialog p {
+  color: #98a0ab;
+}
+
+html.theme-dark #my_search_box .token-actions .cfg-btn {
+  border-color: #33363d;
+  background: #212429;
+  color: #e4e6ea;
+}
+
+html.theme-dark #my_search_box .token-actions .cfg-btn:hover {
+  border-color: #4a4f58;
+  background: #2a2d33;
+}
+
+html.theme-dark #my_search_box .token-actions .cfg-btn.ghost {
+  color: #98a0ab;
+}
+
+html.theme-dark #my_search_box .token-actions .cfg-btn.primary {
+  background: #5b5bd6;
+  border-color: #5b5bd6;
+  color: #ffffff;
+}
+
+html.theme-dark #my_search_box .token-actions .cfg-btn.primary:hover {
+  background: #4a4ab8;
+  border-color: #4a4ab8;
+}
+
+html.theme-dark #my_search_box .token-actions .cfg-btn:focus-visible {
+  outline-color: rgba(91, 91, 214, 0.5);
+}
+
+/* 搜索框内文件图标背景 */
+html.theme-dark #ms-input-files .ms-input-file img {
+  background: #4a4f58;
+}
+
+/* 系统图标在深色下同样不要灰底（这条比上面那条多一个类型选择器 img，
+   用来压过它——见浅色区 .chip-sys-icon 的注释） */
+html.theme-dark #ms-input-files .ms-input-file img.chip-sys-icon {
+  background: transparent;
+  padding: 0;
+  border: none;
+}
+
+/* 附件 chip（深色） */
+html.theme-dark #ms-input-files .ms-input-file {
+  background: #2c313a;
+  border-color: #3d434e;
+  color: #cfd3da;
+}
+
+html.theme-dark #ms-input-files .ms-input-file .chip-icon {
+  color: #9aa1ac;
+}
+
+/* 图片附件缩略图（深色） */
+html.theme-dark #ms-input-files .ms-input-file .chip-thumb {
+  border-color: #4a505b;
+  background: #1a1c20;
+}
+
+html.theme-dark #ms-input-files .ms-input-file.is-folder .chip-icon {
+  color: #e3a83c;
+}
+
+html.theme-dark #ms-input-files .ms-input-file .chip-x {
+  color: #8a9099;
+}
+
+html.theme-dark #ms-input-files .ms-input-file .chip-x:hover {
+  color: #ff8080;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+html.theme-dark #searchBox.drag-over {
+  outline-color: #7c7cf0;
+  background: #1f2126;
+}
+
+/* 「最近添加」条带（深色）：底色与 #searchBox 同款，与搜索框连成一体 */
+html.theme-dark #recentStrip {
+  background: #17191d;
+  border-top-color: #2c313a;
+}
+
+html.theme-dark #recentStrip .recent-item {
+  background: #2c313a;
+  border-color: #3d434e;
+  color: #cfd3da;
+}
+
+html.theme-dark #recentStrip .recent-item:hover {
+  background: #333944;
+  border-color: #4a5160;
+}
+
+html.theme-dark #recentStrip .recent-item .chip-icon {
+  color: #9aa1ac;
+}
+
+html.theme-dark #recentStrip .recent-item.is-folder .chip-icon {
+  color: #e3a83c;
+}
+
+html.theme-dark #recentStrip .recent-item .chip-x {
+  color: #8a9099;
+}
+
+html.theme-dark #recentStrip .recent-item .chip-x:hover {
+  color: #ff8080;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* 升级徽章环形进度条 */
+html.theme-dark .update-badge .ring-bg {
+  stroke: #4a4f58;
+}
+
+/* 空状态 */
+html.theme-dark .empty-state {
+  color: #7f8792;
+}
+
+html.theme-dark .empty-state .empty-hint {
+  color: #5a5f68;
+}
+
+/* ========== 插件安装确认弹窗（搜索窗口） ========== */
+#my_search_box .plugin-install-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(17, 20, 26, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+  backdrop-filter: blur(2px);
+}
+
+#my_search_box .plugin-install-dialog {
+  width: 460px;
+  max-width: 92vw;
+  max-height: 80vh;
+  background: #ffffff;
+  border-radius: 12px;
+  padding: 20px 22px;
+  box-sizing: border-box;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.25);
+  overflow-y: auto;
+}
+
+/* 弹窗顶部标题（比插件名更大一级，作为整窗标题） */
+#my_search_box .plugin-install-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #8a9099;
+  letter-spacing: 0.3px;
+  margin-bottom: 12px;
+}
+
+#my_search_box .plugin-install-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+#my_search_box .plugin-install-logo {
+  width: 44px;
+  height: 44px;
+  object-fit: contain;
+  flex: 0 0 auto;
+  border-radius: 6px;
+}
+
+#my_search_box .plugin-install-logo-placeholder {
+  width: 44px;
+  height: 44px;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  border-radius: 6px;
+  background: #f2f3f5;
+}
+
+#my_search_box .plugin-install-meta {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+#my_search_box .plugin-install-name {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0 0 2px;
+  color: #1a1a1a;
+}
+
+#my_search_box .plugin-install-version {
+  font-size: 12px;
+  color: #888;
+  margin: 0 0 2px;
+}
+
+#my_search_box .plugin-install-author {
+  color: #aaa;
+}
+
+#my_search_box .plugin-install-desc {
+  font-size: 12.5px;
+  color: #555;
+  line-height: 1.5;
+  margin: 0;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+#my_search_box .plugin-install-warnings {
+  margin-bottom: 12px;
+}
+
+#my_search_box .plugin-install-warning {
+  font-size: 12px;
+  color: #b45a00;
+  background: #fff7e6;
+  border: 1px solid #ffd8a8;
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin-bottom: 6px;
+}
+
+/* 「数据同步」提醒：插件申请了 sync 权限时出现，单独讲清波及范围
+ * （同步对象是整份可备份数据，而非插件自己一小块），因此给一块醒目的
+ * 蓝色信息卡，与上面的黄色警告区分开。 */
+#my_search_box .plugin-install-sync-notice {
+  font-size: 12px;
+  line-height: 1.65;
+  color: #1c4e80;
+  background: #eef5ff;
+  border: 1px solid #c5d9f5;
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+}
+
+#my_search_box .sync-notice-title {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+#my_search_box .sync-notice-list {
+  margin: 0;
+  padding-left: 18px;
+  list-style: disc;
+}
+
+#my_search_box .sync-notice-list li {
+  margin-bottom: 2px;
+}
+
+#my_search_box .plugin-install-perms h4 {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0 0 8px;
+  color: #333;
+}
+
+#my_search_box .plugin-install-no-perms {
+  font-size: 12px;
+  color: #888;
+  padding: 6px 0;
+}
+
+#my_search_box .plugin-install-perm-group {
+  margin-bottom: 10px;
+}
+
+#my_search_box .perm-group-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #444;
+  margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#my_search_box .perm-group-risk {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: 10px;
+}
+
+#my_search_box .perm-group-risk.risk-low {
+  color: #2a7;
+  background: #e8f5ec;
+}
+
+#my_search_box .perm-group-risk.risk-medium {
+  color: #b8860b;
+  background: #fff8e1;
+}
+
+#my_search_box .perm-group-risk.risk-high {
+  color: #c44;
+  background: #fdeaea;
+}
+
+#my_search_box .perm-group-risk.risk-critical {
+  color: #a03030;
+  background: #ffe0e0;
+}
+
+#my_search_box .plugin-install-perm-item {
+  font-size: 12px;
+  padding: 3px 0 3px 12px;
+  line-height: 1.5;
+}
+
+#my_search_box .perm-item-name {
+  font-weight: 500;
+  color: #333;
+}
+
+#my_search_box .perm-item-scope {
+  font-size: 11px;
+  color: #888;
+  margin-left: 4px;
+}
+
+#my_search_box .perm-item-desc {
+  display: block;
+  font-size: 11px;
+  color: #888;
+}
+
+#my_search_box .plugin-install-actions {
+  margin-top: 18px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* 暗色主题 */
+html.theme-dark #my_search_box .plugin-install-dialog {
+  background: #212429;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
+}
+
+html.theme-dark #my_search_box .plugin-install-name {
+  color: #e4e6ea;
+}
+
+html.theme-dark #my_search_box .plugin-install-desc,
+html.theme-dark #my_search_box .perm-item-desc,
+html.theme-dark #my_search_box .perm-item-scope {
+  color: #98a0ab;
+}
+
+html.theme-dark #my_search_box .plugin-install-perms h4,
+html.theme-dark #my_search_box .perm-group-title,
+html.theme-dark #my_search_box .perm-item-name {
+  color: #d0d4da;
+}
+
+html.theme-dark #my_search_box .plugin-install-warning {
+  color: #ffb366;
+  background: #2a2010;
+  border-color: #5c4018;
+}
+
+html.theme-dark #my_search_box .plugin-install-title {
+  color: #98a0ab;
+}
+
+html.theme-dark #my_search_box .plugin-install-sync-notice {
+  color: #9dbdea;
+  background: #16243a;
+  border-color: #2c4372;
+}
+
+html.theme-dark #my_search_box .plugin-install-logo-placeholder {
+  background: #2a2d33;
 }

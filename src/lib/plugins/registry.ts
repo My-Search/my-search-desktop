@@ -14,11 +14,18 @@
 
 // 显式带 .ts 后缀：本模块被 Node 测试直接 import（见 test/plugin-behavior.test.mjs），
 // 而 Node 的 ESM 解析器不做扩展名补全。
-import type { PluginAutostart, PluginCloseBehavior, PluginManifest } from "./manifest.ts";
+import type {
+  PluginAutostart,
+  PluginCloseBehavior,
+  PluginManifest,
+  PluginThemePreference,
+} from "./manifest.ts";
 import {
   compareVersion,
   DEFAULT_CLOSE_BEHAVIOR,
+  DEFAULT_PLUGIN_THEME,
   detailViewCloseBehaviorOf,
+  detailViewThemeOf,
   diffNewPermissions,
   parsePluginManifest,
 } from "./manifest.ts";
@@ -36,6 +43,9 @@ export type AutoStartMode = "always" | "on-demand" | "never";
 
 /** 关闭插件界面的有效行为（用户在面板上的选择） */
 export type CloseBehavior = "minimize" | "exit";
+
+/** 插件界面主题的有效偏好（用户在面板上的选择，默认跟随插件声明） */
+export type PluginThemeChoice = PluginThemePreference;
 
 /** 插件来源 */
 export interface PluginSource {
@@ -104,6 +114,15 @@ export interface PluginRecord {
   requestedAutoStart: PluginAutostart;
   /** 用户在面板上选择的「关闭插件界面时」行为 */
   closeBehavior: CloseBehavior;
+  /**
+   * 用户在面板上选择的「界面主题」偏好（dark / light / inherit）。
+   *
+   * 首次安装落在清单的建议值（`contributes.detailView.theme`）上，之后升级不覆盖；
+   * 打开插件视图时宿主据此把整个呼出窗口临时切到该主题。插件运行时也可以
+   * 用 `ms.ui.registerThemeProvider()` 上报自己的选择（如 pi-agent 左下角切换），
+   * 运行时值优先于这里的持久偏好。
+   */
+  themePreference: PluginThemePreference;
   /** 已授予权限 */
   grants: PluginGrant[];
   /** 被拒绝过的权限（面板上展示「曾拒绝」，避免反复打扰） */
@@ -111,6 +130,17 @@ export interface PluginRecord {
   runtime: PluginRuntimeState;
   /** 完整性：安装时的包摘要（legacy/内置为 null） */
   integrity: { sha256: string | null; signed: boolean };
+  /**
+   * 内置插件安装时的**内容指纹**（由 `.mspp` 包内容算出，与 zip 时间戳无关）。
+   *
+   * 为什么需要它：内置插件的引导逻辑只判「是否已安装」，装过就永远跳过——
+   * 于是随应用升级更新的内置插件（改了界面 CSS/JS）在**已装用户**身上永远
+   * 不生效（`plugins/<id>/` 落盘副本是旧的），表现为「源码改好了、页面照旧」。
+   * 有了指纹，启动时可对比「随版本分发的内容」与「上次装的内容」，
+   * 不一致就静默重装（用户态 enabled/autoStart/closeBehavior/授权一律保留）。
+   * 仅内置插件会写这个字段。
+   */
+  builtinFingerprint?: string | null;
   /** 待授权的权限请求（运行时被拒时登记，面板可一键授予） */
   pendingPermission?: string | null;
   /** legacy 脚本项的引用信息（仅 source.kind === "legacy"） */
@@ -137,22 +167,59 @@ export function emptyRuntime(): PluginRuntimeState {
   };
 }
 
-/** 清单请求 → 有效策略的默认落点（prompt 在用户表态前按「仅前台运行」处理） */
+/**
+ * 清单请求 → 有效策略的默认落点。
+ *
+ * 默认**绝不开机自启**：用户没表态前，新装插件不该就常驻后台。
+ * - `always` / `never` 原样尊重插件的明确请求；
+ * - `on-demand` 按需启动；
+ * - `prompt`（作者把决定权交给用户）与清单缺省在用户表态前折成 `on-demand`
+ *   ——面板上以「插件建议：由你决定/按需启动」呈现，用户可在设置里改。
+ */
 export function defaultAutoStartFrom(requested: PluginAutostart): AutoStartMode {
   switch (requested) {
+    case "always":
+      return "always";
     case "never":
       return "never";
-    case "always":
-    case "prompt":
     case "on-demand":
+    case "prompt":
     default:
-      return "always";
+      return "on-demand";
   }
 }
 
 /** 清单请求 → 「关闭界面时」的默认落点（缺省/非法一律最小化，保持老插件行为不变） */
 export function defaultCloseBehaviorFrom(requested: PluginCloseBehavior | undefined | null): CloseBehavior {
   return requested === "exit" ? "exit" : DEFAULT_CLOSE_BEHAVIOR;
+}
+
+/**
+ * 清单换了之后，「开机自启」该落在哪。
+ *
+ * 与 `closeBehavior` 的「用户改过就保留」同一条原则，但多一条**可跟随**：
+ * 作者改了自己的 `autostart` 请求时，只要用户没动过这个开关，就让新建议生效。
+ * 少了这条跟随，作者永远改不动自己的默认值——`requestedAutoStart` 会被写进记录
+ * 却无人读取，表现就是「改了清单，已装用户的策略纹丝不动」（真实踩到过：
+ * 插件改成声明开机自启，可已装的记录还停在 on-demand，后台进程一直不自启）。
+ *
+ * 「用户没动过」的判据是「当前值 == 旧清单的建议值」：用户若选过别的值，
+ * 一定保留原值；恰好选了个与建议相同的值时无法区分，按「没动过」处理——
+ * 面板上有修改入口与「恢复默认」，用户随时能改回来。
+ *
+ * 开发挂载（热重载）与安装升级两条路径共用本函数，避免口径分叉。
+ */
+export function resolveAutoStartOnUpgrade(input: {
+  /** 记录里当前生效的策略 */
+  current: AutoStartMode;
+  /** 旧清单（算「旧的建议值」） */
+  prevManifest: PluginManifest | null | undefined;
+  /** 新清单（算「新的建议值」） */
+  nextManifest: PluginManifest | null | undefined;
+}): AutoStartMode {
+  const prevSuggestion = behaviorSuggestionOf(input.prevManifest).autoStart;
+  const nextSuggestion = behaviorSuggestionOf(input.nextManifest).autoStart;
+  return input.current === prevSuggestion ? nextSuggestion : input.current;
 }
 
 /** 插件在清单里给出的两个行为建议（面板上展示「插件建议」与「恢复默认」用） */
@@ -198,6 +265,26 @@ export function shouldStopBackendOnClose(rec: PluginRecord | null | undefined): 
   if (!rec.manifest?.backend) return false;
   if (rec.autoStart === "always") return false;
   return rec.closeBehavior === "exit";
+}
+
+/**
+ * 求某插件**有效**的界面主题偏好（用户在面板上的选择优先，其次清单声明）。
+ *
+ * 这是「打开插件视图时该把呼出窗口切成什么主题」的持久侧口径，与
+ * `shouldKeepFrontendOnClose` 同级：面板显示与视图宿主引用同一个函数，
+ * 因此「面板上显示的值」与「打开时实际生效的值」永远一致。
+ *
+ * 注意运行时还有一层：插件可以用 `ms.ui.registerThemeProvider()` 上报它自己
+ * 界面内的主题选择（如 pi-agent 左下角切换），那一层的优先级高于本函数。
+ */
+export function resolvePluginTheme(
+  rec: PluginRecord | null | undefined
+): PluginThemePreference {
+  if (!rec) return DEFAULT_PLUGIN_THEME;
+  const pref = rec.themePreference;
+  if (pref === "dark" || pref === "light" || pref === "inherit") return pref;
+  // 老记录（升级前装的，没有该字段）：回落到清单声明
+  return detailViewThemeOf(rec.manifest);
 }
 
 /**
@@ -253,6 +340,9 @@ export function createPluginRecord(input: {
     // 建议值统一由 detailViewCloseBehaviorOf 计算：纯前端插件也能用
     // `contributes.detailView.closeBehavior` 表达「关闭界面时是否保留界面」。
     closeBehavior: detailViewCloseBehaviorOf(input.manifest),
+    // 界面主题同理：首次安装落在清单建议值上，升级不覆盖用户选择
+    //（口径统一由 detailViewThemeOf 计算：只认 contributes.detailView.theme）。
+    themePreference: detailViewThemeOf(input.manifest),
     grants: (input.grants ?? []).map((permission) => ({ permission, at: now, source: "install" as const })),
     denied: [],
     runtime: input.runtime ?? emptyRuntime(),
@@ -263,13 +353,20 @@ export function createPluginRecord(input: {
 /**
  * 补齐记录里缺失的字段（结构演进时的就地迁移）。
  *
- * 目前只处理 `closeBehavior`：它是后加的字段，升级前装的插件记录里没有。
- * 补的是**插件建议值**（等价于「这个字段早就有，只是当时没存」），
+ * 目前处理 `closeBehavior` 与 `themePreference`：它们都是后加的字段，升级前装的
+ * 插件记录里没有。补的是**插件建议值**（等价于「这个字段早就有，只是当时没存」），
  * 已有值一律不动——用户的选择优先于任何迁移。
  */
 function hydrateRecord(rec: PluginRecord): PluginRecord {
-  if (rec.closeBehavior === "minimize" || rec.closeBehavior === "exit") return rec;
-  return { ...rec, closeBehavior: behaviorSuggestionOf(rec.manifest).closeBehavior };
+  let out = rec;
+  if (out.closeBehavior !== "minimize" && out.closeBehavior !== "exit") {
+    out = { ...out, closeBehavior: behaviorSuggestionOf(out.manifest).closeBehavior };
+  }
+  const t = out.themePreference;
+  if (t !== "dark" && t !== "light" && t !== "inherit") {
+    out = { ...out, themePreference: detailViewThemeOf(out.manifest) };
+  }
+  return out;
 }
 
 /** 读取注册表（结构损坏时返回空表，不影响主流程） */
@@ -305,7 +402,7 @@ export function findPlugin(reg: PluginRegistryFile, id: string): PluginRecord | 
   return reg.plugins.find((p) => p.id === id);
 }
 
-/** 新增或替换记录（保留用户态字段：enabled / autoStart / closeBehavior / grants / denied） */
+/** 新增或替换记录（保留用户态字段：enabled / autoStart / closeBehavior / themePreference / grants / denied） */
 export function upsertPlugin(
   reg: PluginRegistryFile,
   incoming: PluginRecord,
@@ -322,7 +419,16 @@ export function upsertPlugin(
     installedAt: prev.installedAt,
     updatedAt: Date.now(),
     enabled: opts.preserveUserChoices === false ? incoming.enabled : prev.enabled,
-    autoStart: opts.preserveUserChoices === false ? incoming.autoStart : prev.autoStart,
+    // 自启策略：用户改过就保留；没改过则跟随新清单的建议（见 resolveAutoStartOnUpgrade
+    // 的说明——不跟随的话作者永远改不动自己的默认值）。
+    autoStart:
+      opts.preserveUserChoices === false
+        ? incoming.autoStart
+        : resolveAutoStartOnUpgrade({
+            current: prev.autoStart,
+            prevManifest: prev.manifest,
+            nextManifest: incoming.manifest,
+          }),
     // 用户改过的关闭行为同样不随插件升级被覆盖（与 autoStart 同理：
     // 否则插件能靠发版把自己设回「关闭即退出」，用户失去控制感）。
     // `?? incoming` 是给「升级前装的记录」（没有该字段）兜底——`loadRegistry`
@@ -332,11 +438,19 @@ export function upsertPlugin(
       opts.preserveUserChoices === false
         ? incoming.closeBehavior
         : prev.closeBehavior ?? incoming.closeBehavior,
+    // 界面主题同理：用户改过就不随插件升级被覆盖（`?? incoming` 给缺字段的老记录兜底）。
+    themePreference:
+      opts.preserveUserChoices === false
+        ? incoming.themePreference
+        : prev.themePreference ?? incoming.themePreference,
     grants: mergeGrants(prev.grants, incoming.grants),
     denied: prev.denied,
     pendingPermission: prev.pendingPermission ?? null,
     legacyRef: prev.legacyRef,
     updateAvailable: null,
+    // 内置内容指纹：安装方（install-builtin）显式给出时以它为准（重装场景），
+    // 否则保留旧值（普通升级不该把指纹擦掉，否则会触发一次多余的重装）。
+    builtinFingerprint: incoming.builtinFingerprint ?? prev.builtinFingerprint ?? null,
   };
   reg.plugins[idx] = merged;
   return merged;

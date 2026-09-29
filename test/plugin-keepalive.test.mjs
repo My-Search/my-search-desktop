@@ -152,7 +152,7 @@ const withBackend = (backend = {}, view = {}) => ({
 /* ============ 4. shouldKeepFrontendOnClose：有界面 + 非 exit ============ */
 {
   const mk = (manifest, over = {}) => {
-    const rec = createPluginRecord({ manifest, dir: "plugins/x", source: { kind: "file", ref: "x.msplugin" } });
+    const rec = createPluginRecord({ manifest, dir: "plugins/x", source: { kind: "file", ref: "x.mspp" } });
     return { ...rec, ...over };
   };
   const view = parse(withView()).manifest;

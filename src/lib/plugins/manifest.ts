@@ -25,7 +25,7 @@ export const PLUGIN_MANIFEST_FILE = "plugin.json";
 export const PLUGINS_DIR_NAME = "plugins";
 
 /** 插件分发后缀（安装包本质是 zip） */
-export const PLUGIN_PACKAGE_EXT = ".msplugin";
+export const PLUGIN_PACKAGE_EXT = ".mspp";
 
 /** 官方保留的 id 前缀（第三方不得占用，避免冒充官方插件） */
 export const RESERVED_ID_PREFIXES = ["com.mysearch.", "mysearch."];
@@ -44,6 +44,16 @@ export type PluginCloseBehavior = "minimize" | "exit";
 
 /** 关闭行为的默认值（老插件未声明时保持现状：不因关闭界面而停进程） */
 export const DEFAULT_CLOSE_BEHAVIOR: PluginCloseBehavior = "minimize";
+
+/**
+ * 插件界面的主题偏好：
+ * - `dark` / `light`：插件界面按该主题设计，打开时宿主把整个呼出窗口切到它；
+ * - `inherit`：跟随宿主主题（默认）。
+ */
+export type PluginThemePreference = "dark" | "light" | "inherit";
+
+/** 主题偏好的默认值（老插件未声明时跟随宿主，行为不变） */
+export const DEFAULT_PLUGIN_THEME: PluginThemePreference = "inherit";
 
 /** 后台进程规格 */
 export interface PluginBackendSpec {
@@ -72,7 +82,18 @@ export interface PluginBackendSpec {
   shutdownTimeoutSec?: number;
   /** 崩溃后最大重启次数（默认 3） */
   maxRestarts?: number;
-  /** 注入环境变量；值支持 $secret:<name> 从系统钥匙串取 */
+  /**
+   * 注入插件后台进程的环境变量（键必须是合法环境变量名）。
+   *
+   * 值是**字面量**或**对宿主环境变量存储的引用**：
+   *   - 字面量（如 `"utf-8"`）原样注入，适合非敏感的固定参数；
+   *   - 引用 `$NAME` / `${NAME}` / `$env:NAME`（`$secret:NAME` 为等价别名）
+   *     指向上层「设置 → 环境变量」里集中维护的变量——**需要用户逐项授权**
+   *     （`env.read:<NAME>`），未授权时该键**不会**被注入。
+   *
+   * 因此清单可以声明「我需要哪个变量」，但拿不拿得到由用户说了算
+   * （声明 ≠ 生效，与权限模型同源）。解析与注入见 `env-store.ts`。
+   */
   env?: Record<string, string>;
 }
 
@@ -89,6 +110,15 @@ export interface PluginSearchItemContribution {
   resource?: string;
   /** 是否默认展示在结果列表（默认 true） */
   visible?: boolean;
+  /**
+   * 是否参与二次搜索（「关键词 : 子词」）的候选，默认 **false**。
+   *
+   * 只有真正消费子关键词（在 view js 里注册 `onSubKeyword`）的插件项才应声明 true。
+   * 声明 true 的项会被宿主补 `[可搜索]` 标记，从而进入 PRO 模式候选；不声明则
+   * 「按 Tab 进入二次搜索」后该项不再出现在列表里（普通搜索与附件模式不受影响）。
+   * 判定必须声明式：插件脚本只在打开视图时才执行，晚于结果列表的渲染。
+   */
+  subSearch?: boolean;
 }
 
 /** 贡献点：命令（搜索框关键词前缀注册） */
@@ -126,6 +156,21 @@ export interface PluginDetailViewContribution {
    * 表达「关闭界面时是否保留界面」的诉求。两处都写且不一致时安装会给出告警。
    */
   closeBehavior?: PluginCloseBehavior;
+  /**
+   * 插件界面的**默认主题**（可选，默认 `"inherit"`）。
+   *
+   * - `"dark"` / `"light"`：插件界面按该主题设计。打开本插件视图期间，宿主会把
+   *   **整个呼出窗口**临时切到该主题（搜索框 / 结果列表 / 插件面板同色），关闭
+   *   插件（或切到别的视图）时恢复软件原主题。这样「软件浅色 + 插件深色设计稿」
+   *   不会出现上方搜索框浅、下方插件深的割裂观感。
+   * - `"inherit"`：跟随宿主主题（插件用 `var(--text, 兜底)` 等共享变量自适应）。
+   *
+   * 这只是**建议值**：用户在 `设置 → 插件` 里可以为某个插件改成别的主题
+   * （存在注册表的 `PluginRecord.themePreference`，升级不覆盖）；插件自己也可以
+   * 通过 `ms.ui.registerThemeProvider()` 在运行时上报用户在其界面内的选择
+   * （如 pi-agent 左下角的主题切换），运行时值优先于这里的声明。
+   */
+  theme?: PluginThemePreference;
 }
 
 /** 贡献点：插件自己的设置页 */
@@ -134,11 +179,26 @@ export interface PluginSettingsPanelContribution {
   title?: string;
 }
 
+/**
+ * 贡献点：输入附件处理能力。
+ *
+ * 用户把文件 / 文件夹粘贴（或拖入）搜索框后，结果列表只保留声明了
+ * 对应能力的插件——这份声明就是那个过滤依据。声明 ≠ 必然处理：
+ * 插件收到附件后仍可自行决定是否消费（配合 `xxx : yyy` 子关键词转发）。
+ */
+export interface PluginInputHandlersContribution {
+  /** 能处理文件（如上传、打开单个文件） */
+  files?: boolean;
+  /** 能处理文件夹（如在文件夹内检索） */
+  folders?: boolean;
+}
+
 export interface PluginContributes {
   searchItem?: PluginSearchItemContribution | PluginSearchItemContribution[];
   command?: PluginCommandContribution[];
   detailView?: PluginDetailViewContribution;
   settingsPanel?: PluginSettingsPanelContribution;
+  handlers?: PluginInputHandlersContribution;
 }
 
 /** 插件清单 */
@@ -313,6 +373,12 @@ export function normalizeBackendSpec(
           errors.push(`backend.env.key.invalid:${k}`);
           continue;
         }
+        // 宿主保留名：spawn 时宿主会用 MS_PLUGIN_* 标识插件进程身份，且宿主取值优先。
+        // 插件声明它们只会「静默不生效」，不如在清单校验期直接拒绝。
+        if (k.startsWith("MS_PLUGIN_")) {
+          errors.push(`backend.env.key.reserved:${k}`);
+          continue;
+        }
         env[k] = String(v ?? "");
       }
     }
@@ -366,6 +432,9 @@ function normalizeContributes(
     if (icon && !isValidIconRef(icon)) {
       errors.push(`contributes.searchItem.icon.unsafe:${i}`);
     }
+    if (o.subSearch != null && typeof o.subSearch !== "boolean") {
+      errors.push(`contributes.searchItem.subSearch.invalid:${i}`);
+    }
     items.push({
       title,
       keyword,
@@ -373,6 +442,8 @@ function normalizeContributes(
       icon: icon ?? undefined,
       resource: asString(o.resource) ?? undefined,
       visible: o.visible === undefined ? true : Boolean(o.visible),
+      // 默认 false：未声明即不参与二次搜索（只有真消费子关键词的插件才显式开启）
+      subSearch: o.subSearch === true,
     });
   }
   if (items.length === 1) out.searchItem = items[0];
@@ -431,6 +502,10 @@ function normalizeContributes(
         if (closeBehavior != null && !["minimize", "exit"].includes(String(closeBehavior))) {
           errors.push("contributes.detailView.closeBehavior.invalid");
         }
+        const theme = o.theme;
+        if (theme != null && !["light", "dark", "inherit"].includes(String(theme))) {
+          errors.push("contributes.detailView.theme.invalid");
+        }
         const script = asString(o.script);
         if (script && !isSafeRelativePath(script)) errors.push("contributes.detailView.script.unsafe");
         out.detailView = {
@@ -441,6 +516,10 @@ function normalizeContributes(
           closeBehavior:
             closeBehavior === "exit" || closeBehavior === "minimize"
               ? (closeBehavior as PluginCloseBehavior)
+              : undefined,
+          theme:
+            theme === "light" || theme === "dark" || theme === "inherit"
+              ? (theme as PluginThemePreference)
               : undefined,
         };
       }
@@ -457,6 +536,29 @@ function normalizeContributes(
       if (!entry) errors.push("contributes.settingsPanel.entry.missing");
       else if (!isSafeRelativePath(entry)) errors.push("contributes.settingsPanel.entry.unsafe");
       else out.settingsPanel = { entry, title: asString(o.title) ?? undefined };
+    }
+  }
+
+  // ---- handlers（粘贴/拖入附件的处理能力声明） ----
+  if (src.handlers != null) {
+    if (typeof src.handlers !== "object" || Array.isArray(src.handlers)) {
+      errors.push("contributes.handlers.invalid");
+    } else {
+      const o = src.handlers as Record<string, unknown>;
+      let valid = true;
+      for (const key of ["files", "folders"] as const) {
+        const v = o[key];
+        if (v != null && typeof v !== "boolean") {
+          errors.push(`contributes.handlers.${key}.invalid`);
+          valid = false;
+        }
+      }
+      if (valid) {
+        const files = o.files === true;
+        const folders = o.folders === true;
+        if (files || folders) out.handlers = { files, folders };
+        // 两个都是 false / 全缺省：视同未声明（不写入 out）
+      }
     }
   }
 
@@ -546,6 +648,8 @@ export function describeManifestError(code: string): string {
       return `第 ${arg} 个搜索项缺少 keyword`;
     case "contributes.searchItem.icon.unsafe":
       return `第 ${arg} 个搜索项的图标路径不安全`;
+    case "contributes.searchItem.subSearch.invalid":
+      return `第 ${arg} 个搜索项的 subSearch 必须是布尔值（true = 参与二次搜索候选）`;
     case "contributes.command.invalid":
       return arg ? `第 ${arg} 个命令不是合法对象` : "contributes.command 必须是数组";
     case "contributes.command.id.missing":
@@ -574,6 +678,12 @@ export function describeManifestError(code: string): string {
       return "contributes.settingsPanel 缺少入口文件（entry）";
     case "contributes.settingsPanel.entry.unsafe":
       return "contributes.settingsPanel.entry 路径不安全";
+    case "contributes.handlers.invalid":
+      return "contributes.handlers 必须是一个对象（如 { \"files\": true } / { \"folders\": true }）";
+    case "contributes.handlers.files.invalid":
+      return "contributes.handlers.files 必须是布尔值";
+    case "contributes.handlers.folders.invalid":
+      return "contributes.handlers.folders 必须是布尔值";
     case "backend.invalid":
       return "backend 必须是一个对象";
     case "backend.entry.missing":
@@ -592,11 +702,15 @@ export function describeManifestError(code: string): string {
       return "contributes.detailView.closeBehavior 只支持 minimize（关闭界面时保留界面）/ exit（关闭界面时卸载界面）";
     case "contributes.detailView.closeBehavior.conflictsWithBackend":
       return "contributes.detailView.closeBehavior 与 backend.closeBehavior 声明不一致：生效时以 detailView 的声明为准";
+    case "contributes.detailView.theme.invalid":
+      return "contributes.detailView.theme 只支持 dark（打开时呼出窗口切深色）/ light（切浅色）/ inherit（跟随宿主主题）";
 
     case "backend.env.invalid":
       return "backend.env 必须是「环境变量名 → 值」的对象";
     case "backend.env.key.invalid":
       return `环境变量名非法：${arg}`;
+    case "backend.env.key.reserved":
+      return `环境变量名不能以 MS_PLUGIN_ 开头（宿主保留，用于标识插件进程）：${arg}`;
     case "backend.withoutSpawnPermission":
       return "声明了 backend 但没有申请 backend.spawn 权限";
     case "spawnPermission.withoutBackend":
@@ -834,6 +948,18 @@ export function listCommands(m: PluginManifest): PluginCommandContribution[] {
 }
 
 /**
+ * 取插件声明的「附件处理能力」（未声明 = 两类都不能处理）。
+ * 搜索框粘贴/拖入文件、文件夹后的结果过滤以它为准（见 attachments.ts）。
+ */
+export function inputHandlersOf(m: PluginManifest | null | undefined): {
+  files: boolean;
+  folders: boolean;
+} {
+  const h = m?.contributes?.handlers;
+  return { files: h?.files === true, folders: h?.folders === true };
+}
+
+/**
  * 取插件对「关闭界面时」的建议值（清单侧的**唯一**口径）。
  *
  * 优先级：`contributes.detailView.closeBehavior` → `backend.closeBehavior` → 默认 minimize。
@@ -848,4 +974,19 @@ export function detailViewCloseBehaviorOf(
   const fromBackend = m?.backend?.closeBehavior;
   if (fromBackend === "exit" || fromBackend === "minimize") return fromBackend;
   return DEFAULT_CLOSE_BEHAVIOR;
+}
+
+/**
+ * 取插件对「界面主题」的建议值（清单侧的唯一口径）。
+ *
+ * 只认 `contributes.detailView.theme`：主题是**界面**属性（与后台进程无关），
+ * 没有 detailView 的插件谈不上界面主题，一律 inherit。非法值在解析阶段
+ * 已记为错误，这里再次兜底为 inherit（本函数永不抛异常）。
+ */
+export function detailViewThemeOf(
+  m: PluginManifest | null | undefined
+): PluginThemePreference {
+  const t = m?.contributes?.detailView?.theme;
+  if (t === "dark" || t === "light" || t === "inherit") return t;
+  return DEFAULT_PLUGIN_THEME;
 }

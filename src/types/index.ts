@@ -40,8 +40,6 @@ export interface TisMeta {
 
 /** 数据项（订阅内容源里的一条记录） */
 export interface SearchItem {
-  /** 在 engine.searchData 中的下标（部分临时项才有） */
-  index?: number;
   /** 标题（可能含 [标签]） */
   title?: string;
   /** 描述 */
@@ -68,6 +66,11 @@ export interface SearchItem {
   _contentUpper?: string;
   _cleanedTitleUpper?: string;
   _descTagsUpper?: string;
+  /**
+   * 稳定身份指纹（位置无关，由所属订阅+标题+描述+资源+附加内容派生）。
+   * 替代旧的 `index` 下标反查，保证数组变动后仍能认出同一条数据项。
+   */
+  _fp?: string;
   /** 数据项所属订阅名（loadSubscribe 写入） */
   subscribe?: string;
   /** 其余由订阅内容源附加的字段 */

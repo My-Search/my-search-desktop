@@ -23,6 +23,8 @@ export { isInlineIconRef, iconDataUrl, iconMimeOf, iconRefsOf } from "./icon.ts"
 
 /** 插件项的标记字段（宿主内部使用，不写入缓存） */
 export const PLUGIN_ITEM_FLAG = "_pluginId";
+/** 插件项「参与二次搜索」的标记字段（清单 contributes.searchItem.subSearch 的运行时投影） */
+export const PLUGIN_SUB_SEARCH_FLAG = "_pluginSubSearch";
 /** 来源标记：结果列表里显示为「插件：xxx」 */
 export const PLUGIN_SUBSCRIBE_PREFIX = "插件：";
 
@@ -65,6 +67,9 @@ export function buildPluginItems(
       // 标记 + 关键词：宿主据此渲染插件视图、以及把「关键词 : 子词」转发给插件
       item[PLUGIN_ITEM_FLAG] = record.id;
       item._pluginKeyword = it.keyword;
+      // 参与二次搜索的声明：只有它为 true，宿主才会补 `[可搜索]` 标记
+      // （补标记 = 进入 PRO 模式候选，见 search-engine 的 _indexItem）
+      item[PLUGIN_SUB_SEARCH_FLAG] = it.subSearch === true;
       return item;
     });
 }
@@ -91,4 +96,9 @@ export function pluginIdOf(item: SearchItem | null | undefined): string | null {
 export function pluginKeywordOf(item: SearchItem | null | undefined): string | null {
   const v = item?._pluginKeyword;
   return typeof v === "string" && v !== "" ? v : null;
+}
+
+/** 该插件项是否声明参与二次搜索（未声明 = false = 不进 PRO 模式候选） */
+export function pluginSubSearchOf(item: SearchItem | null | undefined): boolean {
+  return item?.[PLUGIN_SUB_SEARCH_FLAG] === true;
 }

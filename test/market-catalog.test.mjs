@@ -18,6 +18,7 @@ import {
   requiresExplicitConsent,
   riskOf,
   summarizePermissions,
+  syncPermissionRequested,
 } from "../src/lib/plugins/permissions.ts";
 
 let pass = 0;
@@ -45,6 +46,37 @@ const ok = (cond, name, extra = "") => {
 {
   // 带 scope 的写法应被视为非法（该权限无 scope 语法）
   ok(isKnownPermission("plugin.install:https://x.com/*") === false, "plugin.install 不接受 scope");
+}
+
+/* ============ 1b. 权限契约：sync（数据同步） ============
+ * 「按能力而非按数据源」是本权限的设计前提：宿主当前只原生实现了 WebDAV，
+ * 但权限 id 保持与协议无关，将来接入第三方同步源不必新增权限、也不必改插件清单。
+ * 这里钉死几件容易在重构里被改坏的事：
+ *   1. 权限存在于目录、归 data 组、无 scope、runtime 双端；
+ *   2. 风险为 high（与 file.read / env.read 同级），**不是** critical
+ *      —— 由用户主动触发的同步不构成权限提权，不该额外加逐条勾选门槛；
+ *   3. 摘要句点名「数据同步」，让用户知道插件能干嘛；
+ *   4. syncPermissionRequested 能识别清单里的 sync（安装提醒据此出现）。 */
+{
+  ok(isKnownPermission("sync"), "sync 在权限目录中");
+  ok(permissionBaseId("sync") === "sync", "sync 无 scope，基础 id 即自身");
+  ok(groupOf("sync") === "data", "归入「数据与存储」组", groupOf("sync"));
+  ok(riskOf("sync") === "high", "风险等级 high（不是 critical）", riskOf("sync"));
+  ok(
+    requiresExplicitConsent("sync") === false,
+    "不要求逐条勾选（由用户主动触发的同步不是提权）"
+  );
+  ok(isKnownPermission("sync:whatever") === false, "sync 不接受 scope");
+  ok(isKnownPermission("sync.read") === false, "sync 是单一权限，没有子权限");
+  const text = summarizePermissions(["sync"]);
+  ok(text.includes("数据同步"), "摘要句点名数据同步能力", text);
+}
+{
+  // 安装提醒的判定：只认基础 id，无关它在 permissions 还是 optionalPermissions
+  ok(syncPermissionRequested(["sync"]), "识别基础 sync");
+  ok(syncPermissionRequested(["store", "sync"]), "混在其它权限里也能识别");
+  ok(!syncPermissionRequested(["store", "file.read"]), "没申请就不提醒");
+  ok(!syncPermissionRequested([]), "空清单不提醒");
 }
 
 /* ============ 2. 目录 schema 解析与校验（market-types.ts） ============ */

@@ -178,7 +178,7 @@ export async function pickPluginDir(): Promise<string | null> {
   }
 }
 
-/** 弹出系统文件选择框（选择 .msplugin 包） */
+/** 弹出系统文件选择框（选择 .mspp 包） */
 export async function pickPluginPackage(): Promise<string | null> {
   if (!isTauri) return null;
   try {
@@ -186,7 +186,7 @@ export async function pickPluginPackage(): Promise<string | null> {
     const picked = await pkg.open({
       multiple: false,
       title: "选择插件安装包",
-      filters: [{ name: "插件包", extensions: ["msplugin", "zip"] }],
+      filters: [{ name: "插件包", extensions: ["mspp", "zip"] }],
     });
     return typeof picked === "string" ? picked : null;
   } catch (e) {
@@ -257,6 +257,8 @@ export async function syncGateway(payload: {
   maxRestarts: number;
   startupTimeoutMs: number;
   callTimeoutMs: number;
+  /** 注入插件后台进程的环境变量（Rust 只在 spawn 时读它） */
+  env?: Record<string, string>;
 }): Promise<void> {
   if (!isTauri) {
     devGateway.set(payload.pluginId, payload);
@@ -311,6 +313,532 @@ export async function readPluginLog(pluginId: string, maxLines = 200): Promise<s
 export async function clearPluginLog(pluginId: string): Promise<void> {
   if (!isTauri) return;
   await invoke("plugin_clear_log", { pluginId });
+}
+
+/* ============================================================
+ * 搜索框附件（粘贴 / 拖入的文件与文件夹）
+ *
+ * 两道校验（与 net.fetch 同构的纵深防御）：
+ *   1. 前端 host.ts 先查 file.read 权限（第一道）；
+ *   2. Rust 侧再查网关 grants + 路径必须落在 `attachments_sync` 登记的
+ *      附加集合内（第二道）——插件拿不到集合外的本地文件。
+ * ============================================================ */
+
+/** 路径描述条目（Rust `fs_describe_paths` 的返回形状） */
+export interface AttachmentPathEntry {
+  path: string;
+  name: string;
+  isDir: boolean;
+}
+
+/** 目录列举条目（Rust `attachment_list` 的返回形状） */
+export interface AttachmentDirEntry {
+  path: string;
+  name: string;
+  /** 相对所列文件夹的路径（正斜杠） */
+  relPath: string;
+  isDir: boolean;
+  size: number;
+  mtimeMs: number;
+}
+
+/**
+ * 读取系统剪贴板里的文件/文件夹路径（Windows CF_HDROP）。
+ * 剪贴板没有文件时返回空数组；浏览器调试环境恒为空。
+ */
+export async function clipboardFilePaths(): Promise<string[]> {
+  if (!isTauri) return [];
+  return await invoke<string[]>("clipboard_file_paths");
+}
+
+/**
+ * 按绝对路径描述条目（文件名 + 是否文件夹）。
+ * 粘贴（web 层只有路径来源）与拖放（Tauri 拖拽事件只给路径）共用。
+ */
+export async function describePaths(paths: string[]): Promise<AttachmentPathEntry[]> {
+  if (!paths?.length) return [];
+  if (!isTauri) {
+    return paths.map((p) => ({
+      path: p,
+      name: String(p).split(/[\\/]/).pop() || String(p),
+      isDir: false,
+    }));
+  }
+  return await invoke<AttachmentPathEntry[]>("fs_describe_paths", { paths });
+}
+
+/**
+ * 把当前附加的路径集合登记到 Rust（读取/列举/打开前的第二道校验依据）。
+ * 附件增删时由宿主调用；浏览器调试环境空实现。
+ */
+export async function attachmentsSync(entries: { path: string; isDir: boolean }[]): Promise<void> {
+  if (!isTauri) return;
+  await invoke("attachments_sync", {
+    roots: (entries ?? [])
+      .filter((e) => e && typeof e.path === "string" && e.path.trim() !== "")
+      .map((e) => ({ path: e.path, isDir: !!e.isDir })),
+  });
+}
+
+/** 读一个附加文件 → data URL（`data:<mime>;base64,...`；超限由 Rust 拒绝） */
+export async function attachmentRead(pluginId: string, path: string): Promise<string> {
+  if (!isTauri) throw new Error("读取附加文件仅在桌面端可用");
+  return await invoke<string>("attachment_read", { pluginId, path });
+}
+
+/**
+ * 读一张附加图片 → data URL，供**宿主搜索框**渲染缩略图。
+ *
+ * 不传 pluginId：这是宿主 UI 自己的预览，不走插件权限；Rust 侧仍要求路径
+ * 落在已登记的附加集合内、且扩展名属于图片白名单（详见 attachments.rs）。
+ */
+export async function attachmentPreview(path: string): Promise<string> {
+  if (!isTauri) throw new Error("图片预览仅在桌面端可用");
+  return await invoke<string>("attachment_preview", { path });
+}
+
+/**
+ * 递归列举一个附加文件夹（返回文件+子目录，按相对路径排序）。
+ * @param limit 条数上限（Rust 侧再夹紧；默认 20000）
+ * @param gen 本轮列举的代次（可选）：与 `attachmentListCancel` 传相同值可中止本轮
+ */
+export async function attachmentList(
+  pluginId: string,
+  path: string,
+  limit = 20000,
+  gen?: number
+): Promise<AttachmentDirEntry[]> {
+  if (!isTauri) throw new Error("列举附加文件夹仅在桌面端可用");
+  return await invoke<AttachmentDirEntry[]>("attachment_list", {
+    pluginId,
+    path,
+    limit: Math.max(1, Math.min(100000, Math.round(limit) || 20000)),
+    ...(gen != null && Number.isFinite(gen) && gen > 0 ? { gen: Math.floor(gen) } : {}),
+  });
+}
+
+/**
+ * 取消一代列举（`gen` 与发起 `attachmentList` 时传入的相同）：
+ * Rust 侧在途 walk 尽快带着已收集的部分返回。浏览器调试环境空实现。
+ */
+export async function attachmentListCancel(gen: number): Promise<void> {
+  if (!isTauri) return;
+  await invoke("attachment_list_cancel", { gen: Math.floor(Number(gen) || 0) });
+}
+
+/** 用系统默认程序打开一个附加路径（文件或文件夹） */
+export async function attachmentOpen(pluginId: string, path: string): Promise<void> {
+  if (!isTauri) throw new Error("打开本地路径仅在桌面端可用");
+  await invoke("attachment_open", { pluginId, path });
+}
+
+/**
+ * 在系统文件管理器（Windows 资源管理器）中定位一个附加路径：
+ * 打开所在目录并选中该文件 / 文件夹。与 `attachmentOpen` 同样受
+ * 「网关 grants + 附加集合」双重校验。
+ */
+export async function attachmentReveal(pluginId: string, path: string): Promise<void> {
+  if (!isTauri) throw new Error("定位本地路径仅在桌面端可用");
+  await invoke("attachment_reveal", { pluginId, path });
+}
+
+/**
+ * 批量取系统文件图标（资源管理器同款），返回 `path → PNG data URL`。
+ *
+ * 两种调用方，两种校验口径（见 Rust `attachment_file_icons`）：
+ *   - 不传 `pluginId`：宿主搜索框自己的 UI 装饰（chips / 最近添加条带），
+ *     与 `attachmentPreview` 同款定位，免网关校验；条带里的历史条目未必还在
+ *     当前附加集合内，因此这里不能强制集合校验。
+ *   - 传 `pluginId`：插件调用（`ms.input.fileIcons`）。Rust 侧按插件身份做
+ *     「网关 grants + 附加集合」双重校验，任一路径越界即整批拒绝。
+ *
+ * Rust 侧按**类型**缓存（同扩展名只查一次 Shell），因此前端可以放心地把
+ * 全部附件一次性传过去。
+ *
+ * 浏览器调试环境返回空 Map：无系统图标来源，前端退回内置 SVG 图标。
+ * 取不到的条目不出现在结果里（调用方按缺失走回退）；被权限/集合校验拒绝时
+ * 抛出错误（由 `ms.input.fileIcons` 的网关层统一转成插件可见的报错）。
+ */
+export async function attachmentFileIcons(
+  entries: { path: string; isDir: boolean }[],
+  pluginId?: string
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const list = (entries ?? []).filter((e) => e && String(e.path ?? "").trim() !== "");
+  if (list.length === 0 || !isTauri) return out;
+  let results: Array<{ path: string; icon: string | null }>;
+  try {
+    results = await invoke<Array<{ path: string; icon: string | null }>>(
+      "attachment_file_icons",
+      {
+        entries: list.map((e) => ({ path: e.path, isDir: !!e.isDir })),
+        // 传插件身份 = 走严格校验；不传 = 宿主自身（保持历史免校验行为）
+        ...(pluginId ? { pluginId } : {}),
+      }
+    );
+  } catch (e) {
+    // 插件调用（有 pluginId）：校验失败必须让调用方看到原因（权限缺失 /
+    // 路径越界），不能静默成「该文件没有图标」——否则插件分不清「没图标」
+    // 与「被拒绝」，也无法给用户可操作的提示。由 ms.input.fileIcons 的
+    // 网关层统一转成插件可见的报错。
+    if (pluginId) throw e;
+    // 宿主调用：旧宿主没有该命令 / 平台不支持 → 静默退回内置图标，不影响功能
+    console.warn("读取系统文件图标失败:", e);
+    return out;
+  }
+  for (const r of results ?? []) {
+    if (
+      r &&
+      typeof r.path === "string" &&
+      typeof r.icon === "string" &&
+      r.icon.startsWith("data:")
+    ) {
+      out.set(r.path, r.icon);
+    }
+  }
+  return out;
+}
+
+/* ============================================================
+ * 截图能力（Rust `screenshot_*` 命令；浏览器调试环境抛错，
+ * 由 `ms.screenshot` 的 `ctx.*` 缺省分支转成「当前版本不支持截图」）
+ * ============================================================ */
+
+export interface ScreenshotMonitorIpc {
+  index: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  scaleFactor: number;
+  isPrimary: boolean;
+}
+
+export interface ScreenshotCaptureIpc {
+  dataUrl: string;
+  originX: number;
+  originY: number;
+  width: number;
+  height: number;
+  monitors?: ScreenshotMonitorIpc[];
+}
+
+export interface ScreenshotOverlayImageIpc {
+  dataUrl: string;
+  width: number;
+  height: number;
+  monitor: ScreenshotMonitorIpc;
+  monitorCount: number;
+  originX: number;
+  originY: number;
+}
+
+export interface ScreenshotCropIpc {
+  dataUrl: string;
+  width: number;
+  height: number;
+  screenX: number;
+  screenY: number;
+}
+
+export interface ScreenshotShotEntryIpc {
+  relPath: string;
+  name: string;
+  size: number;
+  mtimeMs: number;
+  createdAt: string;
+}
+
+/** 整屏抓屏 → PNG data URL（不依赖遮罩窗口，纯截全屏） */
+export async function screenshotCapture(): Promise<ScreenshotCaptureIpc> {
+  if (!isTauri) throw new Error("截图仅在桌面端可用");
+  return await invoke<ScreenshotCaptureIpc>("screenshot_capture");
+}
+
+/** 打开全屏框选遮罩（抓屏 + 每显示器一个透明窗口），返回窗口数 */
+export async function screenshotOpenOverlay(): Promise<number> {
+  if (!isTauri) throw new Error("框选遮罩仅在桌面端可用");
+  return await invoke<number>("screenshot_open_overlay");
+}
+
+/** 关闭遮罩 */
+export async function screenshotCloseOverlay(): Promise<void> {
+  if (!isTauri) return;
+  await invoke("screenshot_close_overlay");
+}
+
+/** 「直接在屏幕上框选」返回的矩形（虚拟桌面物理像素） */
+export interface ScreenshotPickRectIpc {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * 在屏幕上直接框选一个矩形：一次调用完成「开遮罩 → 用户拖选 → 关遮罩」。
+ *
+ * 返回虚拟桌面**物理**像素矩形（与 gdigrab/ddagrab 的采集坐标同口径）；
+ * 用户按 Esc 取消返回 null。
+ */
+export async function screenshotPickRegion(): Promise<ScreenshotPickRectIpc | null> {
+  if (!isTauri) throw new Error("屏幕框选仅在桌面端可用");
+  return await invoke<ScreenshotPickRectIpc | null>("screenshot_pick_region");
+}
+
+/** 取某屏抓屏底图（data URL）——遮罩页铺满窗口用 */
+export async function screenshotOverlayImage(monitorIndex: number): Promise<ScreenshotOverlayImageIpc> {
+  if (!isTauri) throw new Error("框选遮罩仅在桌面端可用");
+  return await invoke<ScreenshotOverlayImageIpc>("screenshot_overlay_image", {
+    monitorIndex: Math.floor(Number(monitorIndex)) || 0,
+  });
+}
+
+/** 框选并裁出 PNG data URL */
+export async function screenshotCrop(
+  monitorIndex: number,
+  x: number,
+  y: number,
+  width: number,
+  height: number
+): Promise<ScreenshotCropIpc> {
+  if (!isTauri) throw new Error("框选遮罩仅在桌面端可用");
+  return await invoke<ScreenshotCropIpc>("screenshot_crop", {
+    monitorIndex: Math.floor(Number(monitorIndex)) || 0,
+    x: Number(x) || 0,
+    y: Number(y) || 0,
+    width: Number(width) || 0,
+    height: Number(height) || 0,
+  });
+}
+
+/** 把 PNG data URL 写进系统剪贴板 */
+export async function screenshotCopyImage(dataUrl: string): Promise<void> {
+  if (!isTauri) throw new Error("写剪贴板图片仅在桌面端可用");
+  await invoke("screenshot_copy_image", { dataUrl: String(dataUrl ?? "") });
+}
+
+/** 把 PNG 落盘到插件私有目录，返回索引记录 */
+export async function screenshotSaveShot(
+  pluginId: string,
+  dataUrl: string
+): Promise<ScreenshotShotEntryIpc> {
+  if (!isTauri) throw new Error("保存截图仅在桌面端可用");
+  return await invoke<ScreenshotShotEntryIpc>("screenshot_save_shot", {
+    pluginId,
+    dataUrl: String(dataUrl ?? ""),
+  });
+}
+
+/**
+ * 弹系统「另存为」对话框，把 PNG 存到用户选定的位置。
+ *
+ * 返回 null = 用户取消（调用方应当**静默返回**，别报错）；
+ * 返回字符串 = 实际落盘的绝对路径（扩展名已按内容校正为 .png）。
+ */
+export async function screenshotSaveShotAs(
+  pluginId: string,
+  dataUrl: string,
+  parentDir?: string
+): Promise<string | null> {
+  if (!isTauri) throw new Error("另存为仅在桌面端可用");
+  return await invoke<string | null>("screenshot_save_shot_as", {
+    pluginId,
+    dataUrl: String(dataUrl ?? ""),
+    parentDir: parentDir ? String(parentDir) : null,
+  });
+}
+
+/** 插件截图目录的绝对路径（另存为对话框的起始目录；目录不存在会就地建出来） */
+export async function screenshotShotsDir(pluginId: string): Promise<string> {
+  if (!isTauri) return "";
+  return await invoke<string>("screenshot_shots_dir", { pluginId });
+}
+
+/** 广播「新截图已保存」 */
+export async function screenshotNotifySaved(
+  pluginId?: string,
+  relPath?: string
+): Promise<void> {
+  if (!isTauri) return;
+  await invoke("screenshot_notify_saved", { pluginId, relPath });
+}
+
+/** 列出插件私有目录的截图（时间从新到旧） */
+export async function screenshotListShots(pluginId: string): Promise<ScreenshotShotEntryIpc[]> {
+  if (!isTauri) return [];
+  return await invoke<ScreenshotShotEntryIpc[]>("screenshot_list_shots", { pluginId });
+}
+
+/** 读回一张截图 → data URL */
+export async function screenshotReadShot(pluginId: string, relPath: string): Promise<string> {
+  if (!isTauri) throw new Error("读取截图仅在桌面端可用");
+  return await invoke<string>("screenshot_read_shot", { pluginId, relPath });
+}
+
+/** 删除一张截图 */
+export async function screenshotDeleteShot(pluginId: string, relPath: string): Promise<void> {
+  if (!isTauri) return;
+  await invoke("screenshot_delete_shot", { pluginId, relPath });
+}
+
+/** 删除早于 N 天的截图，返回删掉的张数 */
+export async function screenshotPruneShots(pluginId: string, days: number): Promise<number> {
+  if (!isTauri) return 0;
+  return await invoke<number>("screenshot_prune_shots", {
+    pluginId,
+    days: Math.max(1, Math.floor(Number(days)) || 7),
+  });
+}
+
+/**
+ * 读「截图」动作当前绑的全局快捷键。
+ *
+ * 返回空串 = 未绑定（用户主动解绑过）。宿主会把默认热键**自愈补进绑定列表**
+ * （`ensure_screenshot_binding`），所以正常都有值；这里不再用默认值兜底——
+ * 兜底会让前台显示一个按下去没反应的键，正是「显示 Ctrl+Alt+X 却没动静」的成因。
+ */
+export async function screenshotGetShortcut(): Promise<string> {
+  if (!isTauri) return "ctrl+alt+x";
+  return await invoke<string>("screenshot_get_shortcut");
+}
+
+/**
+ * 给「截图」动作改绑全局快捷键（插件前台的设置项）。
+ * `shortcut` 传空串 = 解绑（关掉截图热键）。返回实际生效的键。
+ * 权威存储是宿主的 shortcut_bindings，插件不自己存一份，避免两边不一致。
+ */
+export async function screenshotSetShortcut(shortcut: string): Promise<string> {
+  if (!isTauri) throw new Error("设置快捷键仅在桌面端可用");
+  return await invoke<string>("screenshot_set_shortcut", { shortcut: String(shortcut ?? "") });
+}
+
+/* ============================================================
+ * 剪贴板历史（宿主原生监听 + 插件私有目录）
+ * ============================================================ */
+
+/** 一条剪贴板历史（与 Rust `ClipItem` 字段一一对应） */
+export interface ClipboardItemIpc {
+  /** 稳定 id（删除/复制时用） */
+  id: string;
+  /** "text" | "image" */
+  kind: string;
+  /** 文本内容（kind=text） */
+  text?: string;
+  /** 图片相对路径（kind=image，形如 "clipboard/xxx.png"） */
+  relPath?: string;
+  /** 图片宽（kind=image） */
+  width?: number;
+  /** 图片高（kind=image） */
+  height?: number;
+  /** 字节数 */
+  size: number;
+  /** 记录时间（毫秒时间戳） */
+  createdAt: number;
+  /** 来源描述（如「文件：a.txt」） */
+  source?: string;
+  /** 是否已收藏（收藏条目永久保留，不参与上限淘汰与默认清空） */
+  favorite?: boolean;
+}
+
+/** 列出剪贴板历史（从新到旧）。`query` 非空时由 Rust 侧先做一次文本粗筛。 */
+export async function clipboardHistoryList(query?: string): Promise<ClipboardItemIpc[]> {
+  if (!isTauri) return [];
+  return await invoke<ClipboardItemIpc[]>("clipboard_history_list", {
+    query: query && query.trim() ? String(query) : null,
+  });
+}
+
+/** 一页剪贴板历史（Rust `ClipPage` 的返回形状） */
+export interface ClipboardPageIpc {
+  /** 本页条目（从新到旧） */
+  items: ClipboardItemIpc[];
+  /** 当前过滤条件下的总条数（不受分页影响） */
+  total: number;
+  /** 是否还有下一页 */
+  hasMore: boolean;
+}
+
+/**
+ * 分页列出剪贴板历史（从新到旧）。
+ *
+ * 过滤（关键词 / 仅收藏）在 Rust 侧**分页之前**完成，因此 `total` 与
+ * `hasMore` 都建立在过滤后的结果集上，「全部 / 收藏 / 搜索」都能正确翻页。
+ * 浏览器调试环境返回空页。
+ */
+export async function clipboardHistoryPage(opts: {
+  query?: string;
+  favoriteOnly?: boolean;
+  offset?: number;
+  limit?: number;
+}): Promise<ClipboardPageIpc> {
+  const empty: ClipboardPageIpc = { items: [], total: 0, hasMore: false };
+  if (!isTauri) return empty;
+  return await invoke<ClipboardPageIpc>("clipboard_history_page", {
+    query: opts.query && opts.query.trim() ? String(opts.query) : null,
+    favoriteOnly: !!opts.favoriteOnly,
+    offset: Math.max(0, Math.floor(Number(opts.offset) || 0)),
+    limit: Math.max(1, Math.floor(Number(opts.limit) || 30)),
+  });
+}
+
+/** 读回一张剪贴板图片 → data URL（列表缩略图 / 大图预览）。 */
+export async function clipboardHistoryReadImage(relPath: string): Promise<string> {
+  if (!isTauri) throw new Error("读取剪贴板图片仅在桌面端可用");
+  return await invoke<string>("clipboard_history_read_image", { relPath: String(relPath ?? "") });
+}
+
+/** 删除一条剪贴板历史（图片连同磁盘文件一起删）。 */
+export async function clipboardHistoryDelete(id: string): Promise<void> {
+  if (!isTauri) return;
+  await invoke("clipboard_history_delete", { id: String(id ?? "") });
+}
+
+/**
+ * 清空剪贴板历史。
+ *
+ * `keepFavorites` 为 true（默认）时保留收藏条目，只清未收藏的；
+ * 传 false 则连同收藏一起清空。
+ */
+export async function clipboardHistoryClear(keepFavorites = true): Promise<void> {
+  if (!isTauri) return;
+  await invoke("clipboard_history_clear", { keepFavorites: !!keepFavorites });
+}
+
+/**
+ * 收藏 / 取消收藏一条剪贴板历史。
+ *
+ * 只改标记并落盘，不删数据；宿主随后广播更新事件，打开中的视图自动刷新。
+ */
+export async function clipboardHistorySetFavorite(id: string, favorite: boolean): Promise<void> {
+  if (!isTauri) return;
+  await invoke("clipboard_history_set_favorite", {
+    id: String(id ?? ""),
+    favorite: !!favorite,
+  });
+}
+
+/**
+ * 把某条历史复制回系统剪贴板。
+ *
+ * 这是**用户显式触发**的写入——宿主监听路径永远只读，
+ * 只有点「复制」时才会真正写剪贴板。
+ */
+export async function clipboardHistoryCopy(id: string): Promise<void> {
+  if (!isTauri) throw new Error("复制到剪贴板仅在桌面端可用");
+  await invoke("clipboard_history_copy", { id: String(id ?? "") });
+}
+
+/** 读「剪贴板历史」动作当前绑的全局快捷键（空串 = 未绑）。 */
+export async function clipboardHistoryGetShortcut(): Promise<string> {
+  if (!isTauri) return "ctrl+alt+v";
+  return await invoke<string>("clipboard_history_get_shortcut");
+}
+
+/** 给「剪贴板历史」动作改绑全局快捷键（空串 = 解绑）。返回实际生效的键。 */
+export async function clipboardHistorySetShortcut(shortcut: string): Promise<string> {
+  if (!isTauri) throw new Error("设置快捷键仅在桌面端可用");
+  return await invoke<string>("clipboard_history_set_shortcut", { shortcut: String(shortcut ?? "") });
 }
 
 /* ============================================================

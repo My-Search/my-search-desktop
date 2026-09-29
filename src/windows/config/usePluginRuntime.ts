@@ -399,6 +399,31 @@ export function usePluginRuntime() {
     persist();
   }
 
+  /**
+   * 环境变量存储变更后，让所有插件的后台进程拿到新值。
+   *
+   * 为什么要「重启」而不只是重新下发网关：`GatewaySpec.env` 只在 **spawn 时**被
+   * 读进进程环境（Rust `spawn_backend`），已经在跑的进程不会因为镜像更新就换 env。
+   * 于是：先 reconcile（把新的 env 下发到网关镜像 + 落盘快照），再把**正在运行**
+   * 的后台进程重启一次——不重启的话，用户刚改的值要等进程自然退出才生效。
+   */
+  async function syncEnvToPlugins(): Promise<void> {
+    for (const rec of registry.plugins) {
+      if (rec.source.kind === "legacy") continue;
+      await reconcile(rec.id);
+    }
+    for (const rec of withBackend()) {
+      const st = backends[rec.id]?.status;
+      if (st !== "running" && st !== "starting") continue;
+      try {
+        await restartPluginBackend(rec.id);
+      } catch (e) {
+        console.warn(`[插件] 环境变量更新后重启进程失败（${rec.id}）:`, e);
+      }
+    }
+    await refreshBackends();
+  }
+
   /* ============================================================
    * 后台进程控制（面板按钮）
    * ============================================================ */
@@ -585,6 +610,7 @@ export function usePluginRuntime() {
     revoke,
     revokeAll,
     deny,
+    syncEnvToPlugins,
     // 进程
     startBackend,
     stopBackend,
