@@ -1,9 +1,12 @@
 /**
  * 版本更新检查与后台静默下载（组合式封装）
  *
+ * 对外只暴露一个「更新就绪」信号：`isDownloaded()`。搜索框据此在**叶子
+ * 右下角**显示一个小红箭头（UpdateBadge），点击叶子即安装更新。
+ *
  * 对应原 main.js 的：
- * - renderUpdateBadge / setRingProgress / renderUpdateProgress / renderUpdateReady
- * - startUpdate / startDownloadOnly / checkAndAutoDownload / scheduleUpdateCheck
+ * - checkAndAutoDownload / scheduleUpdateCheck（检查 + 后台静默下载）
+ * - startDownloadOnly / handleBadgeClick（下载与安装入口）
  */
 import { reactive } from "vue";
 import {
@@ -29,8 +32,6 @@ const UPDATE_CHECK_INTERVAL_MS = 20 * 60 * 1000;
  * 设置窗口切换开关时不走节流（那条路径必须当刻生效）。
  */
 const MIN_RECHECK_INTERVAL_MS = 60 * 1000;
-/** 环形进度条周长（r=16 → 2π·16 ≈ 100.53） */
-const RING_TOTAL = 100.53;
 
 export function useUpdateChecker() {
   const state = reactive({
@@ -58,12 +59,7 @@ export function useUpdateChecker() {
   /** 监听注册进行中（异步 gap 内防止重复注册） */
   let settingListenPending = false;
 
-  /** 徽章是否可见（有更新） */
-  function isBadgeVisible(): boolean {
-    return !!state.info?.has_update;
-  }
-
-  /** 是否已下载好当前最新版本 */
+  /** 是否已下载好当前最新版本（= 更新就绪，可安装） */
   function isDownloaded(): boolean {
     return (
       !!state.downloadedPath &&
@@ -72,18 +68,9 @@ export function useUpdateChecker() {
     );
   }
 
-  /** 环形进度条的 stroke-dashoffset（供模板绑定） */
-  function ringOffset(): number {
-    const percent = Math.max(0, Math.min(100, state.progress));
-    return RING_TOTAL - (percent / 100) * RING_TOTAL;
-  }
-
-  /** 徽章提示文案 */
-  function badgeTitle(): string {
-    const v = state.info?.latest_version ?? "";
-    if (state.downloading) return `正在下载更新... ${Math.round(state.progress)}%`;
-    if (isDownloaded()) return `已下载 ${v}，点击安装更新`;
-    return `发现新版本 ${v}，点击查看`;
+  /** 叶子按钮 / 角标提示文案（仅在更新就绪时有意义） */
+  function updateTip(): string {
+    return `已下载 ${state.info?.latest_version ?? ""}，点击安装更新`;
   }
 
   /** 清除进度/监听资源 */
@@ -108,7 +95,8 @@ export function useUpdateChecker() {
 
   /**
    * 清空全部更新状态并释放监听（用于「自动下载更新」关闭时的完全静默）。
-   * 徽章因 `info` 为空而隐藏，logo 点击回退到原有 [系统项] 行为。
+   * `info` 清空后 `isDownloaded()` 为 false，叶子上的小红箭头随之消失，
+   * 叶子点击回退到原有行为（打开设置）。
    */
   function resetUpdateState(): void {
     cleanupUpdateListeners();
@@ -121,7 +109,8 @@ export function useUpdateChecker() {
 
   /**
    * 后台静默下载更新（不打开安装程序）。
-   * 下载完成后自动记录路径和版本，徽章变为「已下载」状态。
+   * 下载完成后记录路径与版本，`isDownloaded()` 随即为 true——
+   * 叶子右下角出现小红箭头提示「可以安装了」。
    */
   async function startDownloadOnly(): Promise<void> {
     if (!state.info || !state.info.download_url) return;
@@ -171,41 +160,21 @@ export function useUpdateChecker() {
   }
 
   /**
-   * 点击更新徽章时的统一入口：
-   * 1. 如果正在下载 → 显示进度，不重复触发
-   * 2. 如果已下载好（路径存在且版本匹配）→ 打开安装程序
-   * 3. 如果已下载好但版本不匹配 → 重新下载
-   * 4. 否则 → 触发下载
+   * 点击叶子（或叶子右下角小红箭头）时的统一入口——**只在更新就绪时由父层调用**：
+   * 1. 已下载好（路径存在且版本匹配）→ 打开安装程序
+   * 2. 打开失败（安装文件丢失）→ 清空标记并重新静默下载
+   *
+   * 下载中 / 未下载完成时不做事：下载本身是后台自动的，无需点击介入
+   * （父层也只在 `isDownloaded()` 为 true 时才会把点击路由到这里）。
    */
   async function handleBadgeClick(): Promise<void> {
-    // 「自动下载更新」关闭时徽章本不该出现；若因切换竞态被点到，直接忽略。
+    // 「自动下载更新」关闭时叶子不该带箭头；若因切换竞态被点到，直接忽略。
     if (!getAutoDownloadUpdate()) return;
-    if (!state.info || !state.info.has_update) return;
-    if (state.downloading) {
-      // 正在下载中，徽章已有进度显示，无需额外操作
-      return;
-    }
+    if (state.downloading) return;
 
-    // 情况 2/3：已有下载好的文件
-    if (state.downloadedPath && state.downloadedVersion) {
-      if (state.downloadedVersion === state.info.latest_version) {
-        // 版本一致 → 打开安装
-        try {
-          await openInstaller();
-          state.progress = 100;
-        } catch (e) {
-          console.warn("[我的搜索] 打开安装程序失败:", e);
-          // 安装失败可能是文件丢失，清空已下载状态重新下载
-          state.downloadedPath = null;
-          state.downloadedVersion = "";
-          state.progress = 0;
-          void startDownloadOnly();
-        }
-      } else {
-        // 版本不一致 → 需要重新下载
-        console.log(
-          `[我的搜索] 已下载版本 ${state.downloadedVersion} ≠ 最新 ${state.info.latest_version}，重新下载`
-        );
+    if (!isDownloaded()) {
+      // 版本已被检查结果更新（或文件标记被清）→ 重新静默下载
+      if (state.info?.has_update) {
         state.downloadedPath = null;
         state.downloadedVersion = "";
         void startDownloadOnly();
@@ -213,14 +182,22 @@ export function useUpdateChecker() {
       return;
     }
 
-    // 情况 4：无已下载文件 → 触发下载
-    void startDownloadOnly();
+    try {
+      await openInstaller();
+    } catch (e) {
+      console.warn("[我的搜索] 打开安装程序失败:", e);
+      // 安装失败通常是文件丢失：清空已下载状态后自动重新下载
+      state.downloadedPath = null;
+      state.downloadedVersion = "";
+      state.progress = 0;
+      if (state.info?.has_update) void startDownloadOnly();
+    }
   }
 
   /**
    * 执行一次检查更新，若发现新版本则自动静默下载。
    *
-   * 「自动下载更新」关闭时**完全静默**：不检查、不下载、不显示徽章，
+   * 「自动下载更新」关闭时**完全静默**：不检查、不下载、叶子不显示红箭头，
    * 并清空既有状态（每次定时/呼出触发都重读设置，故开关免重启即可生效）。
    */
   async function checkAndAutoDownload(): Promise<void> {
@@ -237,7 +214,7 @@ export function useUpdateChecker() {
       const info = await checkUpdate();
 
       // 检查失败（数据源全部不可用）：保留上一次结果，不清空、不误报。
-      // 若此前已发现过更新，徽章继续保留，用户仍可点击安装。
+      // 若此前已下载好更新，红箭头继续保留，用户仍可点击安装。
       if (info.check_failed) {
         console.warn("[我的搜索] 更新检查失败（网络/数据源不可用），保留既有状态");
         return;
@@ -254,7 +231,7 @@ export function useUpdateChecker() {
           return;
         }
 
-        // 有更新 → 显示徽章 + 后台静默下载
+        // 有更新 → 后台静默下载（完成后叶子右下角出现红箭头）
         void startDownloadOnly();
       } else {
         // 无更新，清理已下载标记（因为服务器已无更新）
@@ -299,7 +276,7 @@ export function useUpdateChecker() {
     // 每 20 分钟周期检查
     checkTimer = setInterval(() => void checkAndAutoDownload(), UPDATE_CHECK_INTERVAL_MS);
     // 监听设置窗口对「自动下载更新」的切换，当刻重求值——否则关闭开关后
-    // 徽章要滞留到下次呼出/定时点，开启后也要等同样久才出现新徽章。
+    // 叶子上的红箭头要滞留到下次呼出/定时点，开启后也要等同样久才出现。
     if (unlistenSettingChange == null && !settingListenPending) {
       settingListenPending = true;
       void onAutoDownloadChanged(() => recheckSetting()).then((fn) => {
@@ -320,7 +297,7 @@ export function useUpdateChecker() {
    *
    * 调用方：配置窗口切换开关的当刻（见 scheduleUpdateCheck 里的监听）。
    * 用户刚改过开关时无需等待下一个 20 分钟定时点——开启则马上检查并
-   * （必要时）下载，关闭则马上清空徽章。
+   * （必要时）下载，关闭则马上清空（叶子红箭头立即消失）。
    */
   function recheckSetting(): void {
     void checkAndAutoDownload();
@@ -355,10 +332,8 @@ export function useUpdateChecker() {
 
   return {
     state,
-    isBadgeVisible,
     isDownloaded,
-    ringOffset,
-    badgeTitle,
+    updateTip,
     handleBadgeClick,
     scheduleUpdateCheck,
     recheckSetting,

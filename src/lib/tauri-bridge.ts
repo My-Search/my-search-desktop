@@ -982,7 +982,7 @@ export async function openInstaller(): Promise<void> {
  * 广播「自动下载更新」开关变化（配置窗口写入设置后调用）。
  *
  * 两窗口虽共享 localStorage，但另一窗口不会自动感知写入；若不广播，
- * 关闭开关后搜索窗口的更新徽章要滞留到下一次呼出或 20 分钟定时点才消失。
+ * 关闭开关后搜索窗口叶子上的更新红箭头要滞留到下一次呼出或 20 分钟定时点才消失。
  * 搜索窗口收到后立即按新开关重新求值（见 useUpdateChecker.recheckSetting）。
  */
 export async function notifyAutoDownloadChanged(): Promise<void> {
@@ -997,7 +997,7 @@ export async function notifyAutoDownloadChanged(): Promise<void> {
 
 /**
  * 监听「自动下载更新」开关变化（搜索窗口 useUpdateChecker 注册）。
- * 收到即重求值：关闭 → 立刻隐藏徽章进入静默；开启 → 立刻检查并下载。
+ * 收到即重求值：关闭 → 立刻隐藏叶子红箭头进入静默；开启 → 立刻检查并下载。
  */
 export async function onAutoDownloadChanged(handler: () => void): Promise<UnlistenFn | null> {
   if (!isTauri) return null;

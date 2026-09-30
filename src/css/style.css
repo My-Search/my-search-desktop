@@ -459,49 +459,31 @@ html, body {
   -webkit-app-region: no-drag;
 }
 
-/* 升级徽章：替换原叶子 logo。icon 在中心，环形进度条紧贴外围。
-   整体尺寸比 #logoButton 略大，让环能在原 logo 范围内可见。 */
+/* 更新就绪角标：后台更新下载完成后，贴在叶子 logo **右下角**的丰满小红箭头。
+   - 只出现这一个「可安装」信号，不再顶掉叶子、不再有环形进度条；
+   - 造型 = **只有箭头本体**（无圆底），但做得丰满厚实：宽箭头 + 粗箭杆，
+     SVG 侧用同色圆角描边把折角磨圆；这里再给一点向下投影，保「贴上去」
+     的实体感、也让它压在绿色叶子上时不会糊成一片；尺寸压到 11px 保持轻巧；
+   - pointer-events:none：点击穿透到叶子按钮（点徽标=点叶子=安装）。 */
 .update-badge {
   position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  -webkit-app-region: no-drag;
+  right: -2px;
+  bottom: -2px;
+  width: 11px;
+  height: 11px;
+  display: block;
+  pointer-events: none;
+  z-index: 2;
   animation: badge-pop 0.3s ease-out;
-  transition: transform 0.15s ease;
-}
-.update-badge:hover {
-  transform: scale(1.1);
+  filter:
+    drop-shadow(0 0.5px 0.5px rgba(0, 0, 0, 0.35))
+    drop-shadow(0 1px 1.5px rgba(0, 0, 0, 0.2));
 }
 
-.update-badge .update-badge-icon {
-  width: 24px;
-  height: 24px;
+.update-badge .update-badge-arrow {
+  width: 100%;
+  height: 100%;
   display: block;
-  pointer-events: none;
-}
-
-.update-badge .update-badge-ring {
-  position: absolute;
-  inset: -3px;
-  width: calc(100% + 6px);
-  height: calc(100% + 6px);
-  display: block;
-  pointer-events: none;
-}
-
-.update-badge .ring-bg {
-  stroke: #e0e0e0;
-  opacity: 0.6;
-}
-.update-badge .ring-fg {
-  stroke: #0f82ff;
-  transition: stroke-dashoffset 0.2s ease-out;
-}
-.update-badge.done .ring-fg {
-  stroke: #4caf50;
 }
 
 @keyframes badge-pop {
@@ -5023,10 +5005,8 @@ html.theme-dark #recentStrip .recent-item .chip-x:hover {
   background: rgba(255, 255, 255, 0.1);
 }
 
-/* 升级徽章环形进度条 */
-html.theme-dark .update-badge .ring-bg {
-  stroke: #4a4f58;
-}
+/* 叶子右下角的「可安装」红箭头：纯红实心 + 一点投影，在白/深/叶绿底上都足够
+   醒目，无需按主题改色，故 dark 段无对应覆盖。 */
 
 /* 空状态 */
 html.theme-dark .empty-state {

@@ -6,8 +6,8 @@
  * - 键盘：↑↓ 选择、Enter 打开、Ctrl+Enter 附加内容、Esc 隐藏、Tab 进/出 PRO 模式、Backspace 清标签
  * - 附件：粘贴文件/文件夹 → emit("attach")；#ms-input-files 渲染 chips，× 移除；
  *   识别为**图片**的附件直接显示缩略图（不显示文件名），其余显示图标 + 完整名称
- * - logo 按钮：左键 = 打开设置 / 右键 = 切换 [系统项]（有更新时由 UpdateBadge 接管）
- * - 更新徽章：环形进度（有更新时替换叶子）
+ * - logo 按钮：左键 = 打开设置 / 右键 = 切换 [系统项]；**已下载好更新时左键改为安装**
+ * - 更新提示：叶子**右下角**的小红箭头（仅下载完成后出现，见 UpdateBadge）
  */
 import { computed, ref, watch } from "vue";
 import { SEARCH_BOUNDARY } from "../../lib/search-engine";
@@ -31,7 +31,7 @@ const props = defineProps<{
   /** 输入框内容（v-model） */
   modelValue: string;
   placeholder: string;
-  /** 更新检查状态（徽章显示/进度） */
+  /** 更新检查状态（决定叶子右下角是否显示「可安装」红箭头） */
   update: UpdateCheckerApi;
   /** 已附加到搜索框的文件/文件夹（父层持有状态，这里只渲染） */
   attachments?: AttachedEntry[];
@@ -62,9 +62,11 @@ const value = computed({
   set: (v: string) => emit("update:modelValue", v),
 });
 
-/** logo 是否隐藏（有更新时被徽章替换） */
-const showBadge = computed(() => props.update.isBadgeVisible());
-const showLogo = computed(() => !showBadge.value);
+/** 是否已有「下载完成、可安装」的更新（决定叶子右下角小红箭头与点击语义） */
+const updateReady = computed(() => props.update.isDownloaded());
+
+/** 叶子按钮提示：仅在可安装时提示，其余保持无提示 */
+const logoTitle = computed(() => (updateReady.value ? props.update.updateTip() : ""));
 
 /** 有附件时替换默认占位，提示下一步（xxx : yyy）的用法 */
 const placeholderText = computed(() =>
@@ -310,16 +312,12 @@ watch(
   }
 );
 
-/** logo 点击处理（左键：有更新走 badge-click，否则打开设置） */
-// 不接收事件参数：UpdateBadge 的 emits 声明为 `click: []`（不带载荷），
-// 处理器声明 `(e: MouseEvent)` 会与之类型不匹配（vue-tsc TS2322）。
+/** logo 点击处理：**已下载好更新时左键 = 安装**（箭头角标只是在提示这一点），
+    否则维持原行为——打开设置。 */
 function onLogoClick() {
-  // 左键：判断是否有更新
-  if (props.update.state.info && props.update.state.info.has_update) {
-    // 有更新：触发 badge-click 处理更新
+  if (updateReady.value) {
     emit("badge-click");
   } else {
-    // 无更新：打开设置
     emit("settings");
   }
 }
@@ -399,22 +397,17 @@ function onLogoContextMenu(e: MouseEvent) {
       @paste="onPaste"
     />
     <div class="logo-wrapper">
-      <!-- 叶子 logo（默认显示） -->
+      <!-- 叶子 logo：**始终显示**（更新提示不再顶掉它，只是叠一个小箭头） -->
       <button
-        v-show="showLogo"
         id="logoButton"
+        :title="logoTitle"
         @click="onLogoClick"
         @contextmenu="onLogoContextMenu"
       >
         <img :src="LOGO_ICON" draggable="false" alt="logo" />
       </button>
-      <!-- 有更新时：把叶子替换为"苹果枝叶"升级 icon，外层套环形进度条 -->
-      <UpdateBadge
-        v-show="showBadge"
-        :update="props.update"
-        @click="onLogoClick"
-        @contextmenu="onLogoContextMenu"
-      />
+      <!-- 下载完成、可安装时：叶子右下角显示纯红向上箭头（点击穿透到叶子=安装） -->
+      <UpdateBadge v-if="updateReady" />
     </div>
   </div>
 </template>

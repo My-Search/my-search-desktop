@@ -1733,13 +1733,13 @@ function onKeydown(e: KeyboardEvent): void {
   }
 }
 
-/** logo 左键：有更新时按状态处理（安装/下载/显示进度），否则搜索 [系统项] */
+/** logo 左键：已有「下载完成、可安装」的更新时走安装，否则搜索 [系统项] */
 function onLogoClick(): void {
-  if (update.state.info && update.state.info.has_update) {
+  if (update.isDownloaded()) {
     void update.handleBadgeClick();
     return;
   }
-  // 无更新：保持原有行为，搜索 [系统项]
+  // 无就绪更新：保持原有行为，搜索 [系统项]
   const keyword = "[系统项]";
   const next = inputValue.value === keyword ? "" : keyword;
   inputValue.value = next;
@@ -1925,8 +1925,8 @@ onMounted(async () => {
     // 复位后再检查一次：若缓存已被清理，立即进入加载状态
     if (initialLoadDone) search.reloadIfSubscribesChanged(true);
     // 「自动下载更新」开关可能刚在设置窗口被改动：呼出时按新设置求值
-    // （开启则检查、关闭则立即隐藏徽章）。此处走节流版本——呼出可能很频繁，
-    // 每次都真查会迅速打爆 GitHub API 未认证限额并掩盖新版本。
+    // （开启则检查、关闭则立即清空并隐藏叶子上的红箭头）。此处走节流版本——
+    // 呼出可能很频繁，每次都真查会迅速打爆 GitHub API 未认证限额并掩盖新版本。
     update.recheckOnSummon();
     // 弹窗开着时焦点留在弹窗按钮上（PluginInstallDialog 可见时会自动聚焦「安装」）
     if (!installDialogVisible.value) searchBoxRef.value?.focus();
