@@ -35,7 +35,7 @@ import { prefetchFileIcons, pruneFileIcons, useFileIcons } from "./useFileIcons"
 import { pluginIdOf } from "../../lib/plugins/plugin-items";
 import { decideViewReload } from "../../lib/plugins/dev-reload";
 import { takePluginFrontendRestartMarks } from "../../lib/plugins/restart";
-import { bindPluginHostRuntime } from "../../lib/plugins/host";
+import { bindPluginHostRuntime, dispatchShortcutAction } from "../../lib/plugins/host";
 import type { PluginInstallConfirmRequest } from "../../lib/plugins/host";
 import { useMessageDialog } from "../../composables/useMessageDialog";
 import { useToast } from "../../composables/useToast";
@@ -68,13 +68,14 @@ import {
   onShortcutQuickFilter,
   onShortcutQuickOpen,
   onShortcutClipboard,
+  onShortcutPluginAction,
   onAttachPaths,
   onWindowFocusChanged,
   isWindowVisible,
   isTauri,
 } from "../../lib/tauri-bridge";
 import { SEARCH_BOUNDARY, SPECIAL_KEYWORD, scoreSelect, historySelect } from "../../lib/search-engine";
-import { normalizeQuickFilterHeader } from "../../lib/shortcut-bindings";
+import { normalizeQuickFilterHeader, pluginDefinedActionName } from "../../lib/shortcut-bindings";
 import {
   attachmentKey,
   buildAttachmentFilter,
@@ -133,6 +134,8 @@ const installDialogPerms = ref<PermissionGroupBlock[]>([]);
 const installDialogWarnings = ref<string[]>([]);
 /** 已安装版本（弹窗按钮据此显示 安装/重新安装/升级；null = 未安装） */
 const installDialogInstalledVersion = ref<string | null>(null);
+/** 该插件当前是否在后台运行（覆盖安装时弹窗提示「会先停止再安装」） */
+const installDialogRunning = ref(false);
 /**
  * 弹窗本次的来源：`file` = 从 .mspp 文件安装（chip 点击 / 文件选择器），
  * `market` = 市场安装（`ms.market.install` / `update`）。两者共用同一个弹窗组件，
@@ -176,6 +179,7 @@ function closeFileInstallDialog(): void {
   installDialogManifest.value = null;
   installDialogIcon.value = null;
   installDialogInstalledVersion.value = null;
+  installDialogRunning.value = false;
   // 关闭后回到内容实测高度（取消时 chip 仍在搜索框、确认时已被摘掉，实测都正确）
   void syncWindowHeightToContent();
 }
@@ -196,6 +200,7 @@ function confirmMarketInstall(req: PluginInstallConfirmRequest): Promise<boolean
   installDialogPerms.value = req.permBlocks;
   installDialogWarnings.value = req.warnings;
   installDialogInstalledVersion.value = req.installedVersion;
+  installDialogRunning.value = req.running === true;
   installDialogVisible.value = true;
   // 窗口高度不动：插件详情视图已把窗口撑到合适高度（见 INSTALL_DIALOG_HEIGHT 注释）
   return new Promise<boolean>((resolve) => {
@@ -209,6 +214,7 @@ function closeMarketInstallDialog(ok: boolean): void {
   installDialogManifest.value = null;
   installDialogIcon.value = null;
   installDialogInstalledVersion.value = null;
+  installDialogRunning.value = false;
   installDialogMode = "file";
   const resolve = marketInstallResolver;
   marketInstallResolver = null;
@@ -376,6 +382,17 @@ async function openInstallDialogForPath(path: string, attachIndex: number): Prom
   installDialogWarnings.value = prepared.warnings;
   // 直读注册表取已安装版本（另一窗口可能刚装过，比共享运行时的内存态更新）
   installDialogInstalledVersion.value = findPlugin(loadRegistry(), mf.id)?.version ?? null;
+  // 覆盖安装且后台在跑：弹窗提示「会先停止再安装」（真停由 Rust 侧 plugin_install 做）
+  installDialogRunning.value = false;
+  if (installDialogInstalledVersion.value) {
+    const { listPluginBackends } = await import("../../lib/plugins/ipc");
+    try {
+      const st = (await listPluginBackends()).find((s) => s.pluginId === mf.id)?.status;
+      installDialogRunning.value = st === "running" || st === "starting";
+    } catch (e) {
+      /* 无 Rust 侧（浏览器调试）：按未运行处理 */
+    }
+  }
   openFileInstallDialog();
 }
 
@@ -1453,6 +1470,46 @@ async function openPluginByShortcut(pluginId: string): Promise<void> {
 }
 
 /**
+ * 全局快捷键触发的「插件自定义动作」（如录屏的开始 / 停止）。
+ *
+ * 与 `openPluginByShortcut` 同一条打开路径，区别是打开后再把动作派发给插件脚本
+ * （插件用 `ms.shortcuts.onAction(本地名, fn)` 注册了处理器）。执行逻辑在插件
+ * 自己（后台进程 + 界面），宿主只负责把窗口带到前台、打开视图、投递动作。
+ *
+ * 派发时机：`openPluginView` 完成后（视图已挂载/恢复、脚本已跑），再
+ * `dispatchShortcutAction`。两种情况都覆盖：
+ *   - 全新挂载 → 脚本刚执行，处理器已注册；
+ *   - 保活恢复（minimize）→ 脚本没重跑，但处理器仍在（会话未销毁）。
+ * 插件没注册该动作时提示一句（避免「按了没反应」）。
+ */
+async function runPluginActionByShortcut(pluginId: string, action: string): Promise<void> {
+  await pluginHost.reload();
+  const record = pluginHost.get(pluginId);
+  if (!record) {
+    toast.showToast(`插件不存在（可能已卸载）：${pluginId}`, "error");
+    return;
+  }
+  if (!record.enabled) {
+    toast.showToast(`插件「${record.name}」已禁用，请先在设置 → 插件中启用`, "error");
+    return;
+  }
+  const item = pluginHost.itemForPlugin(pluginId);
+  if (!item) {
+    toast.showToast(`插件「${record.name}」不可用`, "error");
+    return;
+  }
+  await openPluginView(item);
+  // action 形如 `plugin:<插件id>:<本地名>`：取本地名派发给插件脚本。
+  const name = pluginDefinedActionName(action) ?? action;
+  // 等一帧：全新挂载时脚本刚执行完，给处理器注册留出时机
+  await nextTick();
+  const handled = dispatchShortcutAction(pluginId, name);
+  if (!handled) {
+    toast.showToast(`插件「${record.name}」未响应动作「${name}」（可能版本过旧或未注册）`, "error");
+  }
+}
+
+/**
  * 全局快捷键触发的「快速过滤」（快捷键作用于 quick-filter 时由 Rust 端广播常用头）。
  *
  * 行为：把「常用头 + 二次搜索分隔符」填入输入框 → **立即搜索**（不走 300ms 防抖，
@@ -1732,6 +1789,8 @@ let unlistenQuickFilter: (() => void) | null = null;
 let unlistenQuickOpen: (() => void) | null = null;
 /** 「剪贴板历史」快捷键事件监听器 */
 let unlistenClipboardShortcut: (() => void) | null = null;
+/** 「插件自定义动作」快捷键事件监听器 */
+let unlistenPluginActionShortcut: (() => void) | null = null;
 /** 资源管理器「Alt+点击文件带入」事件监听器 */
 let unlistenAttachPaths: (() => void) | null = null;
 /** 内置插件自动安装监听器 */
@@ -1937,6 +1996,13 @@ onMounted(async () => {
     void openPluginByShortcut(pluginId);
   });
 
+  // 全局快捷键「插件自定义动作」（如录屏的开始 / 停止，作用类型为 `plugin:<id>:<name>`）：
+  // Rust 端广播 { pluginId, action }。打开该插件视图后把动作派发给插件脚本
+  // （插件用 ms.shortcuts.onAction 注册）。执行逻辑在插件自己里。
+  unlistenPluginActionShortcut = await onShortcutPluginAction((pluginId, action) => {
+    void runPluginActionByShortcut(pluginId, action);
+  });
+
   // 资源管理器「Alt+点击文件」（Rust 端已先 show 窗口并广播复位事件，
   // 本事件按发送顺序晚于复位到达）：把路径并入附件，与粘贴/拖入同管线。
   // 同时**显式收起「最近添加」条带**：点击带入不该顺带展示历史（用户明确规则：
@@ -2114,6 +2180,7 @@ onBeforeUnmount(() => {
   unlistenQuickFilter?.();
   unlistenQuickOpen?.();
   unlistenClipboardShortcut?.();
+  unlistenPluginActionShortcut?.();
   unlistenAttachPaths?.();
   unlistenBuiltin?.();
   unlistenDragDrop?.();
@@ -2274,6 +2341,7 @@ defineExpose({ inputValue });
       :perm-blocks="installDialogPerms"
       :warnings="installDialogWarnings"
       :installed-version="installDialogInstalledVersion"
+      :running="installDialogRunning"
       @confirm="onInstallConfirm"
       @cancel="onInstallCancel"
     />

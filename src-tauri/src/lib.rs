@@ -77,6 +77,16 @@ const SETTINGS_KEY_SCREENSHOT_UNBOUND: &str = "screenshot_unbound";
 /// 「从没配过」（要注入）与「用户主动解绑」（要尊重）。
 const SETTINGS_KEY_CLIPBOARD_UNBOUND: &str = "clipboard_unbound";
 
+/// 设置存储里「插件动作自动注入进列表」的记录键（JSON 对象：`action → bool`）。
+///
+/// 插件动作（截图 / 剪贴板历史这类宿主原生动作，以及 `plugin:<id>:<name>` 自定义
+/// 动作）在对应插件**已安装**时会被宿主按清单声明自动注入一条默认热键。但
+/// 「列表里没有该动作的绑定」有两种含义——「从没配过」与「用户主动解绑了」。
+/// 前者要注入，后者必须尊重。本键用一个 map 统一记录所有插件动作的解绑意图，
+/// 新增插件动作无需再加设置键（旧的 `screenshot_unbound` / `clipboard_unbound`
+/// 仍读取兼容，见 `is_plugin_action_unbound`）。
+const SETTINGS_KEY_PLUGIN_ACTION_UNBOUND: &str = "plugin_action_unbound";
+
 /// 快捷键作用类型：呼出/隐藏搜索窗（默认，仅允许一条）
 const SHORTCUT_ACTION_TOGGLE_WINDOW: &str = "toggle-window";
 /// 快捷键作用类型：直接打开某个插件（作用对象 = 插件 id）
@@ -112,6 +122,14 @@ const EVENT_SHORTCUT_QUICK_OPEN: &str = "my-search://shortcut-quick-open";
 /// 快捷键（clipboard）触发时向主窗口广播的事件名，payload = { pluginId }
 /// （前端据此打开剪贴板历史插件的详情视图）
 const EVENT_SHORTCUT_CLIPBOARD: &str = "my-search://shortcut-clipboard";
+/// 快捷键（**插件自定义动作**）触发时向主窗口广播的事件名，
+/// payload = { pluginId, action }（前端据此打开该插件视图并把 action 派发给插件脚本）。
+///
+/// 与 screenshot / clipboard 这类「宿主原生执行」的动作不同，录屏这类动作的
+/// 执行逻辑在**插件自己**（后台 ffmpeg + 插件界面）里，宿主只负责：把主窗口带到
+/// 前台 → 打开该插件视图 → 把 `action` 交给插件脚本（见前端
+/// `ms.onShortcutAction`）。因此这里只广播 event，具体做什么由插件决定。
+const EVENT_SHORTCUT_PLUGIN_ACTION: &str = "my-search://shortcut-plugin-action";
 
 /// 资源管理器「Alt+点击文件」触发时向主窗口广播的事件名，
 /// payload = { paths: string[] }（前端并入附件，与粘贴/拖入同管线）。
@@ -580,6 +598,29 @@ fn clipboard_by_shortcut(app: &tauri::AppHandle) {
     );
 }
 
+/// 「插件自定义动作」快捷键的落地（`plugin:<id>:<name>`）。
+///
+/// 与 `open_plugin_by_shortcut` / `clipboard_by_shortcut` 同构：Rust 只把主窗口
+/// 带到前台 + 广播事件；真正的动作由**插件自己**处理——前端收到事件后打开该插件
+/// 视图并把 `action` 派发给插件脚本（`ms.shortcuts.onAction`）。插件是否存在 /
+/// 启用 / 有权限都在前端注册表侧判定（Rust 不持有注册表）。
+fn plugin_action_by_shortcut(app: &tauri::AppHandle, plugin_id: &str, action: &str) {
+    if plugin_id.trim().is_empty() {
+        return;
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        if !window.is_visible().unwrap_or(false) {
+            show_main_window(app);
+        } else {
+            let _ = window.set_focus();
+        }
+    }
+    let _ = app.emit(
+        EVENT_SHORTCUT_PLUGIN_ACTION,
+        serde_json::json!({ "pluginId": plugin_id, "action": action }),
+    );
+}
+
 /// 「快速过滤」快捷键的落地：确保主窗口可见，然后广播常用头由前端填入搜索框并立即搜索。
 ///
 /// 与 `open_plugin_by_shortcut` 同构：Rust 侧只负责把窗口带到前台与投递事件；
@@ -937,6 +978,34 @@ impl ShortcutBinding {
     }
 }
 
+/// 插件**自定义动作**的 id 前缀：`plugin:<插件id>:<动作名>`。
+///
+/// 与宿主原生的插件动作（`screenshot` / `clipboard`）不同，这类动作的执行逻辑
+/// 在**插件自己**（后台进程 + 插件界面）。宿主只负责把主窗口带到前台、打开该
+/// 插件视图，并把动作名派发给插件脚本（见 `EVENT_SHORTCUT_PLUGIN_ACTION`）。
+const PLUGIN_ACTION_PREFIX: &str = "plugin:";
+
+/// 是否是**插件自定义动作**（`plugin:<插件id>:<动作名>`，两段都非空）
+fn is_plugin_defined_action(action: &str) -> bool {
+    let Some(rest) = action.strip_prefix(PLUGIN_ACTION_PREFIX) else {
+        return false;
+    };
+    match rest.split_once(':') {
+        Some((owner, name)) => !owner.is_empty() && !name.is_empty(),
+        None => false,
+    }
+}
+
+/// 取插件自定义动作的所属插件 id（不是插件自定义动作时返回 None）
+fn plugin_defined_action_owner(action: &str) -> Option<&str> {
+    let rest = action.strip_prefix(PLUGIN_ACTION_PREFIX)?;
+    let (owner, name) = rest.split_once(':')?;
+    if owner.is_empty() || name.is_empty() {
+        return None;
+    }
+    Some(owner)
+}
+
 /// 是否是已知的快捷键作用类型
 fn is_known_shortcut_action(action: &str) -> bool {
     action == SHORTCUT_ACTION_TOGGLE_WINDOW
@@ -945,15 +1014,20 @@ fn is_known_shortcut_action(action: &str) -> bool {
         || action == SHORTCUT_ACTION_QUICK_OPEN
         || action == SHORTCUT_ACTION_SCREENSHOT
         || action == SHORTCUT_ACTION_CLIPBOARD
+        || is_plugin_defined_action(action)
 }
 
-/// 是否是**插件动作**（由插件清单 `contributes.shortcut` 声明，宿主原生执行）。
+/// 是否是**插件动作**（可用性取决于对应插件是否已安装）。
 ///
-/// 与内置动作（toggle-window / open-plugin / quick-filter / quick-open）相对：
-/// 内置动作永远可用；插件动作只有对应插件**已安装**时才可用，由前端算出后经
-/// `sync_plugin_shortcut_actions` 下发（见 `reconcile_plugin_actions`）。
+/// 两类都算：
+///   - 宿主原生：`screenshot` / `clipboard`（执行器在宿主侧）；
+///   - 插件自定义：`plugin:<插件id>:<动作名>`（执行器在插件侧）。
+/// 只有对应插件**已安装**时才可用，由前端算出后经 `sync_plugin_shortcut_actions`
+/// 下发（见 `reconcile_plugin_actions`）。
 fn is_plugin_shortcut_action(action: &str) -> bool {
-    action == SHORTCUT_ACTION_SCREENSHOT || action == SHORTCUT_ACTION_CLIPBOARD
+    action == SHORTCUT_ACTION_SCREENSHOT
+        || action == SHORTCUT_ACTION_CLIPBOARD
+        || is_plugin_defined_action(action)
 }
 
 /// 绑定列表长度上限（防止设置文件被写爆 / 注册过多全局热键）
@@ -1021,11 +1095,13 @@ fn parse_shortcut_bindings(value: &serde_json::Value) -> Vec<ShortcutBinding> {
     out
 }
 
-/// 记录/清除「用户主动解绑截图热键」标记（见 `SETTINGS_KEY_SCREENSHOT_UNBOUND`）。
+/// 记录/清除「用户主动解绑截图热键」标记。
 ///
 /// 由插件前台的「解绑」按钮与重新绑定走（`screenshot_set_shortcut`）。
-/// 写失败只记日志：本次绑定已生效，重启后最坏是默认热键被补回来。
+/// 同时写统一的 `plugin_action_unbound` map（权威）与历史遗留的
+/// `screenshot_unbound` 单键（向前兼容：用户回退到老版本时仍能读到）。
 pub(crate) fn set_screenshot_unbound(app: &tauri::AppHandle, unbound: bool) {
+    set_plugin_action_unbound_flag(app, SHORTCUT_ACTION_SCREENSHOT, unbound);
     if let Some(store) = settings_store(app) {
         store.set(SETTINGS_KEY_SCREENSHOT_UNBOUND, serde_json::Value::Bool(unbound));
         if let Err(e) = store.save() {
@@ -1034,20 +1110,53 @@ pub(crate) fn set_screenshot_unbound(app: &tauri::AppHandle, unbound: bool) {
     }
 }
 
-/// 读取某个插件动作是否被用户主动解绑过（截图 / 剪贴板历史各一个标记）。
+/// 读取某个插件动作是否被用户主动解绑过。
+///
+/// 先查统一的 `plugin_action_unbound` map；没有时回落到历史遗留的单键
+/// （`screenshot_unbound` / `clipboard_unbound`），保证老用户升级后解绑意图不丢。
 fn is_plugin_action_unbound(app: &tauri::AppHandle, action: &str) -> bool {
-    let key = match action {
-        SHORTCUT_ACTION_SCREENSHOT => SETTINGS_KEY_SCREENSHOT_UNBOUND,
-        SHORTCUT_ACTION_CLIPBOARD => SETTINGS_KEY_CLIPBOARD_UNBOUND,
-        _ => return false,
+    let Some(store) = settings_store(app) else {
+        return false;
     };
-    settings_store(app)
-        .and_then(|store| store.get(key).and_then(|v| v.as_bool()))
+    if let Some(v) = store
+        .get(SETTINGS_KEY_PLUGIN_ACTION_UNBOUND)
+        .and_then(|v| v.get(action).and_then(|b| b.as_bool()))
+    {
+        return v;
+    }
+    // 历史遗留键兜底（老版本只针对截图 / 剪贴板历史各写了一个 bool）
+    let legacy_key = match action {
+        SHORTCUT_ACTION_SCREENSHOT => Some(SETTINGS_KEY_SCREENSHOT_UNBOUND),
+        SHORTCUT_ACTION_CLIPBOARD => Some(SETTINGS_KEY_CLIPBOARD_UNBOUND),
+        _ => None,
+    };
+    legacy_key
+        .and_then(|k| store.get(k).and_then(|v| v.as_bool()))
         .unwrap_or(false)
+}
+
+/// 写入某个插件动作的「用户主动解绑」标记（统一 map；失败只记日志）。
+fn set_plugin_action_unbound_flag(app: &tauri::AppHandle, action: &str, unbound: bool) {
+    let Some(store) = settings_store(app) else {
+        return;
+    };
+    let mut map = store
+        .get(SETTINGS_KEY_PLUGIN_ACTION_UNBOUND)
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    map.insert(action.to_string(), serde_json::Value::Bool(unbound));
+    store.set(
+        SETTINGS_KEY_PLUGIN_ACTION_UNBOUND,
+        serde_json::Value::Object(map),
+    );
+    if let Err(e) = store.save() {
+        eprintln!("保存快捷键解绑标记失败: {e}");
+    }
 }
 
 /// 记录/清除「用户主动解绑剪贴板历史热键」标记（与截图版同构）。
 pub(crate) fn set_clipboard_unbound(app: &tauri::AppHandle, unbound: bool) {
+    set_plugin_action_unbound_flag(app, SHORTCUT_ACTION_CLIPBOARD, unbound);
     if let Some(store) = settings_store(app) {
         store.set(SETTINGS_KEY_CLIPBOARD_UNBOUND, serde_json::Value::Bool(unbound));
         if let Err(e) = store.save() {
@@ -1060,7 +1169,7 @@ pub(crate) fn set_clipboard_unbound(app: &tauri::AppHandle, unbound: bool) {
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PluginShortcutAction {
-    /// 宿主动作 id（目前仅 screenshot / clipboard）
+    /// 动作 id：宿主原生为 `screenshot` / `clipboard`；插件自定义为 `plugin:<id>:<name>`
     pub(crate) action: String,
     /// 首次注入用的默认组合键（空串 = 不自动注入）
     #[serde(default)]
@@ -1240,6 +1349,12 @@ fn register_binding_handlers(app: &tauri::AppHandle, bindings: &[ShortcutBinding
                 // 剪贴板历史**走前端**（inlay 详情视图能开在主 WebView 里）：
                 // 这里只把主窗口带到前台并广播事件，由前端打开内置插件详情视图。
                 clipboard_by_shortcut(app);
+            } else if is_plugin_defined_action(&action) {
+                // 插件自定义动作（`plugin:<id>:<name>`）：执行逻辑在插件自己，
+                // 宿主把窗口带到前台 + 广播事件，由前端打开该插件视图并把动作派发给它。
+                if let Some(plugin_id) = plugin_defined_action_owner(&action) {
+                    plugin_action_by_shortcut(app, plugin_id, &action);
+                }
             } else {
                 toggle_window(app);
             }
@@ -2535,13 +2650,22 @@ fn set_shortcut_bindings(
 ///
 /// 规则：插件动作若「旧列表有、新列表无」→ 置 true（用户主动删了）；
 /// 「新列表有」→ 置 false（用户重新加了）；两边都没有 → 不动（保持原状）。
+///
+/// 这里遍历**新旧列表里出现过的所有插件动作**（含 `plugin:<id>:<name>` 自定义动作），
+/// 不限于截图 / 剪贴板历史。
 fn update_unbound_flags(
     app: &tauri::AppHandle,
     old: &[ShortcutBinding],
     new: &[ShortcutBinding],
 ) -> Vec<(String, bool)> {
+    let mut actions: Vec<&str> = Vec::new();
+    for b in old.iter().chain(new.iter()) {
+        if is_plugin_shortcut_action(&b.action) && !actions.contains(&b.action.as_str()) {
+            actions.push(b.action.as_str());
+        }
+    }
     let mut changed = Vec::new();
-    for action in [SHORTCUT_ACTION_SCREENSHOT, SHORTCUT_ACTION_CLIPBOARD] {
+    for action in actions {
         let was_bound = old.iter().any(|b| b.action == action);
         let is_bound = new.iter().any(|b| b.action == action);
         let next = if is_bound {
@@ -2554,19 +2678,25 @@ fn update_unbound_flags(
         let Some(next) = next else { continue };
         let prev = is_plugin_action_unbound(app, action);
         if prev != next {
-            set_plugin_action_unbound(app, action, next);
+            // 截图 / 剪贴板历史走各自的 setter（额外写历史遗留键，保持向前兼容）；
+            // 其它插件动作写统一的 map。
+            match action {
+                SHORTCUT_ACTION_SCREENSHOT => set_screenshot_unbound(app, next),
+                SHORTCUT_ACTION_CLIPBOARD => set_clipboard_unbound(app, next),
+                other => set_plugin_action_unbound_flag(app, other, next),
+            }
             changed.push((action.to_string(), prev));
         }
     }
     changed
 }
 
-/// 写入某个插件动作的「主动解绑」标记（写失败只记日志）。
+/// 回滚某个插件动作的「主动解绑」标记（注册失败时用；写失败只记日志）。
 fn set_plugin_action_unbound(app: &tauri::AppHandle, action: &str, unbound: bool) {
     match action {
         SHORTCUT_ACTION_SCREENSHOT => set_screenshot_unbound(app, unbound),
         SHORTCUT_ACTION_CLIPBOARD => set_clipboard_unbound(app, unbound),
-        _ => {}
+        other => set_plugin_action_unbound_flag(app, other, unbound),
     }
 }
 
@@ -3496,6 +3626,68 @@ mod tests {
         };
         let nod = reconcile_plugin_actions(base, &[no_default], &|_| false);
         assert_eq!(nod.len(), 1);
+    }
+
+    /// 插件自定义动作（`plugin:<id>:<name>`）：同样按「可用列表」注入 / 移除，
+    /// 且非插件动作的（内置）绑定不受影响。
+    #[test]
+    fn reconcile_plugin_defined_actions() {
+        use super::{
+            parse_shortcut_bindings, parse_shortcut_bindings_strict, reconcile_plugin_actions,
+            PluginShortcutAction, SHORTCUT_ACTION_TOGGLE_WINDOW,
+        };
+
+        let rec = || PluginShortcutAction {
+            action: "plugin:com.mysearch.recorder:record-toggle".into(),
+            default_shortcut: "ctrl+alt+r".into(),
+        };
+
+        // 1) 装了录屏插件 → 注入默认录屏键
+        let base = parse_shortcut_bindings(&serde_json::json!([
+            { "shortcut": "ctrl+alt+s", "action": SHORTCUT_ACTION_TOGGLE_WINDOW }
+        ]));
+        let with_rec = reconcile_plugin_actions(base.clone(), &[rec()], &|_| false);
+        assert_eq!(with_rec.len(), 2);
+        assert_eq!(with_rec[1].action, "plugin:com.mysearch.recorder:record-toggle");
+        assert_eq!(with_rec[1].shortcut, "ctrl+alt+r");
+
+        // 2) 卸载 → 移除
+        let removed = reconcile_plugin_actions(with_rec.clone(), &[], &|_| false);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].action, SHORTCUT_ACTION_TOGGLE_WINDOW);
+
+        // 3) 用户主动解绑过 → 不注入
+        let unbound = reconcile_plugin_actions(base.clone(), &[rec()], &|a| {
+            a == "plugin:com.mysearch.recorder:record-toggle"
+        });
+        assert_eq!(unbound.len(), 1);
+
+        // 4) 默认键被占用 → 不抢
+        let taken = parse_shortcut_bindings(&serde_json::json!([
+            { "shortcut": "ctrl+alt+s", "action": SHORTCUT_ACTION_TOGGLE_WINDOW },
+            { "shortcut": "ctrl+alt+r", "action": "quick-open", "target": "某常用头" }
+        ]));
+        let guarded = reconcile_plugin_actions(taken, &[rec()], &|_| false);
+        assert_eq!(guarded.len(), 2);
+        assert!(!guarded
+            .iter()
+            .any(|b| b.action == "plugin:com.mysearch.recorder:record-toggle"));
+
+        // 5) 严格解析接受 `plugin:<id>:<name>`，且不需要作用对象
+        let parsed = parse_shortcut_bindings_strict(&serde_json::json!([
+            { "shortcut": "ctrl+alt+s", "action": SHORTCUT_ACTION_TOGGLE_WINDOW },
+            { "shortcut": "ctrl+alt+r", "action": "plugin:com.mysearch.recorder:record-toggle" }
+        ]))
+        .unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[1].target, None);
+
+        // 6) 非法形态（缺动作名）不被当作插件自定义动作（from_value 会丢弃）
+        let dropped = parse_shortcut_bindings(&serde_json::json!([
+            { "shortcut": "ctrl+alt+s", "action": SHORTCUT_ACTION_TOGGLE_WINDOW },
+            { "shortcut": "ctrl+alt+r", "action": "plugin:com.a.b:" }
+        ]));
+        assert_eq!(dropped.len(), 1, "缺动作名的非法 plugin: 动作被丢弃");
     }
 
     /// 剪贴板历史动作：无作用对象。

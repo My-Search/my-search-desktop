@@ -102,7 +102,7 @@ sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file \
 - 「快速过滤」的键在**任意位置**按下即呼出搜索框，填入「常用头 + 二次搜索分隔符 ` : `」并**立即搜索**（如常用头 `百度翻译` → 输入框变为 `百度翻译 : `），光标停在末尾，直接接着输入子关键词即可；常用头里若手打了结尾的 ` : ` 会自动去掉，不会出现重复分隔符
 - 「快捷打开项」的键在**任意位置**按下即呼出搜索框，用填写的文本**精确匹配**数据项（标题 / 描述 / 内容三级，多个词用空格分隔、都要命中；**不使用模糊/重叠度搜索**）：唯一匹配 → 直接打开该项（与点击结果项完全一致，含加分与历史记录）；多项匹配 → 把文本填入搜索框并列出结果，由你自己选；无匹配 → 仅提示「未找到匹配项」，不改动输入框/窗口。匹配文本只做首尾去空白，冒号等符号原样保留
 - 插件被卸载/禁用时，对应条目在下拉里标注 `已卸载` / `已禁用`，删掉即可
-- **插件动作用类型（截图 / 剪贴板历史等）由插件清单声明**（`contributes.shortcut`）：**装了对应插件才出现**，并按清单里的默认键自动添加一条（键被占用则跳过，可自行录入）；**卸载插件即从下拉与系统热键中一并移除**。用户在面板或插件界面里主动「解绑」过则会记住该意图，重装不会强行加回
+- **插件动作用类型（截图 / 剪贴板历史 / 录屏等）由插件清单声明**（`contributes.shortcut`）：**装了对应插件才出现**，并按清单里的默认键自动添加一条（键被占用则跳过，可自行录入）；**卸载插件即从下拉与系统热键中一并移除**。用户在面板或插件界面里主动「解绑」过则会记住该意图，重装不会强行加回。动作分两类：宿主原生（`screenshot` / `clipboard`，由宿主执行）与**插件自定义**（如录屏的 `record-toggle`，宿主把动作转发给插件脚本，插件用 `ms.shortcuts.onAction` 接收）
 - 所有改动立即生效并写入应用数据目录的 `settings.json`（键 `shortcut_bindings`）；旧版本的单键 `toggle_shortcut` 会自动迁移为一条「呼出 / 隐藏搜索框」绑定
 
 ---
@@ -167,7 +167,7 @@ my-search-desktop/
 ## 🔧 技术说明
 
 - **全局快捷键**：`tauri-plugin-global-shortcut` 注册。支持多条绑定，每条 = **快捷键 / 作用类型 / 作用对象**（`settings.json` 的 `shortcut_bindings` 数组）：`toggle-window` = 呼出 / 隐藏搜索窗（默认 `Ctrl+Alt+S`，只能一条）；`open-plugin` = 直接打开指定插件（Rust 端广播 `my-search://shortcut-open-plugin` 事件 + 插件 id，前端把窗口带到前台后由插件视图宿主打开，因此「插件是否存在 / 已启用 / 权限是否足够」的判断仍在前端注册表侧）；`quick-filter` = 快速过滤（Rust 端广播 `my-search://shortcut-quick-filter` 事件 + 常用头，前端把「常用头 + 二次搜索分隔符 ` : `」填入搜索框并立即搜索、光标置末尾）；`quick-open` = 快捷打开项（Rust 端广播 `my-search://shortcut-quick-open` 事件 + 匹配文本，前端用精确搜索匹配数据项：唯一则与点击项同路径直接打开、多项则列出结果、无匹配则提示）。设置时**整体重新注册**，任一条被占用则回滚到改动前的整套绑定（不会出现「改了一半」）；旧版单键 `toggle_shortcut` 自动迁移为一条 toggle-window 绑定
-- **插件快捷键动作（截图 / 剪贴板历史等）动态化**：这类作用类型由插件清单 `contributes.shortcut` 声明，**不写死在宿主里**。前端按「已安装插件」算出可用动作（`src/lib/plugins/shortcut-actions.ts`），经 `sync_plugin_shortcut_actions` 下发给 Rust：装了插件就注入其默认热键、卸载即移除绑定并注销热键（幂等、无变化不重注册）。宿主仍保留原生执行器（`screenshot` 就地开遮罩、`clipboard` 广播事件由前端打开插件视图），插件清单只声明元数据（动作 id / 标题 / 默认键），`action` 受宿主白名单约束。用户主动「解绑」过的动作会被记住，重装不再强行加回
+- **插件快捷键动作（截图 / 剪贴板历史 / 录屏等）动态化**：这类作用类型由插件清单 `contributes.shortcut` 声明，**不写死在宿主里**。前端按「已安装插件」算出可用动作（`src/lib/plugins/shortcut-actions.ts`），经 `sync_plugin_shortcut_actions` 下发给 Rust：装了插件就注入其默认热键、卸载即移除绑定并注销热键（幂等、无变化不重注册）。动作分两类：**宿主原生**（`screenshot` 就地开遮罩、`clipboard` 广播事件由前端打开插件视图，执行器在宿主）；**插件自定义**（清单写本地动作名，宿主注册为 `plugin:<插件id>:<动作名>`，按下后 Rust 广播 `my-search://shortcut-plugin-action`，前端打开/恢复该插件视图并把动作名派发给插件脚本——插件用 `ms.shortcuts.onAction(本地名, fn)` 接收，执行逻辑完全在插件自己里）。用户主动「解绑」过的动作会被记住，重装不再强行加回
 - **开机自启动**：`tauri-plugin-autostart` 注册（**默认开启**，首次运行即写入系统启动项；用户偏好存于同一份 `settings.json` 的 `autostart_enabled`）。Windows 上写 `HKCU\...\CurrentVersion\Run`，读取时同时识别「任务管理器 → 启动」的启用/禁用覆盖，因此开关始终反映系统真实状态
 - **自启动静默（不弹任何窗口）**：exe 在 Windows 上**无条件**使用 GUI 子系统（`main.rs` 的 `#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]`，debug 构建也一样）。登录时进程由 explorer.exe 拉起、没有父控制台，若 exe 是 console 子系统，Windows 会为它新建一个控制台黑窗口并一直挂着（本应用常驻托盘不退出）；主窗口本身是 `visible: false`，启动阶段不会 `show()`，所以修掉控制台后登录完全静默。dev 日志不受影响：从终端/`npm run tauri dev` 启动时 stdout/stderr 句柄被继承，`eprintln!` 照常显示（已实测）
 - **自启动路径自愈**：登录拉起的是「注册表里记的那个 exe」而非「正在运行的 exe」，所以启动时会比对 Run 值里记录的路径与当前 exe，不一致就重写（仅在**正式构建**且自启动已开启时执行，dev 调试绝不改注册表，避免顶掉已安装版本的启动项）。Windows-only：Linux AppImage 的 `current_exe()` 是临时挂载路径，不能照搬这套比较
@@ -446,9 +446,13 @@ https://github.com/My-Search/my-search-plugin-market/blob/main/index.error.json
       "theme": "dark"                // 可选：dark | light | inherit（默认）——见「主题兼容」一节
     },
     "shortcut": {                    // 可选：声明一个全局快捷键作用类型（插件动作）
-      "action": "screenshot",        // 宿主动作 id（目前仅 screenshot / clipboard）
-      "title": "截图（框选 + 标注）",  // 该作用类型在「设置 → 快捷键」下拉里的展示标题
-      "defaultShortcut": "ctrl+alt+x" // 可选：装了本插件后自动添加的默认组合键（被占用则跳过）
+      // action 有两种写法：
+      //  A. 宿主原生保留名（screenshot / clipboard）——执行器在宿主侧；
+      //  B. 插件自己的动作名（小写字母开头）——执行器在插件自己里，
+      //     宿主把动作转发给插件脚本（插件用 ms.shortcuts.onAction 接收）。
+      "action": "record-toggle",     // 例：自定义动作名（内部拼成 plugin:<插件id>:record-toggle）
+      "title": "录屏（开始 / 停止）",  // 该作用类型在「设置 → 快捷键」下拉里的展示标题
+      "defaultShortcut": "ctrl+alt+r" // 可选：装了本插件后自动添加的默认组合键（被占用则跳过）
     }
   },
   "backend": {                       // 可选：后台进程

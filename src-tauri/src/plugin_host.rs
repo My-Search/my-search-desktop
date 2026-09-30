@@ -378,9 +378,27 @@ pub struct PluginFileEntry {
 ///
 /// 流程：写 `.staging/<id>-<ts>` → 校验 `plugin.json` 存在且 id 匹配 →
 /// 删旧目录 → rename 到正式目录。任何一步失败都不会破坏已安装版本。
+///
+/// **覆盖安装（更新）时先停掉该插件的后台进程**：Windows 上运行中的 exe
+/// （以及它可能打开的同目录文件）会占着文件句柄，直接 `remove_dir_all` 旧目录
+/// 会失败，用户看到的就是「更新失败（原因：插件正在运行）」。`plugin_remove`
+/// 早有这一步，安装路径此前漏了，导致「运行中插件无法更新」。
+///
+/// 阻塞体（停进程最长等 graceSec 秒）丢进 `spawn_blocking`，不卡窗口消息循环
+/// （与 `plugin_backend_*` 同一套线程模型）。
 #[tauri::command]
-pub fn plugin_install(
+pub async fn plugin_install(
     app: AppHandle,
+    plugin_id: String,
+    files: Vec<InstallFile>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || plugin_install_inner(&app, plugin_id, files))
+        .await
+        .map_err(|e| err(format!("安装任务执行失败: {e}")))?
+}
+
+fn plugin_install_inner(
+    app: &AppHandle,
     plugin_id: String,
     files: Vec<InstallFile>,
 ) -> Result<String, String> {
@@ -389,7 +407,7 @@ pub fn plugin_install(
         return Err(err("安装包为空"));
     }
 
-    let root = plugins_root(&app)?;
+    let root = plugins_root(app)?;
     let staging_root = root.join(".staging");
     std::fs::create_dir_all(&staging_root).map_err(|e| err(format!("创建暂存目录失败: {e}")))?;
     let stamp = SystemTime::now()
@@ -462,10 +480,32 @@ pub fn plugin_install(
     // 原子替换：删旧目录后再 rename（Windows 上目标存在时 rename 会失败）
     let dest_dir = root.join(&plugin_id);
     if dest_dir.exists() {
+        // 覆盖安装前先停后台进程：运行中的 exe / 已打开的文件会占住句柄，
+        // Windows 上直接删目录必然失败（更新失败的根因——「插件正在运行」）。
+        // 对未运行的插件是幂等的。
+        let was_alive = backend_is_alive(&plugin_id);
+        let _ = stop_backend(app, &plugin_id, true);
         std::fs::remove_dir_all(&dest_dir).map_err(|e| {
             let _ = std::fs::remove_dir_all(&staging);
             err(format!("替换旧版本失败: {e}"))
         })?;
+        std::fs::rename(&staging, &dest_dir).map_err(|e| {
+            let _ = std::fs::remove_dir_all(&staging);
+            err(format!("落盘失败: {e}"))
+        })?;
+        // 更新前在运行的 → 用新版本重新拉起，否则「更新」会把插件悄悄弄停：
+        // 网关的 auto_start 策略没变，前端 reconcile 判定「无变化」不会再起它。
+        // 仅当新清单仍声明后台进程时才重建（更新可能移除了 backend）。
+        // 先用新清单校准网关里的后台入口，避免入口路径变了还用旧值去 spawn。
+        if was_alive && manifest.get("backend").is_some() {
+            apply_backend_entry_from_manifest(&plugin_id, &manifest);
+            append_log(app, &plugin_id, "更新完成，正在用新版本重启后台进程");
+            if let Err(e) = spawn_backend(app, &plugin_id) {
+                // 文件已更新成功，进程起不来是插件自身的问题，不该让「安装」报失败
+                append_log(app, &plugin_id, &format!("更新后重启后台进程失败: {e}"));
+            }
+        }
+        return Ok(dest_dir.to_string_lossy().to_string());
     }
     std::fs::rename(&staging, &dest_dir).map_err(|e| {
         let _ = std::fs::remove_dir_all(&staging);
@@ -473,6 +513,30 @@ pub fn plugin_install(
     })?;
 
     Ok(dest_dir.to_string_lossy().to_string())
+}
+
+/// 用新安装的清单校准网关镜像里的后台入口 / 协议（仅覆盖安装后重启进程时用）。
+///
+/// 为什么需要：`spawn_backend` 从网关取 `backend_entry`，而网关是前端在安装后
+/// 才同步的。若本次更新改了后台入口路径，先重启就会按旧路径 spawn 失败。
+/// 这里只更新这两个字段，权限 / 策略等仍以前端下发的镜像为准。
+fn apply_backend_entry_from_manifest(plugin_id: &str, manifest: &Value) {
+    let backend = manifest.get("backend");
+    let entry = backend.and_then(|b| b.get("entry")).and_then(|v| v.as_str());
+    let protocol = backend.and_then(|b| b.get("protocol")).and_then(|v| v.as_str());
+    if entry.is_none() && protocol.is_none() {
+        return;
+    }
+    if let Ok(mut g) = GATEWAY.lock() {
+        if let Some(spec) = g.get_mut(plugin_id) {
+            if let Some(entry) = entry {
+                spec.backend_entry = Some(entry.to_string());
+            }
+            if let Some(protocol) = protocol {
+                spec.backend_protocol = Some(protocol.to_string());
+            }
+        }
+    }
 }
 
 /// 卸载插件：删安装目录（私有数据默认保留，由前端询问用户后调 plugin_purge_data）
@@ -1300,8 +1364,21 @@ fn spawn_backend(app: &AppHandle, plugin_id: &str) -> Result<BackendState, Strin
                 std::thread::sleep(Duration::from_millis(500));
             };
 
-            if let Ok(mut map) = BACKENDS.lock() {
-                map.remove(&pid2);
+            // 自己是否仍是该插件当前登记的句柄：stop+spawn（重启 / 覆盖安装后重建）
+            // 期间，同 id 下可能已经换上了新进程。旧看门狗此时必须彻底退场——
+            // 既不能按 id 无条件删句柄（会连新句柄一起删，刚拉起的进程就失去托管），
+            // 也不能拿自己的退出状态去覆盖新进程（会把 running 改成 stopped/error）。
+            let current = BACKENDS
+                .lock()
+                .map(|map| map.get(&pid2).map(|cur| Arc::ptr_eq(cur, &h)).unwrap_or(false))
+                .unwrap_or(false);
+            if !current {
+                // 已被替换：只清理自己这一份资源（关 Job Object）后静默退出
+                #[cfg(windows)]
+                unsafe {
+                    close_job_object(h.job)
+                };
+                return;
             }
             let (stop_requested, restarts) = {
                 let st = match h.state.lock() {
@@ -1316,6 +1393,13 @@ fn spawn_backend(app: &AppHandle, plugin_id: &str) -> Result<BackendState, Strin
                 close_job_object(h.job)
             };
             let _ = h;
+
+            // 摘掉自己的句柄（此时已确认它就是表里那一个）
+            if let Ok(mut map) = BACKENDS.lock() {
+                if map.get(&pid2).map(|cur| Arc::ptr_eq(cur, &h)).unwrap_or(false) {
+                    map.remove(&pid2);
+                }
+            }
 
             if stop_requested {
                 append_log(&app2, &pid2, "进程已停止");

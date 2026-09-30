@@ -93,6 +93,8 @@
   /* ======================= 状态 ======================= */
 
   var caps = null;              // 后端 capabilities 结果
+  /** 能力是否已探测完（boot 走完 loadCapabilities）。快捷键动作早到时据此排队 */
+  var capsReady = false;
   var recordingActive = false;
   var paused = false;
   var tickTimer = null;         // 本地计时兜底（后端 tick 未到时不让秒针停住）
@@ -1461,6 +1463,13 @@
     } else {
       pickVideoFromAttachmentsSilently();
     }
+
+    // 6. 能力就绪：若快捷键动作在 boot 期间早到了，现在补执行
+    capsReady = true;
+    if (pendingToggle) {
+      pendingToggle = false;
+      void toggleRecording();
+    }
   }
 
   /** 附件变化时（用户拖入视频）自动识别 */
@@ -1500,6 +1509,46 @@
         activateTab("wm");
       }
     });
+  }
+
+  /* ======================= 全局快捷键动作（宿主转发） =======================
+   *
+   * 清单 contributes.shortcut 里声明了本地动作名 `record-toggle`；宿主把它注册成
+   * 全局热键（`plugin:com.mysearch.recorder:record-toggle`），按下后打开本视图并把
+   * 动作名派发到这里。行为：**没在录 → 开始；在录 → 停止**（一个键开关）。
+   *
+   * 注意：宿主派发时视图可能刚挂载（脚本刚跑完，boot 是异步的）——若此刻
+   * ffmpeg 能力尚未探测完，直接开录会失败。这里的处理：把动作记成「待执行」，
+   * 等 boot 完成（capsReady 置位）后再执行；已就绪则立即执行。
+   */
+  var pendingToggle = false;
+
+  async function toggleRecording() {
+    if (!capsReady) {
+      // 能力还没探完（视图刚被快捷键拉起）：先记下，boot 完成后再执行
+      pendingToggle = true;
+      return;
+    }
+    if (recordingActive) {
+      await stopRecording();
+    } else {
+      await startRecording();
+    }
+  }
+
+  /**
+   * 处理宿主派发的快捷键动作。只有 `record-toggle` 是这个插件认识的动作；
+   * 其它名字（清单改版后新增）静默忽略——宿主对「没处理器」的场景会自行提示。
+   */
+  function onShortcutAction(name) {
+    if (name === "record-toggle") void toggleRecording();
+  }
+
+  if (ms && ms.shortcuts && typeof ms.shortcuts.onAction === "function") {
+    var offAction = ms.shortcuts.onAction("record-toggle", function () {
+      onShortcutAction("record-toggle");
+    });
+    if (typeof offAction === "function") unsubs.push(offAction);
   }
 
   boot();

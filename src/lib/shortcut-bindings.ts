@@ -19,28 +19,95 @@
  * 便于单测覆盖（见 test/shortcut-bindings.test.mjs）。
  */
 
-/** 快捷键作用类型 */
-export type ShortcutAction =
+/** 内置作用类型（宿主自身提供，永远可用） */
+export type BuiltinShortcutAction =
   | "toggle-window"
   | "open-plugin"
   | "quick-filter"
-  | "quick-open"
-  | "screenshot"
-  | "clipboard";
+  | "quick-open";
 
 /**
- * **插件动作**（由插件清单 `contributes.shortcut` 声明、宿主原生执行）。
- *
- * 与内置动作（toggle-window / open-plugin / quick-filter / quick-open）的区别：
- * 这四个由宿主自身提供；而 screenshot / clipboard 是「某个插件提供能力」——
- * 只有该插件**已安装**时才在设置里出现，卸载即移除（见 `availableShortcutActions`）。
- * 执行器仍在宿主侧（截图开原生遮罩、剪贴板广播事件），插件清单只声明元数据。
+ * **宿主原生的插件动作**：由插件清单声明、但由**宿主**执行。
+ * 截图（开原生遮罩）/ 剪贴板历史（广播事件让前端开插件视图）都属于这类。
+ * 只有对应插件**已安装**时才可用，卸载即移除（见 `availableShortcutActions`）。
  */
-export const PLUGIN_SHORTCUT_ACTIONS = ["screenshot", "clipboard"] as const;
+export type HostNativePluginShortcutAction = "screenshot" | "clipboard";
 
-/** 是否是插件动作（其可用性取决于对应插件是否已安装） */
+/**
+ * **插件自定义动作**：`plugin:<插件id>:<动作名>`。
+ *
+ * 与宿主原生动作不同，这类动作的执行逻辑在**插件自己**（后台进程 + 插件界面）。
+ * 宿主只负责：把主窗口带到前台 → 打开该插件视图 → 把动作派发给插件脚本
+ * （插件用 `ms.shortcuts.onAction` 接收）。录屏这类「重活在自己后端」的能力走这条。
+ */
+export type PluginDefinedShortcutAction = `plugin:${string}`;
+
+/** 快捷键作用类型 */
+export type ShortcutAction =
+  | BuiltinShortcutAction
+  | HostNativePluginShortcutAction
+  | PluginDefinedShortcutAction;
+
+/** 插件自定义动作的前缀 */
+export const PLUGIN_ACTION_PREFIX = "plugin:";
+
+/** 宿主原生的插件动作（清单里用它们的保留名，不带前缀） */
+export const HOST_NATIVE_PLUGIN_ACTIONS: readonly HostNativePluginShortcutAction[] = [
+  "screenshot",
+  "clipboard",
+];
+
+/**
+ * 兼容旧名：宿主原生的插件动作集合。
+ * @deprecated 新增判断请用 `isHostNativePluginAction` / `isPluginDefinedAction`。
+ */
+export const PLUGIN_SHORTCUT_ACTIONS = HOST_NATIVE_PLUGIN_ACTIONS;
+
+/** 是否是宿主原生的插件动作（截图 / 剪贴板历史） */
+export function isHostNativePluginAction(v: unknown): v is HostNativePluginShortcutAction {
+  return (HOST_NATIVE_PLUGIN_ACTIONS as readonly unknown[]).includes(v);
+}
+
+/** 是否是插件自定义动作（`plugin:<id>:<name>`） */
+export function isPluginDefinedAction(v: unknown): v is PluginDefinedShortcutAction {
+  return (
+    typeof v === "string" &&
+    v.startsWith(PLUGIN_ACTION_PREFIX) &&
+    v.length > PLUGIN_ACTION_PREFIX.length
+  );
+}
+
+/**
+ * 是否是**插件动作**（其可用性取决于对应插件是否已安装）：
+ * 宿主原生（screenshot / clipboard）或插件自定义（`plugin:` 前缀）都算。
+ */
 export function isPluginShortcutAction(v: unknown): v is ShortcutAction {
-  return (PLUGIN_SHORTCUT_ACTIONS as readonly unknown[]).includes(v);
+  return isHostNativePluginAction(v) || isPluginDefinedAction(v);
+}
+
+/** 拼接一个插件自定义动作 id（`plugin:<pluginId>:<name>`） */
+export function pluginDefinedActionId(pluginId: string, name: string): string {
+  return `${PLUGIN_ACTION_PREFIX}${pluginId}:${name}`;
+}
+
+/** 取插件自定义动作的宿主（所属插件 id）；不是插件自定义动作时返回 null */
+export function pluginDefinedActionOwner(action: unknown): string | null {
+  if (!isPluginDefinedAction(action)) return null;
+  const rest = action.slice(PLUGIN_ACTION_PREFIX.length);
+  const i = rest.indexOf(":");
+  if (i <= 0) return null;
+  const id = rest.slice(0, i);
+  const name = rest.slice(i + 1);
+  return id && name ? id : null;
+}
+
+/** 取插件自定义动作的动作名（最后一段）；不是插件自定义动作时返回 null */
+export function pluginDefinedActionName(action: unknown): string | null {
+  if (!isPluginDefinedAction(action)) return null;
+  const rest = action.slice(PLUGIN_ACTION_PREFIX.length);
+  const i = rest.indexOf(":");
+  if (i <= 0) return null;
+  return rest.slice(i + 1) || null;
 }
 
 /** 一条快捷键绑定 */
@@ -50,7 +117,7 @@ export interface ShortcutBinding {
   /** 作用类型 */
   action: ShortcutAction;
   /** 作用对象：open-plugin 时为插件 id，quick-filter 时为常用头文本，
-   *  quick-open 时为匹配文本，toggle-window / screenshot / clipboard 为 null */
+   *  quick-open 时为匹配文本，插件动作（含宿主原生与自定义）为 null */
   target: string | null;
 }
 
@@ -60,8 +127,15 @@ export const DEFAULT_TOGGLE_SHORTCUT = "ctrl+alt+s";
 /** 绑定条数上限（与 Rust 端 MAX_SHORTCUT_BINDINGS 一致） */
 export const MAX_SHORTCUT_BINDINGS = 50;
 
-/** 作用类型的中文名（UI 下拉 / 列表展示共用） */
-export const SHORTCUT_ACTION_LABELS: Record<ShortcutAction, string> = {
+/**
+ * 作用类型的中文名（UI 下拉 / 列表展示共用）。
+ * 只覆盖**固定名**（内置 + 宿主原生）；插件自定义动作没有固定文案，
+ * 其标题来自插件清单，展示时用 `shortcutActionLabel(action, actionTitleOf?)`。
+ */
+export const SHORTCUT_ACTION_LABELS: Record<
+  BuiltinShortcutAction | HostNativePluginShortcutAction,
+  string
+> = {
   "toggle-window": "呼出 / 隐藏搜索框",
   "open-plugin": "打开插件",
   "quick-filter": "快速过滤",
@@ -70,15 +144,28 @@ export const SHORTCUT_ACTION_LABELS: Record<ShortcutAction, string> = {
   clipboard: "剪贴板历史",
 };
 
-/** 是否是已知的作用类型 */
+/**
+ * 取作用类型的展示文案：
+ * - 插件动作（宿主原生 / 自定义）→ 优先用调用方给的 `actionTitleOf`（来自插件清单，
+ *   是权威来源）；清单读不到时宿主原生动作退回内置中文名，自定义动作退化为动作 id。
+ * - 内置动作 → 内置中文名。
+ */
+export function shortcutActionLabel(
+  action: ShortcutAction | string,
+  actionTitleOf?: (action: string) => string | null
+): string {
+  const fromTitle = actionTitleOf?.(action);
+  if (fromTitle) return fromTitle;
+  const fromMap = (SHORTCUT_ACTION_LABELS as Record<string, string | undefined>)[action];
+  if (fromMap) return fromMap;
+  return action;
+}
+
+/** 是否是已知的作用类型（内置 / 宿主原生 / 插件自定义） */
 export function isShortcutAction(v: unknown): v is ShortcutAction {
+  if (isPluginShortcutAction(v)) return true;
   return (
-    v === "toggle-window" ||
-    v === "open-plugin" ||
-    v === "quick-filter" ||
-    v === "quick-open" ||
-    v === "screenshot" ||
-    v === "clipboard"
+    v === "toggle-window" || v === "open-plugin" || v === "quick-filter" || v === "quick-open"
   );
 }
 
@@ -220,9 +307,10 @@ export function validateBindings(bindings: readonly ShortcutBinding[]): { ok: bo
 /**
  * 一条绑定的展示文案：作用类型 + 作用对象。
  *
- * @param actionLabelOf 可选的插件动作标题解析（来自插件清单 `contributes.shortcut.title`）。
- *   截图 / 剪贴板历史这类**插件动作**在未安装插件时没有清单可读，此时退回
- *   `SHORTCUT_ACTION_LABELS` 的内置兜底文案，保证任何时候都有可读标题。
+ * @param pluginNameOf 打开插件绑定的插件名解析；
+ * @param actionLabelOf **插件动作**（宿主原生 screenshot/clipboard + 自定义 `plugin:`）
+ *   的标题解析（来自插件清单 `contributes.shortcut.title`）。清单读不到时
+ *   （插件未装）宿主原生动作退回内置兜底文案，自定义动作退化为 id。
  */
 export function describeBinding(
   binding: ShortcutBinding,
@@ -230,8 +318,8 @@ export function describeBinding(
   actionLabelOf?: (action: ShortcutAction) => string | null
 ): string {
   if (binding.action === "toggle-window") return SHORTCUT_ACTION_LABELS["toggle-window"];
-  if (binding.action === "screenshot" || binding.action === "clipboard") {
-    return actionLabelOf?.(binding.action) ?? SHORTCUT_ACTION_LABELS[binding.action];
+  if (isPluginShortcutAction(binding.action)) {
+    return shortcutActionLabel(binding.action, actionLabelOf as ((a: string) => string | null) | undefined);
   }
   if (binding.action === "quick-filter") {
     const header = normalizeQuickFilterHeader(binding.target);

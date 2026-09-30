@@ -5037,6 +5037,305 @@ html.theme-dark .empty-state .empty-hint {
   color: #5a5f68;
 }
 
+/* ========== 插件安装确认弹窗（设置窗口 + 搜索窗口共用组件） ==========
+ *
+ * PluginInstallDialog 是两个窗口共用的宿主弹窗：搜索框 .mspp chip 点击 /
+ * 市场安装跑在**搜索窗口**（#my_search_box），「从文件安装」跑到**设置窗口**
+ * （#ms-config-view）。因此规则必须写两份作用域（照 .token-overlay /
+ * .env-picker 的既有做法）——此前只写了搜索窗口那一份，设置窗口里的弹窗
+ * 完全没样式：遮罩不铺满、卡片无白底无圆角，渲染成一堆紧贴正文的裸元素。
+ *
+ * 设置窗口那份用 CSS 变量（--card/--line/--brand…），暗色随
+ * `html.ms-config-root.theme-dark` 自动切换；搜索窗口没有变量，单独写一份。
+ */
+#ms-config-view .plugin-install-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(17, 20, 26, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 40;
+  backdrop-filter: blur(2px);
+}
+
+#ms-config-view .plugin-install-dialog {
+  width: 460px;
+  max-width: 92vw;
+  max-height: 80vh;
+  background: var(--card);
+  border-radius: 12px;
+  padding: 20px 22px;
+  box-sizing: border-box;
+  box-shadow: var(--dialog-shadow);
+  overflow-y: auto;
+}
+
+#ms-config-view .plugin-install-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.3px;
+  margin-bottom: 12px;
+}
+
+#ms-config-view .plugin-install-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+#ms-config-view .plugin-install-logo {
+  width: 44px;
+  height: 44px;
+  object-fit: contain;
+  flex: 0 0 auto;
+  border-radius: 6px;
+}
+
+#ms-config-view .plugin-install-logo-placeholder {
+  width: 44px;
+  height: 44px;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  border-radius: 6px;
+  background: var(--field);
+}
+
+#ms-config-view .plugin-install-meta {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+#ms-config-view .plugin-install-name {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0 0 2px;
+  color: var(--text);
+}
+
+#ms-config-view .plugin-install-version {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 0 0 2px;
+}
+
+#ms-config-view .plugin-install-author {
+  color: var(--muted);
+}
+
+#ms-config-view .plugin-install-desc {
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.5;
+  margin: 0;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+#ms-config-view .plugin-install-warnings {
+  margin-bottom: 12px;
+}
+
+#ms-config-view .plugin-install-warning {
+  font-size: 12px;
+  color: #b45a00;
+  background: #fff7e6;
+  border: 1px solid #ffd8a8;
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin-bottom: 6px;
+}
+
+/* 覆盖安装 + 后台运行中的提示（见搜索窗口同处注释） */
+#ms-config-view .plugin-install-running-notice {
+  font-size: 12px;
+  line-height: 1.6;
+  color: #1a6b46;
+  background: #eaf7f0;
+  border: 1px solid #bfe3d1;
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+}
+
+#ms-config-view .plugin-install-sync-notice {
+  font-size: 12px;
+  line-height: 1.65;
+  color: #1c4e80;
+  background: #eef5ff;
+  border: 1px solid #c5d9f5;
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+}
+
+#ms-config-view .sync-notice-title {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+#ms-config-view .sync-notice-list {
+  margin: 0;
+  padding-left: 18px;
+  list-style: disc;
+}
+
+#ms-config-view .sync-notice-list li {
+  margin-bottom: 2px;
+}
+
+#ms-config-view .plugin-install-perms h4 {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0 0 8px;
+  color: var(--text);
+}
+
+#ms-config-view .plugin-install-no-perms {
+  font-size: 12px;
+  color: var(--muted);
+  padding: 6px 0;
+}
+
+#ms-config-view .plugin-install-perm-group {
+  margin-bottom: 10px;
+}
+
+#ms-config-view .perm-group-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#ms-config-view .perm-group-risk {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: 10px;
+}
+
+#ms-config-view .perm-group-risk.risk-low {
+  color: #2a7;
+  background: #e8f5ec;
+}
+
+#ms-config-view .perm-group-risk.risk-medium {
+  color: #b8860b;
+  background: #fff8e1;
+}
+
+#ms-config-view .perm-group-risk.risk-high {
+  color: #c44;
+  background: #fdeaea;
+}
+
+#ms-config-view .perm-group-risk.risk-critical {
+  color: #a03030;
+  background: #ffe0e0;
+}
+
+#ms-config-view .plugin-install-perm-item {
+  font-size: 12px;
+  padding: 3px 0 3px 12px;
+  line-height: 1.5;
+}
+
+#ms-config-view .perm-item-name {
+  font-weight: 500;
+  color: var(--text);
+}
+
+#ms-config-view .perm-item-scope {
+  font-size: 11px;
+  color: var(--muted);
+  margin-left: 4px;
+}
+
+#ms-config-view .perm-item-desc {
+  display: block;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+#ms-config-view .plugin-install-actions {
+  margin-top: 18px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* 弹窗按钮：设置窗口有 #ms-config-view .cfg-btn 兜底（padding/圆角/配色），
+ * 这里只对齐搜索窗口的尺寸口径，保证两个窗口里弹窗按钮外观一致。 */
+#ms-config-view .plugin-install-actions .cfg-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  border-radius: 7px;
+  font-size: 13px;
+  font-family: inherit;
+  padding: 7px 14px;
+  color: var(--text);
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+
+#ms-config-view .plugin-install-actions .cfg-btn:hover {
+  border-color: var(--hover-border);
+  background: var(--hover-bg);
+}
+
+#ms-config-view .plugin-install-actions .cfg-btn.ghost {
+  color: var(--muted);
+}
+
+#ms-config-view .plugin-install-actions .cfg-btn.primary {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #fff;
+}
+
+#ms-config-view .plugin-install-actions .cfg-btn.primary:hover {
+  background: var(--brand-hover);
+  border-color: var(--brand-hover);
+}
+
+#ms-config-view .plugin-install-actions .cfg-btn:focus-visible {
+  outline: 2px solid rgba(91, 91, 214, 0.4);
+  outline-offset: 1px;
+}
+
+/* 暗色下警告 / 提示卡需要单独调色（设置的强制浅色/深色类挂在 html 上） */
+html.theme-dark #ms-config-view .plugin-install-warning {
+  color: #ffb366;
+  background: #2a2010;
+  border-color: #5c4018;
+}
+
+html.theme-dark #ms-config-view .plugin-install-running-notice {
+  color: #8fd7b3;
+  background: #12271d;
+  border-color: #235039;
+}
+
+html.theme-dark #ms-config-view .plugin-install-sync-notice {
+  color: #9dbdea;
+  background: #16243a;
+  border-color: #2c4372;
+}
+
 /* ========== 插件安装确认弹窗（搜索窗口） ========== */
 #my_search_box .plugin-install-overlay {
   position: fixed;
@@ -5142,6 +5441,19 @@ html.theme-dark .empty-state .empty-hint {
   border-radius: 6px;
   padding: 6px 10px;
   margin-bottom: 6px;
+}
+
+/* 覆盖安装时「插件正在运行 → 会先停止再安装」的提示：中性信息卡，
+ * 与黄色警告（校验问题）和蓝色同步提醒区分开，用绿色系表达「会自动处理」。 */
+#my_search_box .plugin-install-running-notice {
+  font-size: 12px;
+  line-height: 1.6;
+  color: #1a6b46;
+  background: #eaf7f0;
+  border: 1px solid #bfe3d1;
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
 }
 
 /* 「数据同步」提醒：插件申请了 sync 权限时出现，单独讲清波及范围
@@ -5257,6 +5569,59 @@ html.theme-dark .empty-state .empty-hint {
   gap: 8px;
 }
 
+/* 弹窗按钮（安装 / 取消）。
+ *
+ * 与 .token-actions 完全同源的坑：PluginInstallDialog 复用了 `.cfg-btn` /
+ * `.cfg-btn.primary` / `.cfg-btn.ghost` 类名，而设置窗口那套规则全挂在
+ * `#ms-config-view` 作用域下（搜索窗口没有这个容器）。结果在搜索窗口里按钮
+ * **完全没有样式**——只有全局 `* { padding: 0 }` 复位，文字紧贴边框，
+ * 既没有左右内边距，也是浏览器默认的灰底凸起样式。
+ *
+ * 这里按 MessageDialog（.token-actions .cfg-btn）同一套视觉语言补一份，
+ * 颜色写死而不引用变量：--brand/--line 等定义在 `html.ms-config-root` 上，
+ * 搜索窗口用不到。选择器带上 `.plugin-install-actions` 限定，避免影响弹窗内
+ * 其它元素。
+ */
+#my_search_box .plugin-install-actions .cfg-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid #e3e5e8;
+  background: #ffffff;
+  border-radius: 7px;
+  font-size: 13px;
+  font-family: inherit;
+  padding: 7px 14px;
+  color: #303133;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+
+#my_search_box .plugin-install-actions .cfg-btn:hover {
+  border-color: #c9ccd4;
+  background: #f7f8fa;
+}
+
+#my_search_box .plugin-install-actions .cfg-btn.ghost {
+  color: #7a828e;
+}
+
+#my_search_box .plugin-install-actions .cfg-btn.primary {
+  background: #5b5bd6;
+  border-color: #5b5bd6;
+  color: #ffffff;
+}
+
+#my_search_box .plugin-install-actions .cfg-btn.primary:hover {
+  background: #4a4ab8;
+  border-color: #4a4ab8;
+}
+
+#my_search_box .plugin-install-actions .cfg-btn:focus-visible {
+  outline: 2px solid rgba(91, 91, 214, 0.4);
+  outline-offset: 1px;
+}
+
 /* 暗色主题 */
 html.theme-dark #my_search_box .plugin-install-dialog {
   background: #212429;
@@ -5295,6 +5660,43 @@ html.theme-dark #my_search_box .plugin-install-sync-notice {
   border-color: #2c4372;
 }
 
+html.theme-dark #my_search_box .plugin-install-running-notice {
+  color: #8fd7b3;
+  background: #12271d;
+  border-color: #235039;
+}
+
 html.theme-dark #my_search_box .plugin-install-logo-placeholder {
   background: #2a2d33;
+}
+
+/* 弹窗按钮（暗色）：与 .token-actions .cfg-btn 同一套口径 */
+html.theme-dark #my_search_box .plugin-install-actions .cfg-btn {
+  border-color: #33363d;
+  background: #212429;
+  color: #e4e6ea;
+}
+
+html.theme-dark #my_search_box .plugin-install-actions .cfg-btn:hover {
+  border-color: #4a4f58;
+  background: #2a2d33;
+}
+
+html.theme-dark #my_search_box .plugin-install-actions .cfg-btn.ghost {
+  color: #98a0ab;
+}
+
+html.theme-dark #my_search_box .plugin-install-actions .cfg-btn.primary {
+  background: #5b5bd6;
+  border-color: #5b5bd6;
+  color: #ffffff;
+}
+
+html.theme-dark #my_search_box .plugin-install-actions .cfg-btn.primary:hover {
+  background: #4a4ab8;
+  border-color: #4a4ab8;
+}
+
+html.theme-dark #my_search_box .plugin-install-actions .cfg-btn:focus-visible {
+  outline-color: rgba(91, 91, 214, 0.5);
 }

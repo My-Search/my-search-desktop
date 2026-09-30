@@ -19,6 +19,8 @@ const props = defineProps<{
   warnings: string[];
   /** 已安装的版本（null / undefined = 未安装过该插件） */
   installedVersion?: string | null;
+  /** 该插件当前是否在后台运行（升级时据此提示「将先停止再安装」） */
+  running?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -66,6 +68,17 @@ const confirmLabel = computed(() => {
   if (cmp > 0) return "升级";
   return "安装";
 });
+
+/**
+ * 是否展示「将强制停止正在运行的进程」提示。
+ *
+ * 覆盖安装（同版本重装 / 升级）时，Rust 侧必须先停掉该插件的后台进程，
+ * 否则 Windows 上运行中的程序占着文件句柄、替换目录会失败。这个副作用要提前
+ * 告诉用户，避免他看到「更新中 → 进程被重启」时以为出了问题。
+ */
+const showForceStopNotice = computed(
+  () => !!props.installedVersion && props.running === true
+);
 </script>
 
 <template>
@@ -111,6 +124,12 @@ const confirmLabel = computed(() => {
         >
           ⚠️ {{ w }}
         </div>
+      </div>
+
+      <!-- 强制停止提示：覆盖安装时该插件正在后台运行，落盘前会先停它 -->
+      <div v-if="showForceStopNotice" class="plugin-install-running-notice">
+        ⏻ 该插件正在后台运行，安装前会<strong>自动停止</strong>其进程，
+        安装完成后自动用新版本重启。
       </div>
 
       <!-- 数据同步提醒：申请了 sync 权限时才出现，说明「会动你云端的哪一块数据」 -->

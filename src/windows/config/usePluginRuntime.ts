@@ -33,6 +33,7 @@ import { syncRecordGateway, syncShortcutActions } from "../../lib/plugins/gatewa
 import { parsePluginManifest, type PluginManifest } from "../../lib/plugins/manifest.ts";
 import { isKnownPermission } from "../../lib/plugins/permissions.ts";
 import { isFreshEvent, planReload } from "../../lib/plugins/dev-reload.ts";
+import { markPluginFrontendRestart } from "../../lib/plugins/restart.ts";
 import {
   createPluginRecord,
   findPlugin,
@@ -230,6 +231,10 @@ export function usePluginRuntime() {
         preserveUserChoices: input.preserveUserChoices !== false,
       });
       persist();
+      // 覆盖安装（升级 / 重装）成功：保活中的前端会话仍跑着旧界面旧脚本，
+      // 写「前端重启标记」让搜索窗口下次打开 / 呼出时重新挂载——与「重启插件」
+      // 同一条路径。（后端进程的停止与用新版本重建由 Rust 侧 plugin_install 负责。）
+      if (prev) markPluginFrontendRestart(merged.id);
       await reconcile(merged.id);
       return merged;
     } finally {

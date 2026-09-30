@@ -341,6 +341,34 @@ export async function onShortcutClipboard(
 }
 
 /**
+ * 监听「插件自定义动作」快捷键事件（Rust 端注册的 `plugin:<id>:<name>` 热键按下时广播）。
+ *
+ * 主窗口据此打开该插件视图，并把动作名（去掉 `plugin:` 前缀的本地名）派发给插件脚本
+ * （插件用 `ms.shortcuts.onAction(name, fn)` 接收）。
+ */
+export async function onShortcutPluginAction(
+  handler: (pluginId: string, action: string) => void
+): Promise<UnlistenFn | null> {
+  if (!isTauri) return null;
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    return await listen<{ pluginId?: unknown; action?: unknown }>(
+      "my-search://shortcut-plugin-action",
+      (event) => {
+        const id = event.payload?.pluginId;
+        const action = event.payload?.action;
+        if (typeof id === "string" && id !== "" && typeof action === "string" && action !== "") {
+          handler(id, action);
+        }
+      }
+    );
+  } catch (e) {
+    console.warn("监听插件动作快捷键事件失败:", e);
+    return null;
+  }
+}
+
+/**
  * 监听「剪贴板历史有更新」事件（Rust 原生监听到剪贴板变更后广播，无 payload）。
  * 插件视图开着时据此刷新列表；事件本身不带数据，真实内容由前端调
  * `clipboardHistoryList()` 主动拉取（见插件 ui/index.js）。

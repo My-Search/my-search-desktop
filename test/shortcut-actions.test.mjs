@@ -13,7 +13,7 @@
  *
  * 用法: node test/shortcut-actions.test.mjs
  */
-import { availableShortcutActions, shortcutActionsOf } from "../src/lib/plugins/shortcut-actions.ts";
+import { availableShortcutActions, shortcutActionsOf, resolveShortcutActionOwner } from "../src/lib/plugins/shortcut-actions.ts";
 
 let failures = 0;
 
@@ -133,6 +133,29 @@ check(
   "未知插件（无声明、不在迁移桥）不提供动作",
   availableShortcutActions(reg(rec("com.other.plugin", null))),
   []
+);
+
+// 9) 插件自定义动作：清单写本地名，全局 id 拼成 plugin:<id>:<name>
+const custom = availableShortcutActions(
+  reg(rec("com.mysearch.recorder", { action: "record-toggle", title: "录屏（开始 / 停止）", defaultShortcut: "ctrl+alt+r" }))
+);
+check("自定义动作拼成命名空间 id", custom, [
+  {
+    action: "plugin:com.mysearch.recorder:record-toggle",
+    title: "录屏（开始 / 停止）",
+    defaultShortcut: "ctrl+alt+r",
+    pluginId: "com.mysearch.recorder",
+  },
+]);
+check(
+  "resolveShortcutActionOwner 解析自定义动作",
+  resolveShortcutActionOwner("plugin:com.mysearch.recorder:record-toggle"),
+  { pluginId: "com.mysearch.recorder", name: "record-toggle" }
+);
+check(
+  "resolveShortcutActionOwner 解析宿主原生动作",
+  resolveShortcutActionOwner("screenshot"),
+  { pluginId: null, name: "screenshot" }
 );
 
 console.log("");

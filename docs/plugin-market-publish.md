@@ -82,22 +82,51 @@ my-plugin/
 
 #### （可选）声明全局快捷键作用类型 `contributes.shortcut`
 
-若你的插件对应一个**宿主动作**（目前仅 `screenshot` 截图 / `clipboard` 剪贴板历史），
-可用 `contributes.shortcut` 让它以「作用类型」出现在「设置 → 快捷键」——**装了你的插件
-才出现、卸载即移除**，用户无需自己去代码里找热键：
+用 `contributes.shortcut` 让插件提供一个「作用类型」出现在「设置 → 快捷键」——
+**装了你的插件才出现、卸载即移除**，用户无需自己去代码里找热键。`action` 有两种写法：
+
+**A. 宿主原生动作的保留名**（`screenshot` 截图 / `clipboard` 剪贴板历史）——
+执行器在宿主侧，插件只是「认领」其中一个能力：
 
 ```jsonc
 "contributes": {
-  "shortcut": {                        // 单个对象或数组（与 searchItem 一致）
-    "action": "screenshot",            // 宿主动作 id（当前仅 screenshot / clipboard）
-    "title": "截图（框选 + 标注）",      // 该作用类型在下拉里的展示标题
+  "shortcut": {
+    "action": "screenshot",            // 宿主保留名：screenshot / clipboard
+    "title": "截图（框选 + 标注）",      // 下拉里的展示标题
     "defaultShortcut": "ctrl+alt+x"    // 可选：装了本插件后自动添加的默认组合键（被占用则跳过）
   }
 }
 ```
 
-> 执行器由宿主提供：插件只声明「提供这个动作」及标题 / 默认键；`action` 受宿主白名单
-> 约束，写错（未知 action、缺 title、defaultShortcut 为空）会在安装校验阶段被拒绝。
+**B. 插件自己的动作名**（小写字母开头，仅含小写字母 / 数字 / `-` / `_`）——
+执行器在**插件自己**里面（后台进程 + 界面）。用户按下后宿主会打开/恢复你的插件视图，
+并把动作名派发给插件脚本，插件用 `ms.shortcuts.onAction` 接收：
+
+```jsonc
+"contributes": {
+  "shortcut": {
+    "action": "record-toggle",         // 自定义动作名（宿主内部拼成 plugin:<你的id>:record-toggle）
+    "title": "录屏（开始 / 停止）",
+    "defaultShortcut": "ctrl+alt+r"
+  }
+}
+```
+
+```js
+// ui/index.js —— 接收宿主派发的动作
+if (ms.shortcuts && typeof ms.shortcuts.onAction === "function") {
+  ms.shortcuts.onAction("record-toggle", function () {
+    // 开始 / 停止录制……
+  });
+}
+```
+
+> 说明：
+> - 单个对象或数组（与 `searchItem` 一致）；`title` 必填，`defaultShortcut` 可选。
+> - 动作名不得以宿主保留前缀 `plugin:` 开头（安装校验会拒绝）。
+> - 可用性随安装状态动态变化；默认键被别的动作占用时会跳过（不静默抢键）。
+> - 宿主原生动作（`screenshot` / `clipboard`）由宿主执行；自定义动作必须由插件脚本
+>   通过 `ms.shortcuts.onAction` 自己实现，否则按下只会提示「插件未响应动作」。
 
 ### 3. 写界面 `ui/detail.html`
 

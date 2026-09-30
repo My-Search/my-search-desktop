@@ -224,6 +224,8 @@ export interface PluginInstallConfirmRequest {
   installedVersion: string | null;
   /** 安装来源（市场卡片上点的是「安装」还是「更新」；仅用于文案） */
   action: "install" | "update";
+  /** 该插件当前是否在后台运行（覆盖安装时弹窗提示「会先停止再安装」） */
+  running?: boolean;
 }
 
 /**
@@ -419,6 +421,73 @@ function addNotificationHandler(
 /** 清理某插件的所有通知监听（视图销毁时调用） */
 function clearNotificationHandlers(pluginId: string): void {
   notificationHandlers.delete(pluginId);
+}
+
+/* ============================================================
+ * 插件自定义快捷键动作（host → 插件脚本）
+ *
+ * 插件在清单里用 `contributes.shortcut` 声明动作名（如 `record-toggle`），
+ * 宿主把它们注册成全局热键（`plugin:<插件id>:<动作名>`）。用户按下后，
+ * 宿主打开/恢复该插件视图，并把「动作名」派发给插件脚本——插件用
+ * `ms.shortcuts.onAction(name, fn)` 注册处理器来接。
+ *
+ * 与「后端通知」的区别：那条是插件**自己的后端进程**发通知，这条是**宿主**把
+ * 全局热键的动作转给插件脚本（插件可能没有后端）。因此单独一张表。
+ * ============================================================ */
+
+/** 插件动作处理器：pluginId → (本地动作名 → Set<handler>) */
+const shortcutActionHandlers = new Map<string, Map<string, Set<() => void>>>();
+
+/**
+ * 为某个插件注册一个「自定义动作」处理器（插件脚本用 `ms.shortcuts.onAction` 调）。
+ * 返回取消注册的函数。同一动作可注册多个处理器（都会被执行）。
+ */
+function addShortcutActionHandler(
+  pluginId: string,
+  action: string,
+  handler: () => void,
+): () => void {
+  if (!action || typeof handler !== "function") return () => {};
+  let byAction = shortcutActionHandlers.get(pluginId);
+  if (!byAction) {
+    byAction = new Map();
+    shortcutActionHandlers.set(pluginId, byAction);
+  }
+  let handlers = byAction.get(action);
+  if (!handlers) {
+    handlers = new Set();
+    byAction.set(action, handlers);
+  }
+  handlers.add(handler);
+  return () => {
+    if (handlers) handlers.delete(handler);
+    if (handlers?.size === 0) byAction?.delete(action);
+    if (byAction?.size === 0) shortcutActionHandlers.delete(pluginId);
+  };
+}
+
+/** 清理某插件的所有动作处理器（视图销毁时调用） */
+function clearShortcutActionHandlers(pluginId: string): void {
+  shortcutActionHandlers.delete(pluginId);
+}
+
+/**
+ * 把一次「插件自定义动作」派发给该插件已注册的处理器。
+ * 返回是否至少有一个处理器接收（false = 插件没注册该动作，调用方可提示）。
+ */
+export function dispatchShortcutAction(pluginId: string, action: string): boolean {
+  const byAction = shortcutActionHandlers.get(pluginId);
+  if (!byAction) return false;
+  const handlers = byAction.get(action);
+  if (!handlers || handlers.size === 0) return false;
+  for (const h of [...handlers]) {
+    try {
+      h();
+    } catch (e) {
+      console.warn(`[插件 ${pluginId}] 快捷键动作处理器异常（${action}）:`, e);
+    }
+  }
+  return true;
 }
 
 /* ============================================================
@@ -1620,6 +1689,34 @@ export function createHostApi(pluginId: string, ctx: PluginHostContext): Record<
       },
     },
 
+    /** 自定义快捷键动作（插件清单 `contributes.shortcut` 声明，宿主注册全局热键） */
+    shortcuts: {
+      /**
+       * 注册一个自定义动作的处理器。`action` 是清单里声明的**本地动作名**
+       * （如 `record-toggle`，不含 `plugin:` 前缀）。用户按下对应的全局热键时，
+       * 宿主会打开/恢复本插件视图并调用该处理器。
+       * 返回取消注册的函数。
+       */
+      onAction: (action: string, handler: () => void): (() => void) =>
+        addShortcutActionHandler(pluginId, String(action ?? ""), handler),
+
+      /** 取消某个动作的处理器 */
+      offAction: (action: string, handler?: () => void): void => {
+        const byAction = shortcutActionHandlers.get(pluginId);
+        const handlers = byAction?.get(String(action ?? ""));
+        if (!handlers) return;
+        if (handler) handlers.delete(handler);
+        else handlers.clear();
+        if (handlers.size === 0) byAction?.delete(String(action ?? ""));
+        if (byAction?.size === 0) shortcutActionHandlers.delete(pluginId);
+      },
+
+      /** 清理所有动作处理器（视图销毁时由宿主调用） */
+      _clearActionHandlers: (): void => {
+        clearShortcutActionHandlers(pluginId);
+      },
+    },
+
     /** 写日志（落到插件日志文件，面板可查看） */
     log: (level: "info" | "warn" | "error", ...args: unknown[]) => {
       const text = args.map((a) => (typeof a === "string" ? a : safeStringify(a))).join(" ");
@@ -1743,6 +1840,17 @@ function createMarketApi(
     // 落盘前先问用户：展示清单、权限分组、校验警告与已装版本。
     const mf = prepared.manifest;
     const installedVersion = findPlugin(loadRegistry(), mf.id)?.version ?? null;
+    // 覆盖安装时后台是否在跑：在弹窗里提前告知「会先停止再安装」（真停由 Rust 侧做）
+    let running = false;
+    if (installedVersion) {
+      try {
+        const { listPluginBackends } = await import("./ipc.ts");
+        const st = (await listPluginBackends()).find((s) => s.pluginId === mf.id)?.status;
+        running = st === "running" || st === "starting";
+      } catch (e) {
+        /* 查询不到按未运行处理（浏览器调试 / 无 Rust 侧） */
+      }
+    }
     const confirmed = await ctx.confirmPluginInstall({
       manifest: mf,
       iconUrl: iconUrlOf(prepared),
@@ -1750,6 +1858,7 @@ function createMarketApi(
       warnings: prepared.warnings,
       installedVersion,
       action,
+      running,
     });
     if (!confirmed) return { ok: false as const, cancelled: true };
 
@@ -1766,6 +1875,25 @@ function createMarketApi(
     });
     upsertPlugin(reg, record, { preserveUserChoices: false });
     saveRegistry(reg);
+    // 覆盖安装（action="update"）：该插件若在后台运行，Rust 侧的 plugin_install
+    // 会先强制停进程再落盘、随后用新版本拉回；这里补充两件事——
+    //   1) 下发新网关（新清单可能改了后台入口 / 权限）；
+    //   2) 写前端重启标记，让搜索窗口丢掉保活中的旧界面会话，下次打开重新挂载。
+    if (action === "update") {
+      try {
+        const { markPluginFrontendRestart } = await import("./restart.ts");
+        markPluginFrontendRestart(id);
+      } catch (e) {
+        console.warn("[插件市场] 写前端重启标记失败:", e);
+      }
+    }
+    try {
+      const { syncRecordGateway } = await import("./gateway.ts");
+      const merged = findPlugin(loadRegistry(), id);
+      if (merged) await syncRecordGateway(merged);
+    } catch (e) {
+      console.warn("[插件市场] 安装后网关同步失败:", e);
+    }
     // 市场里可能装了提供快捷键动作的插件（如剪贴板历史）：立刻把可用动作下发给宿主
     try {
       const { syncShortcutActions } = await import("./gateway.ts");

@@ -48,8 +48,8 @@
       "plugin": "official-plugins/com.mysearch.recorder",
       "official": false,
       "createTime": "2026-09-27T01:37:44.089Z",
-      "latestVersionUpdateTime": "2026-09-28T14:44:02.046Z",
-      "lastVersion": "1.1.0"
+      "latestVersionUpdateTime": "2026-09-30T03:02:55.544Z",
+      "lastVersion": "1.2.0"
     },
     {
       "plugin": "official-plugins/com.zhuangjie.screenshot",

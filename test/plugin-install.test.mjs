@@ -395,22 +395,52 @@ const ok = (cond, name, extra = "") => {
     "shortcut 支持数组形态"
   );
 
-  // 未知 action / 缺 title / action 重复 / 非法 defaultShortcut 都要拒绝
+  // 自定义动作（本地名）也要能通过：宿主拼成 plugin:<id>:<name>
+  const customAction = parsePluginManifest(
+    JSON.stringify({
+      id: "com.example.xe",
+      name: "x",
+      version: "1.0.0",
+      apiVersion: 1,
+      contributes: { shortcut: { action: "record-toggle", title: "录屏", defaultShortcut: "ctrl+alt+r" } },
+    }),
+    isKnownPermission
+  );
+  ok(customAction.ok, "自定义动作名通过", customAction.ok ? "" : customAction.errors.join(","));
+  ok(
+    customAction.ok &&
+      listShortcutActions(customAction.manifest)[0].action === "record-toggle",
+    "自定义动作名原样保留在清单里（命名空间由前端拼）"
+  );
+
+  // 非法动作名（大写 / 空格）、保留前缀 plugin: 都要拒绝
   const badShortcutAction = parsePluginManifest(
     JSON.stringify({
       id: "com.example.xa",
       name: "x",
       version: "1.0.0",
       apiVersion: 1,
-      contributes: { shortcut: { action: "run-shell", title: "乱来" } },
+      contributes: { shortcut: { action: "Run Shell", title: "乱来" } },
     }),
     isKnownPermission
   );
-  ok(!badShortcutAction.ok, "未知 shortcut.action → 拒绝");
+  ok(!badShortcutAction.ok, "非法 shortcut.action 名 → 拒绝");
   ok(
-    describeManifestErrors(badShortcutAction.errors).some((m) => m.includes("不受支持")),
-    "未知 action 文案可读"
+    describeManifestErrors(badShortcutAction.errors).some((m) => m.includes("不合法")),
+    "非法动作名文案可读"
   );
+
+  const reservedPrefix = parsePluginManifest(
+    JSON.stringify({
+      id: "com.example.xf",
+      name: "x",
+      version: "1.0.0",
+      apiVersion: 1,
+      contributes: { shortcut: { action: "plugin:com.other:evil", title: "伪造" } },
+    }),
+    isKnownPermission
+  );
+  ok(!reservedPrefix.ok, "带 plugin: 前缀的动作名 → 拒绝（保留前缀）");
 
   const missingTitle = parsePluginManifest(
     JSON.stringify({

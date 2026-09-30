@@ -24,6 +24,7 @@ import { escapeHtml } from "../../../lib/util";
 import { comboToString, interpretKeydown, shortcutToCaps, validateCombo } from "../../../lib/shortcut";
 import {
   canRemoveBinding,
+  describeBinding,
   isBindingComplete,
   isPluginShortcutAction,
   MAX_SHORTCUT_BINDINGS,
@@ -31,7 +32,6 @@ import {
   normalizeQuickFilterHeader,
   parseBindings,
   SEARCH_BOUNDARY,
-  SHORTCUT_ACTION_LABELS,
   validateBindings,
   type ShortcutAction,
   type ShortcutBinding,
@@ -88,6 +88,16 @@ const plugins = ref<PluginOption[]>([]);
  * 同一份数据也用于把「刚被卸载、但绑定还在（等宿主同步清理）」的动作标注出来。
  */
 const pluginActions = ref<AvailableShortcutAction[]>([]);
+
+/** 插件动作的展示标题（来自已安装插件的清单）；查不到返回空串 */
+function actionTitleOf(action: string): string {
+  return pluginActions.value.find((a) => a.action === action)?.title ?? "";
+}
+
+/** 插件名解析（给 describeBinding 展示「打开插件」的目标名） */
+function pluginNameOf(id: string): string | null {
+  return plugins.value.find((p) => p.id === id)?.name ?? null;
+}
 
 /**
  * 读取已安装插件（仅取面板需要的字段）。
@@ -147,10 +157,8 @@ function actionOptionsFor(row: ShortcutBinding | null): ActionOption[] {
   }
   // 行引用的插件动作当前不可用（插件已卸载）→ 补一条，标明「已卸载」
   if (row && isPluginShortcutAction(row.action) && !seen.has(row.action)) {
-    opts.push({
-      value: row.action,
-      label: `${SHORTCUT_ACTION_LABELS[row.action]}（插件已卸载）`,
-    });
+    const title = actionTitleOf(row.action) || describeBinding(row);
+    opts.push({ value: row.action, label: `${title}（插件已卸载）` });
   }
   return opts;
 }

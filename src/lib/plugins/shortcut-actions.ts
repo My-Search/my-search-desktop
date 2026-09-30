@@ -6,9 +6,15 @@
  * 现在改由插件清单 `contributes.shortcut` 声明，宿主按**当前已安装**的插件
  * 计算可用动作，再下发给 Rust（`sync_plugin_shortcut_actions`）做注册与自愈。
  *
+ * 两类动作：
+ *   1. **宿主原生**（清单写保留名 `screenshot` / `clipboard`）：执行器在宿主侧，
+ *      全局 id 就是保留名本身；
+ *   2. **插件自定义**（清单写本地动作名，如 `record-toggle`）：执行器在插件自己
+ *      里面，全局 id 拼成 `plugin:<插件id>:<本地名>`（宿主据此把动作转发回插件）。
+ *
  * 口径：
  *   - 可用性以「**已安装**」为准，与「打开插件」绑定一致：插件被禁用时不删绑定，
- *     只是按下去会提示「已禁用」（截图这类宿主原生动作则照常可用）；
+ *     只是按下去会提示「已禁用」；
  *   - 只看非 legacy 记录（legacy 是历史 `[script]` 投影，不提供插件动作）；
  *   - 同一个 action 出现多次（理论上不该有）时按插件 id 稳定取第一个，
  *     避免顺序抖动导致下发结果不稳定。
@@ -16,10 +22,16 @@
 
 import { listShortcutActions, type PluginManifest } from "./manifest.ts";
 import type { PluginRecord, PluginRegistryFile } from "./registry.ts";
+import {
+  isHostNativePluginAction,
+  pluginDefinedActionId,
+  pluginDefinedActionName,
+  pluginDefinedActionOwner,
+} from "../shortcut-bindings.ts";
 
 /** 一个可用的插件快捷键动作 */
 export interface AvailableShortcutAction {
-  /** 宿主动作 id（目前仅 screenshot / clipboard） */
+  /** 全局动作 id：宿主原生保留名，或 `plugin:<插件id>:<本地名>` */
   action: string;
   /** 下拉里的展示标题（来自清单 `contributes.shortcut.title`） */
   title: string;
@@ -29,10 +41,13 @@ export interface AvailableShortcutAction {
   pluginId: string;
 }
 
-/** 从单条插件记录里取它声明的快捷键动作 */
+/** 从单条插件记录里取它声明的快捷键动作（本地动作名 → 全局 id） */
 export function shortcutActionsOf(rec: PluginRecord): AvailableShortcutAction[] {
   const declared = listShortcutActions(rec.manifest as PluginManifest).map((s) => ({
-    action: s.action,
+    // 宿主原生名原样用；其余按插件命名空间拼成全局 id
+    action: isHostNativePluginAction(s.action)
+      ? s.action
+      : pluginDefinedActionId(rec.id, s.action),
     title: s.title,
     defaultShortcut: s.defaultShortcut ?? "",
     pluginId: rec.id,
@@ -79,4 +94,17 @@ export function availableShortcutActions(reg: PluginRegistryFile): AvailableShor
     }
   }
   return [...byAction.values()].sort((a, b) => a.action.localeCompare(b.action));
+}
+
+/**
+ * 把「全局动作 id」翻回插件侧能用的信息：
+ *   - 宿主原生动作 → { pluginId: null, name: 动作名 }（执行器在宿主侧）；
+ *   - 插件自定义动作 → { pluginId, name: 本地动作名 }（转发给插件脚本）。
+ * 供快捷键面板 / 事件分发复用。
+ */
+export function resolveShortcutActionOwner(
+  action: string
+): { pluginId: string | null; name: string } {
+  if (isHostNativePluginAction(action)) return { pluginId: null, name: action };
+  return { pluginId: pluginDefinedActionOwner(action), name: pluginDefinedActionName(action) ?? action };
 }

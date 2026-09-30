@@ -487,6 +487,8 @@ const installDialogPerms = ref<PermissionGroupBlock[]>([]);
 const installDialogWarnings = ref<string[]>([]);
 /** 已安装版本（弹窗按钮据此显示 安装/重新安装/升级；null = 未安装） */
 const installDialogInstalledVersion = ref<string | null>(null);
+/** 该插件当前是否在后台运行（覆盖安装时弹窗提示「先停止再安装」） */
+const installDialogRunning = ref(false);
 /** 待安装的预处理结果（确认后直接落盘） */
 let pendingPrepared: Awaited<ReturnType<typeof preparePackageFromBase64>> | null = null;
 /** 待安装的 .mspp 文件路径（写入插件来源 source.ref） */
@@ -527,6 +529,9 @@ async function installFromPath(path: string): Promise<void> {
     installDialogWarnings.value = prepared.warnings;
     // 直读注册表取已安装版本（另一窗口可能刚装过，比 rt 内存态更新）
     installDialogInstalledVersion.value = findPlugin(loadRegistry(), mf.id)?.version ?? null;
+    // 后台是否在跑：覆盖安装时弹窗提示「会先停止再安装」
+    const st = rt.runtimeOf(mf.id).status;
+    installDialogRunning.value = st === "running" || st === "starting";
     installDialogVisible.value = true;
   } catch (e) {
     props.notify(`安装失败: ${String((e as Error)?.message ?? e)}`, "error");
@@ -563,6 +568,7 @@ async function onInstallConfirm(): Promise<void> {
     installDialogManifest.value = null;
     installDialogIcon.value = null;
     installDialogInstalledVersion.value = null;
+    installDialogRunning.value = false;
   }
 }
 
@@ -574,6 +580,7 @@ function onInstallCancel(): void {
   installDialogManifest.value = null;
   installDialogIcon.value = null;
   installDialogInstalledVersion.value = null;
+  installDialogRunning.value = false;
 }
 
 async function installFromFile(): Promise<void> {
@@ -1049,6 +1056,7 @@ function durFrom(ts: number | null): string {
       :perm-blocks="installDialogPerms"
       :warnings="installDialogWarnings"
       :installed-version="installDialogInstalledVersion"
+      :running="installDialogRunning"
       @confirm="onInstallConfirm"
       @cancel="onInstallCancel"
     />

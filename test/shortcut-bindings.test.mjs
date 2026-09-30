@@ -27,6 +27,10 @@ import {
   normalizeQuickFilterHeader,
   actionRequiresTarget,
   isPluginShortcutAction,
+  isPluginDefinedAction,
+  pluginDefinedActionId,
+  pluginDefinedActionOwner,
+  pluginDefinedActionName,
   PLUGIN_SHORTCUT_ACTIONS,
   DEFAULT_TOGGLE_SHORTCUT,
   SEARCH_BOUNDARY,
@@ -481,6 +485,43 @@ check(
   "无标题解析器时退回内置兜底文案",
   describeBinding({ shortcut: "ctrl+alt+v", action: "clipboard", target: null }, undefined, () => null),
   "剪贴板历史"
+);
+
+// ---- 插件自定义动作（plugin:<id>:<name>） ----
+check("自定义动作进 isPluginShortcutAction", isPluginShortcutAction("plugin:com.a.b:record-toggle"), true);
+check("自定义动作是 plugin 命名空间", isPluginDefinedAction("plugin:com.a.b:record-toggle"), true);
+check("宿主原生不算 plugin 命名空间", isPluginDefinedAction("screenshot"), false);
+check("拼自定义动作 id", pluginDefinedActionId("com.a.b", "record-toggle"), "plugin:com.a.b:record-toggle");
+check("取自定义动作的所属插件", pluginDefinedActionOwner("plugin:com.a.b:record-toggle"), "com.a.b");
+check("取自定义动作的动作名", pluginDefinedActionName("plugin:com.a.b:record-toggle"), "record-toggle");
+check("缺少动作名 → owner 为 null", pluginDefinedActionOwner("plugin:com.a.b:"), null);
+check("无冒号 → name 为 null", pluginDefinedActionName("plugin:abc"), null);
+check(
+  "自定义动作无标题解析器时退化为 id",
+  describeBinding({ shortcut: "ctrl+alt+r", action: "plugin:com.a.b:record-toggle", target: null }),
+  "plugin:com.a.b:record-toggle"
+);
+check(
+  "自定义动作有标题解析器时用清单标题",
+  describeBinding(
+    { shortcut: "ctrl+alt+r", action: "plugin:com.a.b:record-toggle", target: null },
+    undefined,
+    () => "录屏（开始 / 停止）"
+  ),
+  "录屏（开始 / 停止）"
+);
+check(
+  "自定义动作可通过校验",
+  validateBindings([
+    { shortcut: "ctrl+alt+s", action: "toggle-window", target: null },
+    { shortcut: "ctrl+alt+r", action: "plugin:com.a.b:record-toggle", target: null },
+  ]).ok,
+  true
+);
+check(
+  "自定义动作解析往返：target 归一为 null",
+  parseBinding({ shortcut: "ctrl+alt+r", action: "plugin:com.a.b:record-toggle", target: "x" }),
+  { shortcut: "ctrl+alt+r", action: "plugin:com.a.b:record-toggle", target: null }
 );
 
 console.log("");

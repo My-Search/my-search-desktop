@@ -1,7 +1,7 @@
 {
   "id": "com.mysearch.recorder",
   "name": "录屏与水印",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "apiVersion": 1,
   "minAppVersion": "7.9.15",
   "author": "zhuangjie",
@@ -33,6 +33,11 @@
       "mode": "inlay",
       "closeBehavior": "minimize",
       "theme": "inherit"
+    },
+    "shortcut": {
+      "action": "record-toggle",
+      "title": "录屏（开始 / 停止）",
+      "defaultShortcut": "ctrl+alt+r"
     }
   },
   "backend": {

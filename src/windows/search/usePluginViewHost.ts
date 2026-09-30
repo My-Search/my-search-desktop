@@ -372,6 +372,11 @@ export function usePluginViewHost(opts: PluginViewHostOptions) {
       if (ui && typeof ui._clearThemeProvider === "function") {
         (ui._clearThemeProvider as () => void)();
       }
+      // 自定义快捷键动作处理器（ms.shortcuts.onAction）：脚本没了，处理器也失效
+      const shortcuts = session.api?.shortcuts as Record<string, unknown> | undefined;
+      if (shortcuts && typeof shortcuts._clearActionHandlers === "function") {
+        (shortcuts._clearActionHandlers as () => void)();
+      }
     } catch (e) {
       /* ignore */
     }

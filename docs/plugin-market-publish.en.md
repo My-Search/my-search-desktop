@@ -83,24 +83,54 @@ my-plugin/
 
 #### (Optional) Declare a global shortcut action `contributes.shortcut`
 
-If your plugin corresponds to a **host action** (currently `screenshot` / `clipboard`),
-declare `contributes.shortcut` so it appears as an "action type" in Settings → Shortcuts.
-It shows up **only while your plugin is installed** and is removed on uninstall, so users
-never have to hunt for the hotkey in code:
+Use `contributes.shortcut` to expose an "action type" in Settings → Shortcuts. It shows up
+**only while your plugin is installed** and is removed on uninstall, so users never have to
+hunt for the hotkey in code. `action` has two forms:
+
+**A. A reserved host-native name** (`screenshot` / `clipboard`) — the executor lives in the
+host; the plugin merely claims one of these capabilities:
 
 ```jsonc
 "contributes": {
-  "shortcut": {                        // single object or array (same as searchItem)
-    "action": "screenshot",            // host action id (currently screenshot / clipboard)
+  "shortcut": {
+    "action": "screenshot",            // reserved host name: screenshot / clipboard
     "title": "Screenshot (select + annotate)", // label shown in the action-type dropdown
     "defaultShortcut": "ctrl+alt+x"    // optional: default combo added when installed (skipped if taken)
   }
 }
 ```
 
-> The executor is provided by the host: the plugin only declares "I provide this action"
-> plus its title / default key. `action` is validated against a host allowlist, so an
-> unknown action, a missing title or an empty `defaultShortcut` is rejected at install time.
+**B. Your own action name** (starts with a lowercase letter; only lowercase letters, digits,
+`-` and `_`) — the executor lives **inside your plugin** (backend process + UI). When the user
+presses the hotkey, the host opens/restores your plugin view and dispatches the action name to
+your plugin script, which receives it via `ms.shortcuts.onAction`:
+
+```jsonc
+"contributes": {
+  "shortcut": {
+    "action": "record-toggle",         // local name (host builds plugin:<your-id>:record-toggle)
+    "title": "Recording (start / stop)",
+    "defaultShortcut": "ctrl+alt+r"
+  }
+}
+```
+
+```js
+// ui/index.js — receive the action dispatched by the host
+if (ms.shortcuts && typeof ms.shortcuts.onAction === "function") {
+  ms.shortcuts.onAction("record-toggle", function () {
+    // start / stop recording…
+  });
+}
+```
+
+> Notes:
+> - Single object or array (same as `searchItem`); `title` is required, `defaultShortcut` optional.
+> - The action name must not start with the reserved host prefix `plugin:` (rejected at install time).
+> - Availability follows install state; a default key already taken by another action is skipped.
+> - Host-native actions (`screenshot` / `clipboard`) are run by the host; a custom action must be
+>   implemented by your script via `ms.shortcuts.onAction`, otherwise the host just warns
+>   "plugin did not respond to action".
 
 ### 2.3 The UI `ui/detail.html`
 

@@ -3,6 +3,35 @@
 屏幕录制 + 给视频加水印，两个能力共用一套水印配置。重活交给 **ffmpeg**——
 插件会在首次使用时**自动下载自带一份**，装上即可用，无需你手动配置环境。
 
+## 全局快捷键（`Ctrl+Alt+R` 开始 / 停止）
+
+清单里用 `contributes.shortcut` 声明了一个**插件自定义动作**：
+
+```jsonc
+"shortcut": { "action": "record-toggle", "title": "录屏（开始 / 停止）", "defaultShortcut": "ctrl+alt+r" }
+```
+
+装上本插件后，「设置 → 快捷键」的作用类型里会出现「录屏（开始 / 停止）」，
+并自动绑好 `Ctrl+Alt+R`（键被占用则跳过，可自行录入）。
+
+按下热键的流程（与截图 / 剪贴板这类宿主原生动作不同，录屏的执行逻辑在插件自己里）：
+
+1. 宿主把主窗口带到前台并**打开/恢复录屏插件视图**；
+2. 宿主把动作名 `record-toggle` 派发给插件脚本（Rust 广播
+   `my-search://shortcut-plugin-action`，前端 `dispatchShortcutAction`）；
+3. 插件用 `ms.shortcuts.onAction("record-toggle", fn)` 接住，执行
+   **没在录 → 开始；在录 → 停止**（一个键开关）。
+
+```js
+if (ms.shortcuts && typeof ms.shortcuts.onAction === "function") {
+  ms.shortcuts.onAction("record-toggle", function () { toggleRecording(); });
+}
+```
+
+> 细节：视图可能是被快捷键**冷启动**拉起的（脚本刚跑、`boot()` 还没探完 ffmpeg 能力）。
+> 此时动作先记成 `pendingToggle`，等 `boot()` 完成（`capsReady`）后再执行，避免「按了没反应」。
+> 卸载插件时该作用类型与绑定、系统热键一并移除。
+
 ## 目录结构
 
 ```
