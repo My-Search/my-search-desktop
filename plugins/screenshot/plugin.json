@@ -7,6 +7,7 @@
   "author": "zhuangjie",
   "description": "全局快捷键截图：框选区域、标注后复制到剪贴板，并在前台查看最近 7 天的截图",
   "homepage": "https://github.com/zhuangjie/screenshot",
+  "repository": "https://github.com/My-Search/my-search-desktop/tree/master/plugins/screenshot",
   "icon": "icon.svg",
   "permissions": [
     "ui.inlay",

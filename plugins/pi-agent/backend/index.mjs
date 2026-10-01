@@ -27,7 +27,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 import fs from "node:fs";
 import os from "node:os";
-import { execSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { nameSessionFromFirstMessage } from "./session-title.mjs";
 import {
   SUPPORTED_APIS,
@@ -687,6 +687,9 @@ function runtimeIsRunning(rec) {
   const s = rec.session;
   if (!s) return false;
   try {
+    // 不能只看 rec.running：agent_end 会先于文件收尾、agent_start 又晚于用户消息
+    // 落盘，只看它会在两端漏判；isStreaming / isCompacting / isBashRunning 是
+    // SDK 自己的实时态，能把这些缝补上（与 pi-web 的 isRunning() 同一口径）。
     return Boolean(s.isStreaming || s.isCompacting || s.isBashRunning);
   } catch (e) {
     return false;
@@ -2965,7 +2968,7 @@ async function handleMarkAllViewed(id, params) {
       return;
     }
 
-    // 找可用的包管理器
+    // 找可用的包管理器（探测也很短，但一律用异步 spawn——见下方注释）
     const managers = [
       { cmd: "npm", label: "npm" },
       { cmd: "pnpm", label: "pnpm" },
@@ -2973,11 +2976,8 @@ async function handleMarkAllViewed(id, params) {
     ];
     let chosen = null;
     for (const m of managers) {
-      try {
-        execSync(`${m.cmd} --version`, { stdio: "ignore", timeout: 5000 });
-        chosen = m;
-        break;
-      } catch (e) { /* 不可用，继续找下一个 */ }
+      const r = await runCommand(m.cmd, ["--version"], 5000, null);
+      if (r.ok) { chosen = m; break; }
     }
     if (!chosen) {
       sendError(id, "未找到 npm/pnpm/yarn，请先安装 Node.js（https://nodejs.org）后再安装 pi");
@@ -2985,23 +2985,41 @@ async function handleMarkAllViewed(id, params) {
     }
 
     sendLog("info", `使用 ${chosen.label} 安装 @earendil-works/pi-coding-agent…`);
+    sendNotification("plugin:progress", {
+      source: "installPi",
+      action: chosen.cmd,
+      type: "start",
+      message: `正在用 ${chosen.label} 安装 pi（最长 2 分钟）…`,
+    });
 
+    // 用**异步 spawn** 而非 execSync：execSync 会把后端事件循环整个阻塞几十秒
+    // 到 2 分钟——期间所有其它 RPC（含正在流式输出的 chat）全部无响应，用户看到
+    // 的就是「点安装后插件卡死」。改成异步后，输出逐行推给前端，事件循环保持可用。
+    const r = await runCommand(
+      chosen.cmd,
+      ["install", "-g", "@earendil-works/pi-coding-agent"],
+      120000,
+      (line) => sendLog("info", `[${chosen.label}] ${line}`),
+    );
+    if (!r.ok) {
+      const raw = r.output || r.error || "未知错误";
+      const trimmed = raw.length > 500 ? raw.slice(0, 500) + "\n…（输出已截断）" : raw;
+      sendLog("error", `pi 安装失败: ${trimmed}`);
+      sendError(id, `pi 安装失败：\n${trimmed}`);
+      return;
+    }
+
+    sendLog("info", "pi 安装成功，正在重新加载…");
+
+    // 安装完成后重置 pi 状态以重新加载
+    pi = null;
+    piLoadError = "";
+    modelRegistry = null;
+    modelRuntime = null;
+    packageManager = null;
+
+    // 尝试重新加载 pi SDK
     try {
-      execSync(`${chosen.cmd} install -g @earendil-works/pi-coding-agent`, {
-        stdio: "pipe",
-        timeout: 120000,  // 2 分钟超时
-        windowsHide: true,
-      });
-      sendLog("info", "pi 安装成功，正在重新加载…");
-
-      // 安装完成后重置 pi 状态以重新加载
-      pi = null;
-      piLoadError = "";
-      modelRegistry = null;
-      modelRuntime = null;
-      packageManager = null;
-
-      // 尝试重新加载 pi SDK
       const sdk = await ensurePi();
       if (sdk) {
         await ensureModelRegistry();
@@ -3010,13 +3028,53 @@ async function handleMarkAllViewed(id, params) {
         sendResult(id, { ok: true, hasPi: false, piError: piLoadError || "安装完成但加载失败，请尝试重启应用" });
       }
     } catch (e) {
-      const stderr = e.stderr?.toString() || e.message || "未知错误";
-      // 裁剪过长输出
-      const trimmed = stderr.length > 500 ? stderr.slice(0, 500) + "\n…（输出已截断）" : stderr;
-      sendLog("error", `pi 安装失败: ${trimmed}`);
-sendError(id, `pi 安装失败：\n${trimmed}`);
+      sendResult(id, { ok: false, hasPi: false, piError: `安装完成但加载失败: ${e.message}` });
     }
   }
+
+/**
+ * 异步执行一个外部命令，返回 { ok, output, error }。
+ *
+ * 用 spawn 而不是 execSync：不阻塞事件循环，且可把 stdout/stderr 逐行回调出去
+ * （长任务进度可见）。超时到点连带杀掉子进程。
+ */
+function runCommand(cmd, args, timeoutMs, onLine) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(cmd, args, { windowsHide: true });
+    } catch (e) {
+      resolve({ ok: false, error: e.message });
+      return;
+    }
+    let out = "";
+    const collect = (buf) => {
+      const text = String(buf);
+      out += text;
+      if (out.length > 200000) out = out.slice(-100000); // 防御：输出过大时只留尾部
+      if (onLine) {
+        for (const line of text.split("\n")) {
+          const t = line.trim();
+          if (t) onLine(t);
+        }
+      }
+    };
+    child.stdout?.on("data", collect);
+    child.stderr?.on("data", collect);
+    const timer = setTimeout(() => {
+      try { child.kill(); } catch (e) { /* ignore */ }
+      resolve({ ok: false, output: out, error: `命令超时（${timeoutMs}ms）` });
+    }, timeoutMs);
+    child.on("error", (e) => {
+      clearTimeout(timer);
+      resolve({ ok: false, output: out, error: e.message });
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ ok: code === 0, output: out, error: code === 0 ? "" : `退出码 ${code}` });
+    });
+  });
+}
 
 // ===================== 方法派发 =====================
 
@@ -3153,10 +3211,43 @@ case "markViewed": await handleMarkViewed(id, params); break;
 
 // ===================== 主循环 =====================
 
-const readline = require("node:readline");
-const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+/**
+ * 优雅停止所有会话：**先 abort 再 dispose**。
+ *
+ * 直接 dispose 一个正在跑（流式输出 / 工具执行 / 压缩）的会话，会把底层 agent
+ * 连同正在进行的请求一起硬拆——扩展 runner、工具进程可能来不及收尾。这里先
+ * 逐个 `abort()`（失败也无妨），再 unsubscribe + dispose，最后清空表。
+ */
+async function shutdownAllSessions() {
+  for (const rec of runtimes.values()) {
+    try { rec.running = false; } catch (e) { /* ignore */ }
+    try { clearPendingAsk(rec); } catch (e) { /* ignore */ }
+    try { await rec.session?.abort?.(); } catch (e) { /* ignore */ }
+    try { rec.unsubscribe?.(); } catch (e) { /* ignore */ }
+    try { rec.session?.dispose?.(); } catch (e) { /* ignore */ }
+  }
+  runtimes.clear();
+  drafts.clear();
+  pendingReload.clear();
+}
 
-rl.on("line", (line) => {
+/**
+ * 输入分帧：**按 `\n` 手工切分**，不用 `readline`。
+ *
+ * 为什么不用 readline：它把 U+2028/U+2029（LS/PS）也当成行分隔符，而
+ * `JSON.stringify` 并不会转义它们——当用户消息、文件路径或模型输出里含这两个
+ * 字符时，一条合法 JSON 会被 readline 从中间切断成两条非法 JSON，报文丢失。
+ * 手工只认 `\n`，与 `JSON.stringify` 的转义规则一致。UTF-8 用 StringDecoder
+ * 缓冲，避免多字节字符被 chunk 边界切断。
+ */
+const { StringDecoder } = require("node:string_decoder");
+const stdinDecoder = new StringDecoder("utf8");
+/** 输入单行上限（字符数）：畸形的超长行直接丢弃，避免内存无限增长 */
+const MAX_INPUT_LINE_CHARS = 8 * 1024 * 1024;
+let inputBuf = "";
+let inputDropping = false;
+
+function dispatchLine(line) {
   const trimmed = line.trim();
   if (!trimmed) return;
   let msg;
@@ -3170,19 +3261,78 @@ rl.on("line", (line) => {
       sendError(id, `内部错误: ${e.message}`);
     });
   } else if (method === "deactivate") {
-    for (const rec of runtimes.values()) {
-      try { rec.unsubscribe?.(); } catch (e) { /* ignore */ }
-      try { rec.session?.dispose?.(); } catch (e) { /* ignore */ }
-    }
-    runtimes.clear();
-    sendLog("info", "正在退出...");
-    setTimeout(() => process.exit(0), 100);
+    onDeactivate();
   } else if (method === "extUiRespond" || method === "ext_ui:respond") {
     // 兼容前端以“无 id 通知”形式回传 UI 结果
     handleExtUiRespond(params?.id, params?.value);
   } else if (method === "extUiCancel" || method === "ext_ui:cancel") {
     cancelExtUi(params?.id);
   }
+}
+
+/** 收到 deactivate：优雅收尾（先 abort 再 dispose）后退出；重复调用幂等 */
+let shuttingDown = false;
+function onDeactivate() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  sendLog("info", "正在退出...");
+  shutdownAllSessions()
+    .catch((e) => sendLog("warn", `退出前清理会话失败: ${e.message}`))
+    .finally(() => setTimeout(() => process.exit(0), 100));
+}
+
+process.stdin.on("data", (chunk) => {
+  inputBuf += stdinDecoder.write(chunk);
+  let idx;
+  while ((idx = inputBuf.indexOf("\n")) >= 0) {
+    const line = inputBuf.slice(0, idx);
+    inputBuf = inputBuf.slice(idx + 1);
+    if (inputDropping) { inputDropping = false; continue; } // 超长行剩下的尾巴，整行丢弃
+    if (line.length > MAX_INPUT_LINE_CHARS) {
+      sendLog("error", `输入单行超过 ${MAX_INPUT_LINE_CHARS} 字符，已丢弃`);
+      continue;
+    }
+    dispatchLine(line.endsWith("\r") ? line.slice(0, -1) : line);
+  }
+  // 还没有换行、且缓冲已超限：丢弃直到下一个换行，避免无换行巨串吃内存
+  if (!inputDropping && inputBuf.length > MAX_INPUT_LINE_CHARS) {
+    sendLog("error", `输入单行超过 ${MAX_INPUT_LINE_CHARS} 字符，丢弃该行剩余内容`);
+    inputBuf = "";
+    inputDropping = true;
+  }
+});
+process.stdin.on("end", () => {
+  const rest = inputBuf + stdinDecoder.end();
+  inputBuf = "";
+  if (rest.trim()) dispatchLine(rest);
+});
+process.stdin.resume();
+
+/**
+ * 进程级兜底：任何漏网异常 / 未处理拒绝都不能让后端「静默退出」。
+ *
+ * 之前没有这两个 handler——后端一旦有未被 try/catch 罩住的异常，Node 默认直接
+ * 结束进程；前端只能干等满 callTimeoutMs（5 分钟）才看到「调用超时」，期间
+ * 表现为「发送后一直转圈」。这里改为：记日志 + 通知前端，且**不退出**——绝大
+ * 多数异常只影响当次调用，进程留着下次还能正常工作。
+ */
+process.on("uncaughtException", (e) => {
+  try {
+    sendLog("error", `未捕获异常（进程继续运行）: ${e?.stack || e?.message || e}`);
+    sendNotification("backend:fatal", {
+      kind: "uncaughtException",
+      message: String(e?.message || e),
+    });
+  } catch (_) { /* 连日志都发不出去时只能放弃 */ }
+});
+process.on("unhandledRejection", (reason) => {
+  try {
+    sendLog("warn", `未处理的 Promise 拒绝: ${reason?.stack || reason?.message || reason}`);
+    sendNotification("backend:fatal", {
+      kind: "unhandledRejection",
+      message: String(reason?.message || reason),
+    });
+  } catch (_) { /* ignore */ }
 });
 
 process.stderr.write("[pi-agent-backend] 后端已启动，等待初始化...\n");

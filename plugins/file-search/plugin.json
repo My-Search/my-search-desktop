@@ -1,11 +1,12 @@
 {
   "id": "com.mysearch.file-search",
   "name": "文件搜索",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "apiVersion": 1,
-  "minAppVersion": "7.9.15",
+  "minAppVersion": "7.9.22",
   "author": "my-search",
-  "description": "在粘贴/拖入的文件夹里按名称搜索文件，回车或点击用系统默认程序打开",
+  "description": "在粘贴/拖入的文件夹里按名称搜索文件：一直扫描、边扫边显示，随时可停止；回车或点击用系统默认程序打开",
+  "repository": "https://github.com/My-Search/my-search-desktop/tree/master/plugins/file-search",
   "icon": "icon.svg",
   "permissions": [
     "ui.inlay",

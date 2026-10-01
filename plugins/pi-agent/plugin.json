@@ -7,6 +7,7 @@
   "author": "my-search",
   "description": "Pi 编码代理 - 支持多项目、多模型、模型配置面板、插件管理、流式对话与工具调用",
   "homepage": "https://github.com/My-Search/my-search-desktop",
+  "repository": "https://github.com/My-Search/my-search-desktop/tree/master/plugins/pi-agent",
   "icon": "icon.svg",
   "permissions": [
     "ui.inlay",

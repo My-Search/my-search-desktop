@@ -15,8 +15,8 @@
     {
       "plugin": "official-plugins/com.mysearch.file-search",
       "createTime": "2026-09-24T12:41:33.656Z",
-      "latestVersionUpdateTime": "2026-09-27T01:37:32.974Z",
-      "lastVersion": "1.1.0"
+      "latestVersionUpdateTime": "2026-10-01T13:26:47.609Z",
+      "lastVersion": "1.2.0"
     },
     {
       "plugin": "official-plugins/com.mysearch.market",
@@ -48,8 +48,8 @@
       "plugin": "official-plugins/com.mysearch.recorder",
       "official": false,
       "createTime": "2026-09-27T01:37:44.089Z",
-      "latestVersionUpdateTime": "2026-09-30T03:17:35.460Z",
-      "lastVersion": "1.3.0"
+      "latestVersionUpdateTime": "2026-10-01T13:26:47.642Z",
+      "lastVersion": "1.3.1"
     },
     {
       "plugin": "official-plugins/com.zhuangjie.screenshot",
@@ -63,6 +63,13 @@
       "official": false,
       "createTime": "2026-09-27T01:37:47.876Z",
       "latestVersionUpdateTime": "2026-09-27T01:37:47.876Z",
+      "lastVersion": "1.0.0"
+    },
+    {
+      "plugin": "official-plugins/com.zhuangjie.resource-monitor",
+      "official": false,
+      "createTime": "2026-09-30T14:05:49.846Z",
+      "latestVersionUpdateTime": "2026-09-30T14:05:49.846Z",
       "lastVersion": "1.0.0"
     }
   ],

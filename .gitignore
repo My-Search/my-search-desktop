@@ -22,11 +22,17 @@ test/.e2e-autostart-profile/
 test/.e2e-rclick-profile/
 test/.e2e-cold-profile/
 test/.e2e-plugin-shortcut-profile/
+test/.e2e-file-search-stream-profile/
+test/_chrome-profile-file-search-stream/
+test/.e2e-fs-bottom-profile/
 test/_shot-*.png
 test/_rel-shot-*.png
 test/_cold-shot*.png
 test/.cache-restart-store.json
 test/_fix-*.mjs
+
+# 插件运行时落盘数据（如资源监控的 history.json：含使用者本机进程信息，不入库也不入包）
+plugins/*/.data/
 
 # 系统文件
 .DS_Store

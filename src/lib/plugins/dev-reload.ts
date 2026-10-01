@@ -166,6 +166,7 @@ export function planReload(rec: PluginRecord, manifestText: string): ReloadPlan 
     author: next.author,
     description: next.description,
     homepage: next.homepage,
+    repository: next.repository,
     icon: next.icon,
     manifest: next,
     updatedAt: Date.now(),

@@ -174,11 +174,16 @@ export function buildWatermarkArgs(opts = {}) {
   if (!input) throw new Error("缺少输入视频路径");
   if (!output) throw new Error("缺少输出视频路径");
 
+  const notes = [];
   const wm = buildWatermarkFilter(opts.watermark, {
     timestampMode: opts.timestampMode || "pts",
     videoWidth: opts.videoWidth,
   });
   if (!wm) throw new Error("水印未启用或配置不完整");
+  // 与录制路径同一提示口径：文字水印没拿到字体时中文可能变方块
+  if (wm.kind === "text" && !wm.spec.fontFile) {
+    notes.push("未指定字体文件，中文可能显示为方块（建议在设置里选择中文字体）");
+  }
 
   const args = ["-y", "-i", input];
   let hasFilterComplex = false;
@@ -196,7 +201,7 @@ export function buildWatermarkArgs(opts = {}) {
   args.push("-movflags", "+faststart");
   if (opts.progress) args.push("-progress", "pipe:2", "-nostats");
   args.push(output);
-  return { args, hasFilterComplex };
+  return { args, hasFilterComplex, notes };
 }
 
 function optionsImagePath(wm) {

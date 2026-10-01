@@ -7,6 +7,24 @@
  *   2. 不用 :root / body 选择器——插件 CSS 会被宿主加前缀作用域化。
  *
  * 宿主给插件视图加了负 margin，留白由 .rc-app 自己补。
+ *
+ * ## 滚动责任（与「插件市场」同一契约，别再加 max-height）
+ *
+ * 宿主的详情区 `#text_show` 有两种形态（见 src/css/style.css）：
+ *   - **常态**（默认尺寸）：`max-height:510px; overflow-y:auto` —— **由它滚**；
+ *   - **拉伸态**（用户拖过右下角手柄，`#my_search_box.plugin-sized`）：`#text_show`
+ *     翻成 `overflow:hidden`，同时把插件根节点拉成 `height:100%` —— 滚动责任
+ *     整个下放给插件自己。
+ *
+ * 因此本插件根节点**只负责拉伸态的滚动**：给它 `overflow-y:auto`，但**绝不设
+ * `max-height`**。之前这里写了 `max-height:520px`，恶果是：
+ *   - 常态下根节点被钉死在 520px、自己先滚一条（内容 767px），而 520 > `#text_show`
+ *     的内容区（510 − padding 26 = 484），父级 `#text_show` 于是**又滚一条** ——
+ *     右侧同时出现两条滚动条（内层 .rc-app 的默认箭头条 + 外层 #text_show 的极简条）；
+ *   - 拉伸态下窗口拖得比 520 高时，根节点仍被 520 卡住，下方内容永远够不着。
+ * 去掉 `max-height` 后：常态根节点只随内容自然高（overflow 不产生滚动，滚动仍归
+ * `#text_show`），拉伸态则吃满 `height:100%` 成为唯一滚动容器。与 market 的 `.page`、
+ * clipboard 的 `.cb-app` 完全同构。
  */
 
 .rc-app {
@@ -24,9 +42,34 @@
   color: var(--rc-text);
   font-size: 13px;
   line-height: 1.5;
-  max-height: 520px;
   overflow-y: auto;
   box-sizing: border-box;
+}
+
+/* 拉伸态下滚轮/滚动条归 .rc-app：把默认 Windows 滚动条换成宿主的极简样式
+   （默认条又粗又带箭头，与界面不搭）。选择器会被宿主的 scopeCss 加前缀，
+   只作用于本插件视图，不影响宿主其它区域。 */
+.rc-app {
+  scrollbar-width: thin;
+  scrollbar-color: var(--rc-line) transparent;
+}
+
+.rc-app::-webkit-scrollbar {
+  -webkit-appearance: none;
+  width: 6px;
+}
+
+.rc-app::-webkit-scrollbar-track {
+  background-color: transparent;
+}
+
+.rc-app::-webkit-scrollbar-thumb {
+  background-color: var(--rc-line);
+  border-radius: 3px;
+}
+
+.rc-app::-webkit-scrollbar-thumb:hover {
+  background-color: var(--rc-muted);
 }
 
 .rc-app * {

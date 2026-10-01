@@ -41,7 +41,7 @@ export const DEFAULT_WATERMARK = {
   text: "我的搜索",
   /** 图片水印的绝对路径（仅 type=image 用） */
   imagePath: "",
-  /** 字体文件绝对路径（留空 = 让 ffmpeg 用 Fontconfig 默认；中文务必指定） */
+  /** 字体文件绝对路径（留空 = 由后端自动探测一个中文字体，见 index.mjs 的 ensureWatermarkFont） */
   fontFile: "",
   /** 字号 = 视频高度的百分比（1..100） */
   sizePct: 4,
@@ -92,19 +92,46 @@ export function alphaSuffix(opacity) {
 /**
  * 转义 drawtext 的 `text=` 取值。
  *
- * drawtext 的滤镜串是「一层 ffmpeg 滤镜图语法 + 一层自己 `:` 分隔的键值」，
- * 所以反斜杠、冒号、单引号都要处理；`%` 是它的扩展占位符前缀（`%{pts}`），
- * 用户想打**字面**百分号必须写成 `%%`。
+ * drawtext 的滤镜串是「一层 ffmpeg 滤镜图语法 + 一层 drawtext 自己的键值」，
+ * 特殊字符必须按**两层**转义，否则会报语法错或渲染成乱码。各家 ffmpeg
+ * 构建对反斜杠的吞并层数略有差异，下面的层数都是在本插件自带的 BtbN
+ * Windows 构建上实测出来的（`test/recorder-plugin.test.mjs` 有对应的
+ * 实机渲染冒烟测试兜底）：
  *
- * 顺序很关键：先转义反斜杠，再处理其它——反过来会把刚加上的反斜杠又转一遍。
+ * | 字符 | 转义        | 说明 |
+ * |------|-------------|------|
+ * | `:`  | `\\:`       | 滤镜图先吃一层反斜杠；只写 `\:` 会被判成选项分隔符（旧实现就是这里炸） |
+ * | `,;[]` | `\,` `\;` `\[` `\]` | 滤镜**图**层面的分隔符 / 标签字符 |
+ * | `'`  | `\\\'`      | ffmpeg 的引号处理比较绕，实测三层反斜杠最稳 |
+ * | `\`  | `\\\\`      | 反斜杠自身 |
+ * | `%`  | 见 `percentAsLiteral` | |
+ *
+ * `%` 是 drawtext 的扩展前缀，两种模式下写法不同：
+ * - `expansion=normal`（开启时间戳时）：字面 `%` 必须写成**四个反斜杠 + %**
+ *   （该构建上 `%%` 反而报 `Stray %`）。
+ * - `expansion=none`（未开启时间戳时）：`%` 无特殊含义，**原样**写出即可。
+ * 由 `percentAsLiteral` 开关区分，避免「进度 100%」这类文字直接让录制失败。
+ *
+ * @param {string} text
+ * @param {object} [opts]
+ * @param {boolean} [opts.percentAsLiteral] expansion=normal 时传 true
  */
-export function escapeDrawtext(text) {
-  return String(text ?? "")
-    .replace(/\\/g, "\\\\")
-    .replace(/:/g, "\\:")
-    .replace(/'/g, "\\'")
-    .replace(/%/g, "%%")
-    .replace(/\r?\n/g, "\\n");
+export function escapeDrawtext(text, opts = {}) {
+  const pctLiteral = opts.percentAsLiteral === true;
+  let out = "";
+  for (const ch of String(text ?? "")) {
+    switch (ch) {
+      case "\\": out += "\\\\\\\\"; break;
+      case ":": out += "\\\\:"; break;
+      case ",": case ";": case "[": case "]": out += "\\" + ch; break;
+      case "'": out += "\\\\\\'"; break;
+      case "%": out += pctLiteral ? "\\\\\\\\%" : "%"; break;
+      case "\n": out += "\\n"; break;
+      case "\r": break;
+      default: out += ch;
+    }
+  }
+  return out;
 }
 
 /**
@@ -186,17 +213,24 @@ export function normalizeWatermark(spec) {
 }
 
 /**
- * 在文字后追加时间戳占位符。
+ * 时间戳占位符（**原文**，调用方不要再对它做用户文字转义）。
  *
- * `%{pts:hms}` 是 ffmpeg 的显示时间（视频内时长，不是墙钟）。录制场景下
- * 用挂钟时间更符合直觉，因此录制命令另行用 `%{localtime}`；给已有视频加水印
- * 时则用 `pts`（跟视频进度走）。由调用方通过 `timestampMode` 选择。
+ * - `pts`：视频内时长，跟进度走（给已有视频加水印）。
+ * - `localtime`：挂钟时间，录制时更符合直觉。
+ *
+ * 反斜杠层数按滤镜图两层的规则写死（`\\:` 两个反斜杠），实测该构建可用；
+ * 多段格式化串（`%H\\:%M\\:%S`）在部分构建上会被判失败，故统一用单冒号的
+ * `%T`（等价 `%H:%M:%S`）与 `%Y-%m-%d %T`。注意 `%` 只能一个（不能 `%%`），
+ * 因为占位符本身就靠 `%{...}` 触发扩展。
  */
+export function timestampPlaceholder(mode) {
+  return mode === "localtime" ? "%{localtime\\\\:%Y-%m-%d %T}" : "%{pts\\\\:hms}";
+}
+
+/** 兼容旧名：文字 + 空格 + 占位符（占位符不做用户文字转义） */
 export function withTimestamp(text, mode) {
-  if (!text) return mode === "localtime" ? "%{localtime\\:%Y-%m-%d %H\\:%M\\:%S}" : "%{pts\\:hms}";
-  return `${text} ${
-    mode === "localtime" ? "%{localtime\\:%Y-%m-%d %H\\:%M\\:%S}" : "%{pts\\:hms}"
-  }`;
+  const ph = timestampPlaceholder(mode);
+  return String(text || "").trim() ? `${text} ${ph}` : ph;
 }
 
 /* ============================ 滤镜构造 ============================ */
@@ -206,21 +240,44 @@ export function withTimestamp(text, mode) {
  *
  * 注意 `fontsize` 用 `h*百分比`：drawtext 支持表达式，`h` 是视频高度，
  * 这样字号随分辨率自适应（1080p 上 4% ≈ 43px）。
+ *
+ * ## `expansion` 的选择（关键）
+ *
+ * - **不开时间戳**：强制 `expansion=none`。这样用户文字里的 `%`、`{}` 都
+ *   不再有特殊含义，可原样输出——「进度 100%」这类水印才不会被 ffmpeg
+ *   判成 `Stray %` 而让整条录制命令失败（本插件自带构建的已知坑）。
+ * - **开时间戳**：必须用默认（normal）扩展，占位符才会求值；此时用户文字里
+ *   的字面 `%` 按 normal 模式转义（四个反斜杠），实测可用。
+ *
+ * 占位符由 `timestampPlaceholder` 产出**原文**，**不**参与用户文字转义，
+ * 否则 `%` 被加倍会变成字面量（旧实现的双重转义 bug，实测直接渲染不出时间）。
  */
 export function buildTextFilter(spec, opts = {}) {
   const w = normalizeWatermark(spec);
   const mode = opts.timestampMode || "pts";
-  const raw = w.timestamp ? withTimestamp(w.text, mode) : w.text;
-  if (!String(raw).trim()) throw new Error("文字水印内容为空");
+  const userText = String(w.text ?? "");
+  const useTimestamp = !!w.timestamp;
+  if (!useTimestamp && !userText.trim()) throw new Error("文字水印内容为空");
+
+  // 用户文字转义：开时间戳时字面 % 走 normal 规则，否则 % 原样（expansion=none）
+  const escaped = escapeDrawtext(userText, { percentAsLiteral: useTimestamp });
+  // 占位符原文追加在转义后的用户文字之后；用户文字为空时只留占位符
+  const textValue = useTimestamp
+    ? escaped.trim()
+      ? `${escaped} ${timestampPlaceholder(mode)}`
+      : timestampPlaceholder(mode)
+    : escaped;
 
   const { x, y } = positionExpr(w.anchor, w.marginPct);
   const parts = [
-    `text=${escapeDrawtext(raw)}`,
+    `text=${textValue}`,
     `fontsize=h*${(w.sizePct / 100).toFixed(4)}`,
     `fontcolor=${w.color}${alphaSuffix(w.opacity)}`,
     `x=${x}`,
     `y=${y}`,
   ];
+  // expansion=none 时不必写（本就是默认值）；显式写出来更利于阅读与回归测试
+  if (!useTimestamp) parts.push("expansion=none");
   if (w.fontFile) parts.push(`fontfile=${escapeFilterPath(w.fontFile)}`);
   if (w.border) {
     parts.push("borderw=2", `bordercolor=${w.borderColor}${alphaSuffix(Math.min(1, w.opacity + 0.3))}`);
@@ -271,9 +328,30 @@ export function buildImageFilter(spec, opts = {}) {
   return { filter: `${download}${scale};${overlay}`, hasSecondInput: true };
 }
 
-/** 路径进滤镜串前要转义：Windows 的 `C:\a\b` 里冒号和反斜杠都是特殊字符 */
+/**
+ * 字体/图片路径进滤镜串前的转义。
+ *
+ * Windows 盘符里的冒号对滤镜图是特殊字符，直接写 `C:\a\b.ttc` 会被当成
+ * 「选项分隔符」而报 `No option name near '\a\b.ttc'`。实测（本插件自带的
+ * BtbN Windows 构建）**唯一可靠**的写法是：正斜杠 + 单反斜杠转义冒号 +
+ * 用单引号把整个路径括起来：
+ *
+ *     fontfile='C\:/Windows/Fonts/msyh.ttc'   ← 实测通过，中文正常渲染
+ *
+ * 反例（都报 No option name / 解析失败）：`C\:/…`（缺引号）、
+ * `'C:/…'`（缺冒号转义）、`'C\\:/…'`（多一层反斜杠）。
+ * 路径含空格/逗号时同一写法也安全；含单引号（极罕见）时按 ffmpeg 惯例
+ * 用 `'\''` 断开再拼接。Unix 路径不含冒号，原样返回。
+ */
 export function escapeFilterPath(p) {
-  return String(p ?? "").replace(/\\/g, "/").replace(/:/g, "\\:");
+  const s = String(p ?? "");
+  if (!s) return s;
+  // Windows 风格（含盘符冒号或反斜杠）→ 反斜杠归一为正斜杠，冒号单反斜杠转义，整体单引号包裹
+  if (/^[A-Za-z]:/.test(s) || s.includes("\\")) {
+    const inner = s.replace(/\\/g, "/").replace(/:/g, "\\:");
+    return "'" + inner.replace(/'/g, "'\\''") + "'";
+  }
+  return s;
 }
 
 /**

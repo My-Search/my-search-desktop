@@ -26,6 +26,26 @@
   }
 
   /**
+   * 官方地址链接的显示文案，按链接形态给用户一个更准确的提示：
+   *   - GitHub 仓库里的**源码目录**（`github.com/<owner>/<repo>/tree/<ref>/...`）→「源码」；
+   *   - GitHub 仓库根（`github.com/<owner>/<repo>`）→「仓库」；
+   *   - 其余（作者主页、项目站点等）→「主页」。
+   * 官方插件（源码在本仓库 plugins/<目录>）会命中第一档，显示为「源码」。
+   */
+  function linkLabel(url) {
+    if (/^https?:\/\/github\.com\/[^/]+\/[^/]+\/(tree|blob)\//i.test(url)) return "源码";
+    if (/^https?:\/\/github\.com\/[^/]+\/[^/]+\/?$/i.test(url)) return "仓库";
+    return "主页";
+  }
+
+  /** 外链图标（内联 SVG，随文字色 currentColor，不引外部资源） */
+  const LINK_ICON =
+    '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" ' +
+    'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M14 5h5v5"/><path d="M19 5l-7 7"/>' +
+    '<path d="M18 13.5V18a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4.5"/></svg>';
+
+  /**
    * 切换四个状态区的显隐。
    *
    * 注意：**显示时清空 inline display，而不是写死 `block`**。
@@ -107,7 +127,8 @@
     for (let i = 0; i < entries.length; i++) {
       const e = entries[i];
       const installed = view.installedMap[e.id];
-      const hasUpdate = view.updates.some((u) => u.id === e.id);
+      const upd = view.updates.find((u) => u.id === e.id);
+      const hasUpdate = !!upd;
       const isBlocked = view.blocked.includes(e.id);
       let actionHtml = "";
       let badgeHtml = "";
@@ -120,7 +141,7 @@
         actionHtml = '<button class="btn-market" disabled>已屏蔽</button>';
       } else if (hasUpdate) {
         // 有新版就只显示「更新」，不并排放卸载——一张卡片主推一个动作
-        actionHtml = '<button class="btn-market" data-action="update" data-id="' + escapeHtml(e.id) + '">更新 v' + escapeHtml(view.updates.find((u) => u.id === e.id).availableVersion) + "</button>";
+        actionHtml = '<button class="btn-market" data-action="update" data-id="' + escapeHtml(e.id) + '">更新 v' + escapeHtml(upd.availableVersion) + "</button>";
       } else if (installed) {
         actionHtml = '<button class="btn-market btn-outline" data-action="uninstall" data-id="' + escapeHtml(e.id) + '">卸载</button>';
       } else {
@@ -145,6 +166,23 @@
       if (e.description) html += '<p class="plugin-desc">' + escapeHtml(e.description) + "</p>";
       if (e.deprecated) {
         html += '<div class="plugin-deprecated-hint">⚠ ' + escapeHtml(e.deprecatedReason || "该插件已停止维护，可能不再可用") + "</div>";
+      }
+      // 更新日志：只在「本插件有新版本可更新」时展示**这一版**改了什么，
+      // 平时卡片保持简洁。内容可多行（作者按行书写），靠 CSS 的 pre-line 保留换行。
+      const changelog = (upd && upd.changelog) || "";
+      if (hasUpdate && changelog) {
+        html += '<div class="plugin-changelog">';
+        html += '<div class="plugin-changelog-title">v' + escapeHtml(upd.availableVersion) + " 更新日志</div>";
+        html += '<div class="plugin-changelog-body">' + escapeHtml(changelog) + "</div>";
+        html += "</div>";
+      }
+      // 官方地址：优先宿主算好的 repoUrl（仓库优先，退回主页），老目录没有该字段时
+      // 退回条目自带的 repository / homepage。放说明下方，每个插件都能点开官方地址。
+      const linkUrl = e.repoUrl || e.repository || e.homepage;
+      if (linkUrl) {
+        html += '<a class="plugin-link" data-link="' + escapeHtml(linkUrl) + '" href="' + escapeHtml(linkUrl) + '" target="_blank" rel="noopener noreferrer" title="在浏览器中打开：' + escapeHtml(linkUrl) + '">';
+        html += LINK_ICON + "<span>" + escapeHtml(linkLabel(linkUrl)) + "</span>";
+        html += "</a>";
       }
       html += '<div class="plugin-footer">';
       html += "<span>v" + escapeHtml(e.version) + "</span>";
@@ -437,29 +475,48 @@
     true
   );
 
+  /**
+   * 用系统浏览器打开一个外链。
+   *
+   * 优先走宿主 API（ms.system.openExternal，需 system.openExternal 权限）；
+   * 未授权时返回 false，让调用方退回锚点自身的 target=_blank 行为
+   * （hero 仓库入口与卡片上的官方地址链接共用这一段逻辑）。
+   */
+  async function openExternalUrl(url) {
+    const canOpen = typeof ms !== "undefined" && ms.system && ms.system.openExternal;
+    if (!canOpen) return false;
+    try {
+      await ms.system.openExternal(url);
+    } catch (e) {
+      const msg = "打开链接失败: " + String((e && e.message) || e);
+      const canNotify =
+        typeof ms !== "undefined" &&
+        ms.ui &&
+        (!ms.plugin || !ms.plugin.has || ms.plugin.has("ui.notify"));
+      if (canNotify) ms.ui.toast(msg, "error");
+      else window.open(url, "_blank", "noopener");
+    }
+    return true;
+  }
+
   // 仓库入口：点 GitHub 图标 → 系统浏览器打开市场仓库。
-  // 优先走宿主 API（ms.system.openExternal，需 system.openExternal 权限）；
-  // 未授权时退回锚点自身的 target=_blank 行为，保证始终能打开。
+  // 优先走宿主 API；未授权时退回锚点自身的 target=_blank 行为，保证始终能打开。
   const $repo = document.getElementById("market-repo-link");
   if ($repo) {
     $repo.addEventListener("click", async function (ev) {
       const url = $repo.getAttribute("href");
-      const canOpen = typeof ms !== "undefined" && ms.system && ms.system.openExternal;
-      if (!canOpen) return; // 交给 <a target="_blank"> 原生行为
-      ev.preventDefault();
-      try {
-        await ms.system.openExternal(url);
-      } catch (e) {
-        const msg = "打开链接失败: " + String((e && e.message) || e);
-        const canNotify =
-          typeof ms !== "undefined" &&
-          ms.ui &&
-          (!ms.plugin || !ms.plugin.has || ms.plugin.has("ui.notify"));
-        if (canNotify) ms.ui.toast(msg, "error");
-        else window.open(url, "_blank", "noopener");
-      }
+      if (await openExternalUrl(url)) ev.preventDefault();
     });
   }
+
+  // 卡片上的「官方地址」链接：同样委托到列表容器（卡片 innerHTML 反复重建）。
+  // 由 openExternalUrl 决定是否 preventDefault（宿主不可用时交给原生跳转）。
+  $list.addEventListener("click", async function (ev) {
+    const link = ev.target.closest && ev.target.closest("[data-link]");
+    if (!link) return;
+    const url = link.getAttribute("data-link");
+    if (await openExternalUrl(url)) ev.preventDefault();
+  });
 
   loadMarket();
 

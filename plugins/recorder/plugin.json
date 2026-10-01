@@ -1,12 +1,13 @@
 {
   "id": "com.mysearch.recorder",
   "name": "录屏与水印",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "apiVersion": 1,
   "minAppVersion": "7.9.15",
   "author": "zhuangjie",
   "description": "屏幕录制（可选实时叠加水印），并给已有视频批量添加文字/图片水印，支持九宫格定位与水印预设",
   "homepage": "https://github.com/zhuangjie/recorder",
+  "repository": "https://github.com/My-Search/my-search-desktop/tree/master/plugins/recorder",
   "icon": "icon.svg",
   "permissions": [
     "ui.inlay",

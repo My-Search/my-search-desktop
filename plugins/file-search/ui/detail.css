@@ -82,10 +82,11 @@
   cursor: default;
 }
 
-/* 扫描中按钮变「停止」：红边提示点下去会中断当前扫描 */
+/* 扫描中按钮变「停止」：红字提示点下去会中断当前扫描（一直扫到用户喊停） */
 .fs-btn.is-stop {
   border-color: var(--err, #d32f2f);
   color: var(--err, #d32f2f);
+  font-weight: 600;
 }
 
 .fs-btn.is-stop:hover {

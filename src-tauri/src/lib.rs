@@ -3370,13 +3370,16 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("构建我的搜索桌面版失败")
-        .run(|_app, event| {
+        .run(|app, event| {
             // 退出前释放目录挂载插件的文件监听句柄（进程即将结束，收干净更稳妥）
             if let tauri::RunEvent::Exit = event {
                 plugin_watch::stop_dispatch();
                 plugin_watch::unwatch_all();
                 // 卸掉剪贴板监听并销毁监听窗口
                 clipboard_history::uninstall();
+                // 停止所有插件后台进程：Windows 有 Job Object 兜底，Unix 没有——
+                // 不显式停止会留下孤儿进程（继续吃 CPU/内存），也收不回最后日志。
+                plugin_host::shutdown_all(app);
             }
         });
 }

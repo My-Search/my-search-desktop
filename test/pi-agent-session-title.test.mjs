@@ -54,7 +54,11 @@ test("空白输入不会命名，长输入和 Unicode 不被截断", () => {
 
 test("发送路径在 prompt 前命名，创建 UI 不再写入占位名", () => {
   const backend = readFileSync(new URL("../plugins/pi-agent/backend/index.mjs", import.meta.url), "utf8");
-  assert.match(backend, /nameSessionFromFirstMessage\(rec, message\);\s*await session\.prompt\(message/);
+  // 命名必须发生在 prompt 之前；两者之间可能夹注释行，故允许一段「非 prompt」间隔
+  assert.match(
+    backend,
+    /nameSessionFromFirstMessage\(rec, message\);[\s\S]{0,400}?await session\.prompt\(message/
+  );
   const ui = readFileSync(new URL("../plugins/pi-agent/ui/index.js", import.meta.url), "utf8");
   const create = ui.slice(ui.indexOf('ms.backend.call("createSession"'), ui.indexOf('if (!result?.session)'));
   assert.doesNotMatch(create, /title:\s*"新对话"/);

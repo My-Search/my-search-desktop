@@ -54,7 +54,9 @@ my-plugin/
   "minAppVersion": "7.9.15",         // optional: hidden on older app versions
   "author": "Your Name",             // required
   "description": "One-line summary", // required
-  "homepage": "https://github.com/you/my-plugin",
+  "homepage": "https://github.com/you/my-plugin",  // optional: homepage (clickable in the market)
+  "repository": "https://github.com/you/my-plugin", // optional: repo, preferred as the "official link"
+  "changelog": "Added: export to Markdown\nFixed: slow scan on large folders", // optional: THIS version's release notes
   "icon": "icon.svg",                // relative path / data: URI / http(s) URL
   "permissions": ["ui.inlay"],       // required: declare needed permissions
   "contributes": {
@@ -73,6 +75,26 @@ my-plugin/
   }
 }
 ```
+
+**About the "official link" and "release notes"**:
+
+- `repository` (optional): your plugin's repository. The market card shows a **clickable
+  official link** below the description (opens in the system browser). If both `repository`
+  and `homepage` are set, `repository` wins; `homepage` is still shown separately as
+  "Homepage" in the settings panel. If neither is set, the client derives the repo from your
+  download URL (`github.com/<owner>/<repo>/releases/download/...`); third-party plugins
+  (one repo per plugin) also get it automatically — so the link works either way, but
+  declaring it is more precise.
+- `changelog` (optional): **this version's** release notes. When a user has your plugin
+  installed and a newer version is available, the market card shows this text below the
+  description so they can see what changed. Write just this version's changes (not a
+  cumulative log); multi-line (`\n`) is supported, and the list clamps to 8 lines.
+  Remember to bump `version` before packaging.
+
+> Official plugins (source lives in this repo under `plugins/<dir>/`) point `repository`
+> at the **source directory**, e.g.
+> `https://github.com/My-Search/my-search-desktop/tree/master/plugins/<dir>`; such links are
+> labelled **"Source"** in the UI (repo root → "Repo", anything else → "Homepage").
 
 **id rules** (the most common pitfall):
 
@@ -177,7 +199,9 @@ Each API requires the matching permission in `permissions`, otherwise it throws.
 | `ms.ui.setHeight(px)` | `ui.inlay` | adjust view height |
 | `ms.store.get/set/remove/keys()` | `store` | local key-value storage |
 | `ms.input.readFile(path)` | `file.read` | read a file (as data URL) |
-| `ms.input.listFolder(path)` | `file.read` | list a folder |
+| `ms.input.listFolder(path)` | `file.read` | list a folder (uncapped by default, returned once the scan ends) |
+| `ms.input.listFolderStream(path, onBatch, opts)` | `file.read` | streaming folder listing: `onBatch(entries)` fires while scanning (incremental UI for huge trees); pair `opts.gen` with `ms.input.cancelListFolder(gen)` to abort anytime |
+| `ms.input.cancelListFolder(gen)` | `file.read` | abort a listing generation: in-flight walks return early with what they collected (e.g. a Stop button) |
 | `ms.input.fileIcons(entries)` | `file.read` | batch system file icons (Explorer-style; returns `{path: dataURL}`, misses omitted) |
 | `ms.input.open(path)` / `ms.input.reveal(path)` | `file.read` | open with default app / reveal in file manager |
 | `ms.sync.status()` | `sync` | read sync state (`{ enabled, status, lastSyncAt, lastError }`; no account/credential data) |

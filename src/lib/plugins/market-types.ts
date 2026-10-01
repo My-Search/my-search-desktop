@@ -57,12 +57,20 @@ export interface MarketPluginEntry {
   minAppVersion?: string;
   author: string;
   homepage?: string;
+  /**
+   * 插件官方仓库地址（如 `https://github.com/you/my-plugin`）。
+   *
+   * 优先于 homepage 展示为「官方地址」链接：homepage 往往是作者主页而非仓库。
+   * 由构建脚本从清单写入；缺失时由 `pluginRepoUrl` 从 downloadUrl 反解。
+   */
+  repository?: string;
   /** data: / http(s): 直出（目录不做相对路径图标，规避读包 IPC） */
   icon?: string;
   categories: string[];
   tags?: string[];
   /** 卡片摘要（UI 截断 ≤120 字） */
   description: string;
+  /** 本版本的更新日志（可多行）。用户端在「已安装且可更新」时展示这一版改了什么 */
   changelog?: string;
   /** 完整 URL，必须以 baseUrl 为前缀；安装前宿主与前端会再对 sha256 验包 */
   downloadUrl: string;
@@ -227,6 +235,42 @@ export function isAllowedDownloadUrl(v: unknown): boolean {
   return tagAsset.length === 2 && tagAsset.every((s) => s !== "");
 }
 
+/* ============================================================
+ * 官方地址（仓库 / 主页）
+ * ============================================================ */
+
+/** http(s) 地址原样返回，否则 undefined（用于过滤脏字段，不抛错） */
+function webUrlOrUndefined(v: unknown): string | undefined {
+  const s = asString(v);
+  return s && /^https?:\/\//i.test(s) ? s : undefined;
+}
+
+/**
+ * 取插件的「官方地址」（用于市场卡片与设置面板的可点击链接）。
+ *
+ * 回退顺序（前一个为空/非法就看下一个）：
+ *   1. `repository` —— 清单里最准确的插件仓库地址；
+ *   2. 从 `downloadUrl` 反解 —— GitHub Release 资产地址里含着 `owner/repo`
+ *      （`https://github.com/<owner>/<repo>/releases/download/...` → 仓库页），
+ *      兼容尚未声明 repository 的旧目录条目，也能覆盖第三方插件「一个仓库一个插件」的情形；
+ *   3. `homepage` —— 兜底的项目/作者主页（可能不是仓库，但总比没有链接好）。
+ *
+ * 都不成立时返回 undefined（调用方据此不渲染链接）。纯函数，便于单测。
+ */
+export function pluginRepoUrl(entry: Pick<MarketPluginEntry, "repository" | "homepage" | "downloadUrl">): string | undefined {
+  const declared = webUrlOrUndefined(entry.repository);
+  if (declared) return declared;
+
+  const dl = asString(entry.downloadUrl);
+  if (dl) {
+    // 只认 GitHub 仓库 Release 形态：github.com/<owner>/<repo>/releases/download/...
+    const m = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/releases\/download\//i.exec(dl);
+    if (m) return `https://github.com/${m[1]}`;
+  }
+
+  return webUrlOrUndefined(entry.homepage);
+}
+
 
 /* ============================================================
  * 解析与校验
@@ -355,6 +399,7 @@ export function parseCatalog(raw: unknown): CatalogParseResult {
       minAppVersion: asString(e.minAppVersion),
       author: e.author as string,
       homepage: asString(e.homepage),
+      repository: asString(e.repository),
       icon: asString(e.icon),
       categories: e.categories as string[],
       tags: Array.isArray(e.tags) ? (e.tags as string[]).filter((t) => typeof t === "string") : undefined,

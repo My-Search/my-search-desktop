@@ -12,7 +12,7 @@
  * 粒度到窗口，做不到「每个插件一套权限」。运行时的网关才是唯一可行解。
  */
 
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, Channel } from "@tauri-apps/api/core";
 import { isTauri } from "../tauri-bridge.ts";
 import { base64ToBytes } from "./package.ts";
 
@@ -254,6 +254,8 @@ export async function syncGateway(payload: {
   backendProtocol: string | null;
   idleExitSec: number;
   graceSec: number;
+  /** 优雅退出等待（秒）——Rust 侧按此值等 deactivate 后的收尾 */
+  shutdownTimeoutSec: number;
   maxRestarts: number;
   startupTimeoutMs: number;
   callTimeoutMs: number;
@@ -412,20 +414,62 @@ export async function attachmentPreview(path: string): Promise<string> {
 
 /**
  * 递归列举一个附加文件夹（返回文件+子目录，按相对路径排序）。
- * @param limit 条数上限（Rust 侧再夹紧；默认 20000）
+ *
+ * @param limit 条数上限；传 `0`（或省略）表示**不限条数**，一直枚举到遍历
+ *   结束或经 `attachmentListCancel` 中止（Rust 侧无固定上限，深度仍受保护）。
  * @param gen 本轮列举的代次（可选）：与 `attachmentListCancel` 传相同值可中止本轮
  */
 export async function attachmentList(
   pluginId: string,
   path: string,
-  limit = 20000,
+  limit = 0,
   gen?: number
 ): Promise<AttachmentDirEntry[]> {
   if (!isTauri) throw new Error("列举附加文件夹仅在桌面端可用");
   return await invoke<AttachmentDirEntry[]>("attachment_list", {
     pluginId,
     path,
-    limit: Math.max(1, Math.min(100000, Math.round(limit) || 20000)),
+    limit: Math.max(0, Math.round(limit) || 0),
+    ...(gen != null && Number.isFinite(gen) && gen > 0 ? { gen: Math.floor(gen) } : {}),
+  });
+}
+
+/**
+ * 递归列举一个附加文件夹，**边扫边回调**（流式）。
+ *
+ * 与 `attachmentList` 同样的参数与「附加集合 + 网关 grants」校验，区别是
+ * 借 Tauri `Channel` 让 Rust 在遍历途中分批推送：`onBatch` 每收到一批
+ * （`AttachmentDirEntry[]`，约 256 条）就调用一次，供调用方增量渲染；返回值
+ * 仍是**完整**结果（遍历结束或取消后按相对路径排序）。`limit` 传 `0` = 不限。
+ *
+ * 浏览器调试环境（无 Tauri）没有 Channel，退化为一次性 `attachmentList`，
+ * 结束后把整批经 `onBatch` 回调一次。
+ */
+export async function attachmentListStream(
+  pluginId: string,
+  path: string,
+  onBatch: (entries: AttachmentDirEntry[]) => void,
+  limit = 0,
+  gen?: number
+): Promise<AttachmentDirEntry[]> {
+  if (!isTauri) {
+    const all = await attachmentList(pluginId, path, limit, gen);
+    onBatch(all);
+    return all;
+  }
+  const channel = new Channel<AttachmentDirEntry[]>();
+  channel.onmessage = (batch) => {
+    try {
+      onBatch(Array.isArray(batch) ? batch : []);
+    } catch {
+      /* 回调抛错不该拖垮列举（前端渲染问题与扫描无关） */
+    }
+  };
+  return await invoke<AttachmentDirEntry[]>("attachment_list", {
+    pluginId,
+    path,
+    limit: Math.max(0, Math.round(limit) || 0),
+    onBatch: channel,
     ...(gen != null && Number.isFinite(gen) && gen > 0 ? { gen: Math.floor(gen) } : {}),
   });
 }

@@ -253,6 +253,22 @@ export interface PluginManifest {
   author?: string;
   description?: string;
   homepage?: string;
+  /**
+   * 插件源码仓库地址（如 `https://github.com/you/my-plugin`）。
+   *
+   * 与 `homepage` 的分工：homepage 是「作者主页 / 项目主页」（可能不是仓库），
+   * repository 才是**插件官方仓库**。市场卡片与设置面板优先展示 repository，
+   * 缺失时退回 homepage（见 `market-types.ts` 的 `pluginRepoUrl`）。可选。
+   */
+  repository?: string;
+  /**
+   * **本版本**的更新日志（可含 Markdown / 多行文本）。
+   *
+   * 用户在插件市场里发现已安装插件有新版本时，会在卡片说明下方看到这一版
+   * 相对旧版改了什么——因此请在这里写「本版本」的变更，而不是累计日志。
+   * 由构建索引（`scripts/build-index.mjs`）写入对应版本的市场条目。可选。
+   */
+  changelog?: string;
   /** 图标相对路径 */
   icon?: string;
   license?: string;
@@ -979,6 +995,8 @@ export function parsePluginManifest(
     author: asString(obj.author) ?? undefined,
     description: asString(obj.description) ?? undefined,
     homepage: asString(obj.homepage) ?? undefined,
+    repository: asString(obj.repository) ?? undefined,
+    changelog: asString(obj.changelog) ?? undefined,
     icon: icon ?? undefined,
     license: asString(obj.license) ?? undefined,
     permissions: permissions.length > 0 ? permissions : undefined,

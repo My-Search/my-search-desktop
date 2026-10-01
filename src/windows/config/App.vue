@@ -9,7 +9,7 @@
  *         > aside.cfg-nav（左侧分类菜单）
  *         > main.cfg-body（右侧内容区，动态面板）
  *     > footer.cfg-footer（保存并应用）
- *     > ToastHost / MessageDialog / TokenDialog
+ *     > ToastHost / MessageDialog
  *
  * 面板按需渲染（不保活）：<component :is> 切换，等价原 setPane() 的 innerHTML 替换。
  */
@@ -28,10 +28,8 @@ import { useMessageDialog } from "../../composables/useMessageDialog";
 import { useToast } from "../../composables/useToast";
 import MessageDialog from "../../components/MessageDialog.vue";
 import ToastHost from "../../components/ToastHost.vue";
-import TokenDialog from "./TokenDialog.vue";
 import PanelSubscribes from "./panels/PanelSubscribes.vue";
 import PanelTags from "./panels/PanelTags.vue";
-import PanelRepo from "./panels/PanelRepo.vue";
 import PanelCache from "./panels/PanelCache.vue";
 import PanelShortcut from "./panels/PanelShortcut.vue";
 import PanelGeneral from "./panels/PanelGeneral.vue";
@@ -59,7 +57,6 @@ import { setupBuiltinAutoInstall } from "../../lib/plugins/install-builtin";
 type PaneName =
   | "subscribes"
   | "tags"
-  | "repo"
   | "cache"
   | "shortcut"
   | "general"
@@ -82,27 +79,18 @@ const installed = useInstalledList(draft);
 const toast = useToast();
 const message = useMessageDialog();
 
-// askToken 在下面定义（函数声明提升），token 变化后由面板自行刷新状态
-const github = createGithubApi(
-  () => askToken(),
-  () => {
-    /* noop */
-  }
-);
+// TisHub 订阅市场（只读 Issues，不需要 GitHub Token）
+const github = createGithubApi();
 const tisHub = createTisHub(github);
 
-/** 当前面板（tis-hub 属于「公共仓库」分支，左侧高亮 repo） */
+/** 当前面板（tis-hub 属于「订阅管理」分支，左侧高亮 subscribes） */
 const pane = shallowRef<PaneName>("subscribes");
-const navPane = computed<PaneName>(() => (pane.value === "tis-hub" ? "repo" : pane.value));
+const navPane = computed<PaneName>(() => (pane.value === "tis-hub" ? "subscribes" : pane.value));
 
 /** 快捷键绑定（快捷键 / 作用类型 / 作用对象；由「快捷键」面板读写） */
 const shortcutBindings = ref<ShortcutBinding[]>([defaultToggleBinding()]);
 /** 快捷键录入态（录入时 Esc 不关窗） */
 const shortcutCapturing = ref(false);
-
-/** Token 弹窗可见性 */
-const tokenVisible = ref(false);
-let tokenResolver: ((value: string | null) => void) | null = null;
 
 /**
  * 双击 .mspp 插件包时由 Rust 叫醒的待安装路径。
@@ -133,24 +121,10 @@ async function handleExternalPluginOpen(): Promise<void> {
   pendingPluginPath.value = path;
 }
 
-function askToken(): Promise<string | null> {
-  return new Promise((resolve) => {
-    tokenResolver = resolve;
-    tokenVisible.value = true;
-  });
-}
-function closeAskToken(value: string | null): void {
-  tokenVisible.value = false;
-  const resolve = tokenResolver;
-  tokenResolver = null;
-  if (resolve) resolve(value);
-}
-
 // 面板组件映射（等价原 panes 字典）
 const PANES = {
   subscribes: PanelSubscribes,
   tags: PanelTags,
-  repo: PanelRepo,
   cache: PanelCache,
   shortcut: PanelShortcut,
   general: PanelGeneral,
@@ -214,10 +188,6 @@ function onGlobalKeydown(e: KeyboardEvent): void {
       e.stopPropagation();
       message.handleOk();
     }
-    return;
-  }
-  if (tokenVisible.value) {
-    if (e.key === "Escape") closeAskToken(null);
     return;
   }
   if (e.key === "Escape") closeWindow();
@@ -316,14 +286,14 @@ onBeforeUnmount(() => {
 const commonProps = computed(() => ({
   draft,
   tags,
-  github,
   tisHub,
   installed,
   notify: toast.showToast,
   confirm: (text: string) => message.confirmMessage(text),
   alert: (text: string) => message.alertMessage(text),
-  askToken,
-  goRepo: () => switchPane("repo"),
+  /** 订阅市场返回订阅总览 */
+  goSubscribes: () => switchPane("subscribes"),
+  /** 订阅总览的「Tis 订阅市场」入口 → 打开订阅市场 */
   openTisHub: () => switchPane("tis-hub"),
   saved: shortcutBindings.value,
   onSaved: (v: ShortcutBinding[]) => (shortcutBindings.value = v),
@@ -393,13 +363,6 @@ const commonProps = computed(() => ({
             <path d="M0 0h9.59a2 2 0 0 1 1.41.59l8 8a2 2 0 0 1 0 2.82l-6.59 6.59a2 2 0 0 1-2.82 0l-8-8A2 2 0 0 1 1 8.59V2a2 2 0 0 1 2-2h6.59H0zm4 3a1 1 0 1 0 0 2 1 1 0 0 0 0-2z" />
           </svg>
           <span>关注标签</span>
-        </button>
-        <button class="nav-item" :class="{ on: navPane === 'repo' }" data-pane="repo" @click="switchPane('repo')">
-          <svg viewBox="0 0 24 24" fill="currentColor" width="17" height="17">
-            <path d="M12.3 1.37a11.5 11.5 0 0 1 5.33 4.35l1.2 1.73 1.09.03a4.5 4.5 0 0 1 3.7 3.78c.38 2.52-1.2 4.9-3.6 5.67l-.2.06H6.33l-.28-.01A6.6 6.6 0 0 1 1.37 9.5c0-3.58 2.73-6.47 6.1-6.48l.18.01.82.02.42-.68A6.92 6.92 0 0 1 12.3 1.37z" />
-            <path d="M11.57 9.06H10.2a3.22 3.22 0 0 0-.77-2.33A3.6 3.6 0 0 0 6.54 5.4v-1.5a5.1 5.1 0 0 1 4.14 1.7c.74.78 1.08 1.66 1.17 3.3l-.28.16z" />
-          </svg>
-          <span>公共仓库</span>
         </button>
         <button class="nav-item" :class="{ on: navPane === 'cache' }" data-pane="cache" @click="switchPane('cache')">
           <svg viewBox="0 0 20 20" fill="currentColor" width="17" height="17">
@@ -489,7 +452,6 @@ const commonProps = computed(() => ({
     </footer>
 
     <ToastHost :state="toast.state" />
-    <TokenDialog :visible="tokenVisible" @ok="(v: string) => closeAskToken(v)" @cancel="closeAskToken(null)" />
     <MessageDialog :state="message.state" @ok="message.handleOk" @cancel="message.handleCancel" />
   </div>
 </template>

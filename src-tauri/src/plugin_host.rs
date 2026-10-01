@@ -59,6 +59,19 @@ const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
 /// 保留日志尾部大小
 const KEEP_LOG_BYTES: usize = 256 * 1024;
+/// 单行 stdout 上限（字节）。
+///
+/// 为什么需要：后端的 JSON-RPC 是「一行一条报文」，若某次输出是**不含换行的巨串**
+/// （内存里的 buffer 被塞爆、或把整篇大文档当一行吐出来），`read_until` 会把这一行
+/// 无限累积进 `Vec<u8>`，直接把宿主进程 OOM 掉。超过此上限的一行按「协议错误」
+/// 丢弃（丢弃整行、不解析），只记一条日志——宁可丢一条畸形报文，也不能拖垮宿主。
+const MAX_RPC_LINE_BYTES: usize = 8 * 1024 * 1024;
+/// 单插件同时在途的 JSON-RPC 调用上限。
+///
+/// 为什么需要：`pending` 是无限增长的 HashMap，前端一旦泄漏调用（或某条调用
+/// 长时间不返回又不断重发），会累积大量等待中的 channel 与线程。到达上限时
+/// 直接快速失败，让调用方（前端）自己退避，而不是把宿主的资源吃干。
+const MAX_INFLIGHT_CALLS: usize = 256;
 /// 后台进程状态变更事件名（面板与搜索结果据此刷新）
 const EVENT_BACKEND_CHANGED: &str = "plugin://backend-changed";
 /// 插件后端通知事件名（后端发的非 log 通知通过此事件广播给前端）
@@ -177,8 +190,16 @@ pub struct GatewaySpec {
     pub backend_protocol: Option<String>,
     #[serde(default)]
     pub idle_exit_sec: u64,
+    /// 前台关闭后的保留窗口期（秒）。历史字段：新前端不再下发，保留仅为兼容。
     #[serde(default)]
     pub grace_sec: u64,
+    /// 优雅退出等待（秒）——`deactivate` 发出后等这么久再强杀。
+    ///
+    /// 注意：这里必须与前端清单字段名一致（`backend.shutdownTimeoutSec`）。
+    /// 早先 Rust 读的是 `graceSec`，而清单/网关下发的是 `shutdownTimeoutSec`，
+    /// 两边字段名对不上，导致「声明的优雅退出时长从未生效、永远退化成默认 3 秒」。
+    #[serde(default)]
+    pub shutdown_timeout_sec: u64,
     #[serde(default)]
     pub max_restarts: u32,
     #[serde(default)]
@@ -1071,6 +1092,28 @@ fn backend_is_alive(plugin_id: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// 立即失败某个句柄上所有在途请求。
+///
+/// 关键：子进程一退出，`stdin` 写入会失败、stdout 线程结束，但等待方阻塞在
+/// `rx.recv_timeout` 上——只要 `pending` 里还留着 `Sender`，通道就不会断开，
+/// 于是调用方要**干等满 callTimeoutMs**（pi-agent 是 5 分钟）才看到超时。
+/// 进程退出/被停止时主动 drain `pending`，让在途调用立刻拿到明确错误。
+fn reject_all_pending(handle: &Arc<BackendHandle>, reason: &str) {
+    let drained: Vec<Sender<Result<Value, String>>> = {
+        match handle.pending.lock() {
+            Ok(mut map) => map.drain().map(|(_, tx)| tx).collect(),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .drain()
+                .map(|(_, tx)| tx)
+                .collect(),
+        }
+    };
+    for tx in drained {
+        let _ = tx.send(Err(reason.to_string()));
+    }
+}
+
 /// 读取运行态快照（无句柄时返回「未运行」）
 fn backend_state(plugin_id: &str) -> BackendState {
     if let Ok(map) = BACKENDS.lock() {
@@ -1275,11 +1318,28 @@ fn spawn_backend(app: &AppHandle, plugin_id: &str) -> Result<BackendState, Strin
         std::thread::spawn(move || {
             let mut reader = BufReader::new(out);
             let mut buf: Vec<u8> = Vec::new();
+            let mut dropped: u64 = 0; // 当前这条超长行已丢弃的字节数（>0 表示正处于超长行中）
             loop {
                 buf.clear();
                 match reader.read_until(b'\n', &mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(_) => {}
+                }
+                // 单行超限：整行丢弃并按协议错误记一次日志，防止无换行巨串把宿主 OOM。
+                // 处于超长行中时（dropped>0），把后续读到换行为止的内容一并计入丢弃。
+                if dropped > 0 || buf.len() > MAX_RPC_LINE_BYTES {
+                    dropped += buf.len() as u64;
+                    if buf.last() == Some(&b'\n') {
+                        append_log(
+                            &app2,
+                            &pid2,
+                            &format!(
+                                "协议错误：stdout 单行超过 {MAX_RPC_LINE_BYTES} 字节，已丢弃 {dropped} 字节（疑似后端输出了不含换行的巨型报文）"
+                            ),
+                        );
+                        dropped = 0;
+                    }
+                    continue;
                 }
                 let line = String::from_utf8_lossy(&buf);
                 let line = line.trim_end_matches(|c| c == '\r' || c == '\n');
@@ -1289,7 +1349,18 @@ fn spawn_backend(app: &AppHandle, plugin_id: &str) -> Result<BackendState, Strin
                 if handle_rpc_line(line, &h, &app2, &pid2) {
                     continue;
                 }
-                append_log(&app2, &pid2, &format!("stdout: {line}"));
+                // 非 JSON-RPC 输出：截断后再写日志，避免超长行同样撑爆日志
+                let shown = if line.len() > 2000 {
+                    // 按 UTF-8 字符边界回退，避免切碎多字节字符
+                    let mut cut = 2000;
+                    while cut > 0 && !line.is_char_boundary(cut) {
+                        cut -= 1;
+                    }
+                    format!("{}…（共 {} 字节）", &line[..cut], line.len())
+                } else {
+                    line.to_string()
+                };
+                append_log(&app2, &pid2, &format!("stdout: {shown}"));
             }
         });
     }
@@ -1300,18 +1371,41 @@ fn spawn_backend(app: &AppHandle, plugin_id: &str) -> Result<BackendState, Strin
         std::thread::spawn(move || {
             let mut reader = BufReader::new(err_out);
             let mut buf: Vec<u8> = Vec::new();
+            let mut dropped: u64 = 0;
             loop {
                 buf.clear();
                 match reader.read_until(b'\n', &mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(_) => {}
                 }
+                // 与 stdout 同理：超长单行不写日志（否则日志被一行撑爆），只记一次
+                if dropped > 0 || buf.len() > MAX_RPC_LINE_BYTES {
+                    dropped += buf.len() as u64;
+                    if buf.last() == Some(&b'\n') {
+                        append_log(
+                            &app2,
+                            &pid2,
+                            &format!("stderr: 单行超过 {MAX_RPC_LINE_BYTES} 字节，已丢弃 {dropped} 字节"),
+                        );
+                        dropped = 0;
+                    }
+                    continue;
+                }
                 let line = String::from_utf8_lossy(&buf);
                 let line = line.trim_end_matches(|c| c == '\r' || c == '\n');
                 if line.is_empty() {
                     continue;
                 }
-                append_log(&app2, &pid2, &format!("stderr: {line}"));
+                let shown = if line.len() > 2000 {
+                    let mut cut = 2000;
+                    while cut > 0 && !line.is_char_boundary(cut) {
+                        cut -= 1;
+                    }
+                    format!("{}…（共 {} 字节）", &line[..cut], line.len())
+                } else {
+                    line.to_string()
+                };
+                append_log(&app2, &pid2, &format!("stderr: {shown}"));
             }
         });
     }
@@ -1392,7 +1486,6 @@ fn spawn_backend(app: &AppHandle, plugin_id: &str) -> Result<BackendState, Strin
             unsafe {
                 close_job_object(h.job)
             };
-            let _ = h;
 
             // 摘掉自己的句柄（此时已确认它就是表里那一个）
             if let Ok(mut map) = BACKENDS.lock() {
@@ -1410,6 +1503,8 @@ fn spawn_backend(app: &AppHandle, plugin_id: &str) -> Result<BackendState, Strin
             let code = exited.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
             let msg = format!("进程异常退出（exit code {code}）");
             append_log(&app2, &pid2, &msg);
+            // 进程已死：立刻失败所有在途调用，避免它们干等满 callTimeoutMs
+            reject_all_pending(&h, &format!("后端进程已退出（exit code {code}）"));
 
             // 只有「开机自启」的插件才自动重启，且次数受 maxRestarts 限制
             let spec = gateway_get(&pid2);
@@ -1605,6 +1700,13 @@ fn request(
     let (tx, rx) = channel::<Result<Value, String>>();
     {
         let mut pending = handle.pending.lock().map_err(|_| err("请求表不可用"))?;
+        // 在途上限：把「泄漏式重发 / 大量并发调用」挡在门外，快速失败而不是把
+        // 宿主的 channel 与线程吃干（到达上限时调用方应自行退避后重试）。
+        if pending.len() >= MAX_INFLIGHT_CALLS {
+            return Err(err(format!(
+                "插件在途调用过多（{MAX_INFLIGHT_CALLS}），请稍后重试"
+            )));
+        }
         pending.insert(id, tx);
     }
     let payload = json!({
@@ -1657,6 +1759,27 @@ fn request(
 
 /// 停止后台进程（先发 deactivate 优雅退出，超时后连带进程树强杀）
 fn stop_backend(app: &AppHandle, plugin_id: &str, requested: bool) -> Result<(), String> {
+    let spec = gateway_get(plugin_id);
+    let grace = Duration::from_secs(
+        spec.as_ref()
+            .map(|s| s.shutdown_timeout_sec)
+            .unwrap_or(5)
+            .clamp(1, 60),
+    );
+    stop_backend_with_grace(app, plugin_id, requested, grace)
+}
+
+/// 停止后台进程（显式指定优雅退出窗口）。
+///
+/// 单独抽出 `grace` 参数是为了应用退出路径（`shutdown_all`）：那时**不能**对每个
+/// 插件都等满 `shutdownTimeoutSec`（多个常驻插件会让「退出应用」卡十几秒），
+/// 只给一个很短的收尾窗口，到点直接强杀。
+fn stop_backend_with_grace(
+    app: &AppHandle,
+    plugin_id: &str,
+    requested: bool,
+    grace: Duration,
+) -> Result<(), String> {
     let handle = {
         let mut map = BACKENDS.lock().map_err(|_| err("插件进程表不可用"))?;
         map.remove(plugin_id)
@@ -1668,17 +1791,12 @@ fn stop_backend(app: &AppHandle, plugin_id: &str, requested: bool) -> Result<(),
         st.status = "stopping".into();
         st.stop_requested = requested;
     }
-    let spec = gateway_get(plugin_id);
-    let grace = Duration::from_secs(spec.as_ref().map(|s| s.grace_sec).unwrap_or(3).clamp(1, 60));
-
     // 优雅退出：发通知（不等响应），给插件一点收尾时间
-    {
-        if let Ok(mut guard) = handle.stdin.lock() {
-            if let Some(stdin) = guard.as_mut() {
-                let line = json!({"jsonrpc":"2.0","method":"deactivate"}).to_string() + "\n";
-                let _ = stdin.write_all(line.as_bytes());
-                let _ = stdin.flush();
-            }
+    if let Ok(mut guard) = handle.stdin.lock() {
+        if let Some(stdin) = guard.as_mut() {
+            let line = json!({"jsonrpc":"2.0","method":"deactivate"}).to_string() + "\n";
+            let _ = stdin.write_all(line.as_bytes());
+            let _ = stdin.flush();
         }
     }
     let deadline = Instant::now() + grace;
@@ -1694,6 +1812,12 @@ fn stop_backend(app: &AppHandle, plugin_id: &str, requested: bool) -> Result<(),
     }
     if !exited {
         kill_tree(&handle);
+    }
+    // 无论优雅退出还是强杀：进程都没了，立刻失败在途调用（否则调用方要等满超时）
+    reject_all_pending(&handle, "后端进程已停止");
+    // 清掉 stdin 句柄，避免后续误写
+    if let Ok(mut guard) = handle.stdin.lock() {
+        *guard = None;
     }
     // 状态广播：这里用临时快照（句柄已从表中移除）
     let mut snapshot = backend_state(plugin_id);
@@ -1925,16 +2049,20 @@ pub fn plugin_clear_log(app: AppHandle, plugin_id: String) -> Result<(), String>
 // ===================== 应用生命周期 =====================
 
 /// 应用退出前停止全部插件进程（避免留下孤儿）。
-/// 注意：Windows 上 Job Object 的 KILL_ON_JOB_CLOSE 已经保证了宿主退出时
-/// 内核自动结束整棵进程树，此函数仅适用于宿主**不想等进程自然退出**的优雅关闭。
-#[allow(dead_code)]
+///
+/// Windows 上 Job Object 的 KILL_ON_JOB_CLOSE 也能在宿主退出时内核级结束整棵
+/// 进程树，但 Unix 侧只有 `process_group`，**宿主被 SIGKILL / 崩溃时进程组不会
+/// 自动回收**；因此退出路径显式调用本函数，把「优雅停 → 强杀」走一遍，两端都稳。
 pub fn shutdown_all(app: &AppHandle) {
     let ids: Vec<String> = BACKENDS
         .lock()
         .map(|m| m.keys().cloned().collect())
         .unwrap_or_default();
+    // 退出路径只给每个插件很短的收尾窗口：多个常驻插件若各等满
+    // shutdownTimeoutSec，会让「退出应用」明显卡顿。到点直接强杀进程树。
+    let grace = Duration::from_millis(800);
     for id in ids {
-        let _ = stop_backend(app, &id, true);
+        let _ = stop_backend_with_grace(app, &id, true, grace);
     }
 }
 

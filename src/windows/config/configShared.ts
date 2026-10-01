@@ -19,8 +19,6 @@ export const SEARCH_DATA_KEY = "SEARCH_DATA_KEY";
 export const SUBSCRIBE_FINGERPRINT_KEY = "SUBSCRIBE_FINGERPRINT_CACHE_KEY";
 /** 已安装的 TisHub 订阅 */
 export const TISHUB_KEY = "USE_INSTALL_TISHUB_CACHE_KEY";
-/** GitHub Token */
-export const TOKEN_KEY = "USER_GITHUB_TOKEN_CACHE_KEY";
 /** 默认不关注的标签 */
 export const DEFAULT_UNFOLLOW = ["成人内容", "Adults only"];
 
@@ -94,8 +92,3 @@ export const tisHubState = reactive({
   mode: "installed" as "installed" | "market",
 });
 
-/**
- * Token 版本号：每次 Token 变更（写入/清理）时自增。
- * PanelRepo 通过 watch 此值来刷新视图，解决组件销毁重建无法接收回调的问题。
- */
-export const tokenVersion = reactive({ v: 0 });

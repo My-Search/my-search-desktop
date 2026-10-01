@@ -18,6 +18,9 @@ name: 三平台构建
 #
 # 注意：插件（.mspp）的打包与市场索引构建**不在本仓库**进行，
 # 见市场仓库 My-Search/my-search-plugin-market 的「构建插件市场索引」工作流。
+#
+# Release 说明（更新日志）取自仓库根目录 CHANGELOG.md 的对应版本章节，
+# 由 scripts/extract-release-notes.mjs 提取；发版前需补充该章节。
 on:
   push:
     branches: [master]
@@ -161,6 +164,25 @@ jobs:
           # 一个安装包都没有说明上游上传出了问题，宁可失败也不要发空 Release
           test -n "$(ls -A release-files)"
 
+      # 从 CHANGELOG.md 提取本版本章节作为 Release 说明（发版前需在
+      # CHANGELOG.md 补充 `## vX.Y.Z` 章节）；缺章节时退回默认文案，
+      # 只告警不阻断发版。
+      - name: 生成 Release 说明
+        run: |
+          TAG="${{ steps.meta.outputs.tag }}"
+          if node scripts/extract-release-notes.mjs "$TAG" > release-notes.md; then
+            echo "已从 CHANGELOG.md 提取 ${TAG} 的更新日志"
+          else
+            echo "::warning::CHANGELOG.md 缺少 ${TAG} 章节，Release 说明回退为默认文案"
+            {
+              echo "我的搜索桌面版 - 订阅式搜索"
+              echo
+              echo "> 本版本暂无手写更新日志，变更见 [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/master/CHANGELOG.md)。"
+            } > release-notes.md
+          fi
+          echo "---- Release 说明 ----"
+          cat release-notes.md
+
       - name: 创建或刷新 Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -174,10 +196,10 @@ jobs:
             for name in $(gh release view "$TAG" --json assets -q '.assets[].name'); do
               [ -f "release-files/$name" ] || gh release delete-asset "$TAG" "$name" --yes || true
             done
-            gh release edit "$TAG" --title "我的搜索 $TAG" --latest
+            gh release edit "$TAG" --title "我的搜索 $TAG" --notes-file release-notes.md --latest
           else
             gh release create "$TAG" release-files/* \
               --title "我的搜索 $TAG" \
-              --notes "我的搜索桌面版 - 订阅式搜索" \
+              --notes-file release-notes.md \
               --latest
           fi

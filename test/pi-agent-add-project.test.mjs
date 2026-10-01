@@ -261,9 +261,9 @@ function boot(msOpts = {}) {
 
 /* 场景 1：源码契约 —— 事件订阅与关键函数存在 */
 {
-  check("源码订阅了 ms-dropped-paths", /addEventListener\(\s*["']ms-dropped-paths["']/.test(src));
+  check("源码订阅了 ms-dropped-paths", /((addEventListener|onDoc)\(\s*(document,\s*)?["']ms-dropped-paths["'])/.test(src));
   check("源码读取 detail.entries（宿主带回的 isDir 描述）", /detail\.entries/.test(src));
-  check("源码订阅了 ms-drop-hover（原生拖放下的悬停高亮）", /addEventListener\(\s*["']ms-drop-hover["']/.test(src));
+  check("源码订阅了 ms-drop-hover（原生拖放下的悬停高亮）", /((addEventListener|onDoc)\(\s*(document,\s*)?["']ms-drop-hover["'])/.test(src));
   check("源码用 closest 判定悬停是否落在左侧栏", /closest\(/.test(src) && /isOverSidebar/.test(src));
   check("源码定义了 pickFolderAndAdd", /function pickFolderAndAdd\s*\(/.test(src));
   check("pickFolderAndAdd 调用了 ms.ui.pickFolder", /ms\.ui\.pickFolder\s*\(/.test(src));

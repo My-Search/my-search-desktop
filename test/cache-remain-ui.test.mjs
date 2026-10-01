@@ -263,7 +263,7 @@ check("旧版缓存不标记 .expired", legacy.expiredClass === false, `count=${
 await seedCache(12 * 3600 * 1000);
 await openCachePane();
 check("切走前有剩余时间", /剩 /.test((await readItem()).count || ""), "");
-await evalJs(`document.querySelector('.cfg-nav .nav-item[data-pane="repo"]').click()`);
+await evalJs(`document.querySelector('.cfg-nav .nav-item[data-pane="tags"]').click()`);
 await new Promise((r) => setTimeout(r, 1500));
 const back = await evalJs(`document.querySelector('#cacheList') === null`);
 check("切走后缓存面板 DOM 被移除", back === true, `removed=${back}`);

@@ -359,9 +359,27 @@ export function usePluginViewHost(opts: PluginViewHostOptions) {
     }
     // 1) 通知监听（后端流式响应等）——必须在 DOM 消失前解除
     try {
+      // 先让插件自己收尾（停定时器 / 取消轮询）。插件把收尾函数挂在它自己的 DOM
+      // 载体上（host.__msPluginCleanup）；宿主不认识插件内部有哪些定时器，必须在
+      // 载体被 dispose 之前调用，否则插件的 setInterval 会继续打后端、并把整个
+      // 模块状态钉在内存里（视图已销毁却仍在轮询）。
+      const cleanup = (session.channel.container as unknown as {
+        __msPluginCleanup?: () => void;
+      }).__msPluginCleanup;
+      if (typeof cleanup === "function") {
+        try {
+          cleanup();
+        } catch (e) {
+          console.warn("[插件] 会话清理回调失败:", e);
+        }
+      }
       const backend = session.api?.backend as Record<string, unknown> | undefined;
       if (backend && typeof backend._clearNotifications === "function") {
         (backend._clearNotifications as () => void)();
+      }
+      // 后端状态订阅（ms.backend.onBackendChanged）：同理，会话销毁即失效
+      if (backend && typeof backend._clearBackendHandlers === "function") {
+        (backend._clearBackendHandlers as () => void)();
       }
       // 主题订阅（ms.ui.onThemeChanged）：同理，会话销毁即失效
       const ui = session.api?.ui as Record<string, unknown> | undefined;

@@ -1,0 +1,621 @@
+/*
+ * 资源监控插件前台样式。
+ *
+ * 两条硬约定（见 docs/plugin-market-publish.md「界面与主题」）：
+ *   1. 只用宿主共享变量 `var(--token, 兜底值)`，不写 @media (prefers-color-scheme)
+ *      ——宿主把主题解析成 html.theme-dark 类，变量随之变化，插件跟随即可；
+ *   2. 不用 :root / body 选择器——插件 CSS 会被宿主加前缀作用域化，写它们会
+ *      被映射到容器本身，语义错位。
+ */
+
+.rm-app {
+  --rm-line: var(--line, #e6e8ec);
+  --rm-card: var(--card, #ffffff);
+  --rm-field: var(--field, #f5f6f8);
+  --rm-hover: var(--hover-bg, #f2f4f7);
+  --rm-text: var(--text, #1f2329);
+  --rm-muted: var(--muted, #7a828e);
+  --rm-accent: var(--brand, #5b5bd6);
+  --rm-err: var(--err, #e02424);
+  --rm-code: var(--code-bg, #eef0f4);
+  --rm-grid: color-mix(in srgb, var(--rm-line) 70%, transparent);
+
+  padding: 10px 16px 16px;
+  color: var(--rm-text);
+  font-size: 13px;
+  line-height: 1.5;
+  max-height: 486px;
+  overflow-y: auto;
+  box-sizing: border-box;
+}
+
+.rm-app * {
+  box-sizing: border-box;
+}
+
+/* 宿主规则可能覆盖 hidden，这里强制生效 */
+.rm-app [hidden] {
+  display: none !important;
+}
+
+/* ---------------- 顶部：系统卡片 ---------------- */
+
+/* 顶部系统卡片：占满整行宽度（4 张等分） */
+.rm-head {
+  display: block;
+  margin-bottom: 10px;
+}
+
+.rm-cards {
+  display: flex;
+  width: 100%;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.rm-card {
+  flex: 1 1 calc(25% - 6px);
+  min-width: 108px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+  background: var(--rm-field);
+  border: 1px solid var(--rm-line);
+  border-radius: 8px;
+}
+
+.rm-card-k {
+  font-size: 11px;
+  color: var(--rm-muted);
+}
+
+.rm-card-v {
+  font-size: 17px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rm-card-sub {
+  font-size: 11px;
+  color: var(--rm-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 页签行：左侧页签，右侧状态 + 操作按钮（整行占满） */
+.rm-tabsbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.rm-tabs-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+.rm-status {
+  font-size: 11px;
+  color: var(--rm-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: right;
+}
+
+.rm-status.warn {
+  color: var(--rm-err);
+}
+
+.rm-btn {
+  padding: 5px 12px;
+  font-size: 12px;
+  color: var(--rm-text);
+  background: var(--rm-card);
+  border: 1px solid var(--rm-line);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.rm-btn:hover {
+  background: var(--rm-hover);
+}
+
+.rm-btn.sm {
+  padding: 3px 10px;
+  font-size: 11.5px;
+}
+
+/* ---------------- 阈值设置（进圈 / 出圈） ---------------- */
+
+.rm-cfg {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin-bottom: 8px;
+  padding: 6px 10px;
+  background: var(--rm-field);
+  border: 1px solid var(--rm-line);
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.rm-cfg-k {
+  color: var(--rm-muted);
+}
+
+.rm-cfg-f {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--rm-text);
+}
+
+.rm-input {
+  width: 52px;
+  padding: 2px 6px;
+  font-size: 12px;
+  color: var(--rm-text);
+  background: var(--rm-card);
+  border: 1px solid var(--rm-line);
+  border-radius: 5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.rm-cfg-hint {
+  color: var(--rm-muted);
+  font-size: 11px;
+  margin-left: auto;
+}
+
+/* ---------------- 页签 ---------------- */
+
+.rm-tabs {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.rm-tab {
+  padding: 5px 14px;
+  font-size: 12.5px;
+  color: var(--rm-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.rm-tab:hover {
+  background: var(--rm-hover);
+}
+
+.rm-tab.active {
+  color: var(--rm-accent);
+  background: var(--code-bg, #eef0f4);
+  border-color: var(--rm-line);
+  font-weight: 600;
+}
+
+/* ---------------- 趋势图 ---------------- */
+
+.rm-chartwrap {
+  position: relative;
+  border: 1px solid var(--rm-line);
+  border-radius: 8px;
+  background: var(--rm-card);
+  padding: 6px 4px 2px;
+}
+
+/* 缩放工具条：悬浮在图表右上角 */
+.rm-zoombar {
+  position: absolute;
+  top: 5px;
+  right: 6px;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 3px;
+  background: color-mix(in srgb, var(--rm-card) 88%, transparent);
+  border: 1px solid var(--rm-line);
+  border-radius: 6px;
+  opacity: 0.55;
+  transition: opacity 0.15s;
+}
+
+.rm-chartwrap:hover .rm-zoombar {
+  opacity: 1;
+}
+
+.rm-zbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  color: var(--rm-muted);
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.rm-zbtn:hover {
+  color: var(--rm-accent);
+  background: var(--rm-hover);
+}
+
+.rm-zbtn:disabled {
+  opacity: 0.35;
+  cursor: default;
+  color: var(--rm-muted);
+  background: transparent;
+}
+
+.rm-zlabel {
+  font-size: 11px;
+  color: var(--rm-muted);
+  padding: 0 3px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  min-width: 62px;
+  text-align: center;
+}
+
+/* 放大后光标提示可拖动平移 */
+.rm-chartwrap.rm-pannable {
+  cursor: grab;
+}
+
+.rm-chartwrap.rm-panning {
+  cursor: grabbing;
+}
+
+/* 悬停/单击提示：单击图表可定格某一时刻（未处于平移态时可点） */
+.rm-chartwrap:not(.rm-pannable) .rm-chart {
+  cursor: pointer;
+}
+
+.rm-chartwrap.rm-pannable .rm-chart {
+  cursor: grab;
+}
+
+.rm-chartwrap.rm-panning .rm-chart {
+  cursor: grabbing;
+}
+
+.rm-chartwrap.rm-pannable .rm-chart {
+  user-select: none;
+}
+
+.rm-chart svg {
+  display: block;
+  width: 100%;
+  height: 168px;
+}
+
+.rm-chart .rm-gridline {
+  stroke: var(--rm-grid);
+  stroke-width: 1;
+}
+
+.rm-chart .rm-axis {
+  fill: var(--rm-muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.rm-chart .rm-series {
+  fill: none;
+  stroke-width: 1.8;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.rm-chart .rm-series.hidden {
+  display: none;
+}
+
+/* 定格标记：钉住时刻的竖线 + 顶端圆点 */
+.rm-chart .rm-pinmark {
+  stroke: var(--rm-accent);
+  stroke-width: 1.4;
+  stroke-dasharray: 3 2;
+  opacity: 0.85;
+}
+
+.rm-chart .rm-pindot {
+  fill: var(--rm-accent);
+}
+
+.rm-cross {
+  position: absolute;
+  top: 6px;
+  bottom: 2px;
+  width: 1px;
+  background: var(--rm-muted);
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.rm-tip {
+  position: absolute;
+  z-index: 5;
+  max-width: 240px;
+  padding: 6px 8px;
+  background: var(--rm-card);
+  color: var(--rm-text);
+  border: 1px solid var(--rm-line);
+  border-radius: 6px;
+  box-shadow: var(--dialog-shadow, 0 8px 24px rgba(0, 0, 0, 0.18));
+  font-size: 11.5px;
+  pointer-events: none;
+}
+
+.rm-tip .rm-tip-time {
+  color: var(--rm-muted);
+  margin-bottom: 3px;
+}
+
+.rm-tip .rm-tip-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.rm-tip .rm-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+.rm-tip .rm-tip-name {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rm-tip .rm-tip-val {
+  font-variant-numeric: tabular-nums;
+  color: var(--rm-text);
+}
+
+/* ---------------- 图例 ---------------- */
+
+.rm-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin: 8px 0 4px;
+}
+
+.rm-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 11.5px;
+  color: var(--rm-text);
+  border: 1px solid transparent;
+}
+
+.rm-legend-item:hover {
+  background: var(--rm-hover);
+}
+
+/* 被置灰：单选态下未选中的 tag / 非单选态下超出同屏上限的 tag */
+.rm-legend-item.off {
+  opacity: 0.42;
+}
+
+.rm-legend-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  flex: 0 0 auto;
+}
+
+/* 单选选中：高亮描边 + 加粗 */
+.rm-legend-item.solo {
+  font-weight: 600;
+  color: var(--rm-accent);
+  background: var(--rm-hover);
+  border-color: var(--rm-accent);
+}
+
+.rm-legend-more {
+  color: var(--rm-muted);
+  font-size: 11.5px;
+  align-self: center;
+}
+
+/* ---------------- 说明 ---------------- */
+
+.rm-note {
+  margin: 2px 0 8px;
+  font-size: 11px;
+  color: var(--rm-muted);
+}
+
+/* ---------------- 定格提示条 ---------------- */
+
+.rm-pinbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+  padding: 5px 10px;
+  font-size: 11.5px;
+  color: var(--rm-accent);
+  background: color-mix(in srgb, var(--rm-accent) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--rm-accent) 40%, var(--rm-line));
+  border-radius: 8px;
+}
+
+.rm-pin-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--rm-accent);
+  flex: 0 0 auto;
+}
+
+.rm-pin-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rm-pin-back {
+  flex: 0 0 auto;
+  padding: 2px 10px;
+  font-size: 11px;
+  color: var(--rm-accent);
+  background: var(--rm-card);
+  border: 1px solid color-mix(in srgb, var(--rm-accent) 45%, var(--rm-line));
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.rm-pin-back:hover {
+  background: var(--rm-hover);
+}
+
+/* ---------------- Top 10 列表 ---------------- */
+
+.rm-listhead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 3px;
+  font-size: 11px;
+  color: var(--rm-muted);
+}
+
+.rm-listhead-t {
+  font-variant-numeric: tabular-nums;
+}
+
+.rm-listhead-badge {
+  padding: 0 6px;
+  font-size: 10.5px;
+  color: var(--rm-accent);
+  border: 1px solid color-mix(in srgb, var(--rm-accent) 45%, var(--rm-line));
+  border-radius: 999px;
+}
+
+.rm-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.rm-row {
+  display: grid;
+  grid-template-columns: 20px 10px 1fr auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+}
+
+.rm-acts {
+  display: inline-flex;
+  gap: 5px;
+}
+
+.rm-kill {
+  padding: 2px 9px;
+  font-size: 11px;
+  color: var(--rm-muted);
+  background: transparent;
+  border: 1px solid var(--rm-line);
+  border-radius: 5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.rm-kill:hover {
+  color: var(--rm-accent);
+  border-color: var(--rm-accent);
+  background: var(--rm-hover);
+}
+
+/* 「终止」保持危险色，与「位置」区分 */
+.rm-acts .rm-kill:last-child:hover {
+  color: var(--rm-err);
+  border-color: var(--rm-err);
+}
+
+.rm-rank {
+  color: var(--rm-muted);
+  font-size: 11px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.rm-list .rm-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.rm-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rm-name .rm-inst {
+  color: var(--rm-muted);
+  font-size: 11px;
+  margin-left: 5px;
+}
+
+.rm-val {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.rm-bar {
+  grid-column: 1 / -1;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--rm-code);
+  overflow: hidden;
+  margin-top: -2px;
+}
+
+.rm-bar > i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+}
+
+.rm-empty {
+  padding: 22px 8px;
+  text-align: center;
+  color: var(--rm-muted);
+  font-size: 12px;
+}

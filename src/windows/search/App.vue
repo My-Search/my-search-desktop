@@ -7,7 +7,8 @@
  *     > #tis
  *     > #my_search_view
  *         > SearchBox (#searchBox)
- *         > #recentStrip     ← Alt 最近条带：搜索框正下方的流内一行
+ *         > #recentStrip     ← 「最近添加」条带：搜索框正下方的流内一行
+ *                              （进入子搜索模式自动展开 / 纯 Alt 手动切换）
  *         > #matchResult > ResultList (#matchItems)
  *         > DetailView (#text_show)
  *
@@ -18,7 +19,7 @@
  * - 呼出分支（详情视图原样还原 / 其它复位）
  * - 缓存清理与订阅变化重载
  */
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import SearchBox from "./SearchBox.vue";
 import ResultList from "./ResultList.vue";
 import DetailView, { type DetailContent } from "./DetailView.vue";
@@ -31,6 +32,7 @@ import { usePluginHost } from "./usePluginHost";
 import { usePluginViewHost } from "./usePluginViewHost";
 import { useSyncBridge } from "./useSyncBridge";
 import { resolveDropTarget, toCssPoint } from "./drop-target";
+import { computeStripEdges } from "../../lib/strip-overflow";
 import { prefetchFileIcons, pruneFileIcons, useFileIcons } from "./useFileIcons";
 import { pluginIdOf } from "../../lib/plugins/plugin-items";
 import { decideViewReload } from "../../lib/plugins/dev-reload";
@@ -244,6 +246,17 @@ const draggingFiles = ref(false);
 const recentFiles = ref<AttachedEntry[]>([]);
 /** Alt 条带是否展开（显示在搜索框下方；用普通流内布局，窗口随之长高） */
 const recentVisible = ref(false);
+
+/** 条带 DOM（用于测量横向溢出、监听滚动；见下方 stripEdges） */
+const recentStripRef = ref<HTMLElement | null>(null);
+/**
+ * 条带左右两侧是否存在**被裁的隐藏内容**（横向溢出）。
+ *
+ * 用途：滚动条被藏掉后用户看不出「右边还有内容」，于是给还有隐藏内容的一侧
+ * 加渐隐（「隧道」效果，见 style.css 的 .fade-left / .fade-right）。判定是纯
+ * 几何计算，抽在 lib/strip-overflow.ts 里便于单测。
+ */
+const stripEdges = reactive({ left: false, right: false });
 
 /**
  * 最近一次「窗口被呼出」的时刻（performance.now()，0=本次会话尚未呼出过）。
@@ -1234,6 +1247,29 @@ watch(
 // 没有可选项了就把这一行收起来——空行没有意义，还占着窗口高度。
 watch(stripFiles, (list) => {
   if (recentVisible.value && list.length === 0) hideRecentStrip();
+  // 条目增减会改变内容宽度 → 左右渐隐状态跟着变（条带渲染后重新量一次）
+  if (recentVisible.value) queueUpdateStripEdges();
+});
+
+/**
+ * 进入子搜索模式（关键词含 `" : "` / SEARCH_BOUNDARY）→ **自动展开**「最近添加」
+ * 条带，等价于用户按一次 Alt。
+ *
+ * 为什么盯 `inputValue` 而不是某个 Tab 处理器：`inputValue` 是所有进入路径的
+ * **唯一汇聚点**——手动敲 ` : `、Tab 进 PRO 模式、`::` / `：：` 自动补分隔符、
+ * 全局快捷键「快速过滤」填入 `常用头 : `，最终都会反映到它上面。盯它就一处覆盖
+ * 全部入口，不用在每个入口各打一次补丁（那样迟早漏掉新入口）。
+ *
+ * 只在**进入 / 离开的跃变**上动作：模式内继续打字（子关键词）不该反复触发；
+ * 离开子搜索模式则对称收回（模式驱动语义）。手动按 Alt 的临时开合与模式无关，
+ * 不受影响。这里**不套呼出保护期**（`SUMMON_STRIP_GUARD_MS`）——那条只挡
+ * 「Alt+点击带入」的按键抖动，而这里是用户明确的输入行为。
+ */
+const inSubSearchMode = computed(() => inputValue.value.includes(SEARCH_BOUNDARY));
+watch(inSubSearchMode, (now, was) => {
+  if (now === was) return;
+  if (now) void showRecentStrip();
+  else hideRecentStrip();
 });
 
 /** 条带开关后按最新内容重下发高度（详情视图除外）。
@@ -1258,6 +1294,9 @@ async function showRecentStrip(): Promise<void> {
   // 首帧先按已有缓存渲染（多数条目上一轮已取过图标），未就绪的走异步补图
   prefetchFileIcons(stripFiles.value);
   refreshHeightAfterStripToggle();
+  // 展开才有布局可量：等 DOM 上屏后再判定左右是否溢出（否则量到 display:none 的 0）
+  await nextTick();
+  queueUpdateStripEdges();
 }
 
 /** 收起条带：重下发高度。已收起时是 no-op（复位/呼出路径可安全直调） */
@@ -1266,6 +1305,46 @@ function hideRecentStrip(): void {
   recentVisible.value = false;
   refreshHeightAfterStripToggle();
 }
+
+// 条带一收起就清掉两侧渐隐。**盯 recentVisible 而不是只写在 hideRecentStrip 里**：
+// 收起还有几条「直接改标记」的路径（呼出静默收起、失焦隐藏），它们不经过
+// hideRecentStrip；漏清会让下次展开的头一帧带着上一次的旧渐隐类闪一下
+// （此时正是用户进入子搜索模式、目光落在条带上的时刻）。
+watch(recentVisible, (v) => {
+  if (v) return;
+  if (stripEdges.left) stripEdges.left = false;
+  if (stripEdges.right) stripEdges.right = false;
+});
+
+/** 读条带的实时滚动几何，写回 stripEdges（两侧是否还有被裁内容）。 */
+function updateStripEdges(): void {
+  const el = recentStripRef.value;
+  if (!el) {
+    stripEdges.left = false;
+    stripEdges.right = false;
+    return;
+  }
+  const next = computeStripEdges(el);
+  // 只在真的变化时写：stripEdges 是响应式对象，无谓写入会触发多余重渲染
+  if (next.left !== stripEdges.left) stripEdges.left = next.left;
+  if (next.right !== stripEdges.right) stripEdges.right = next.right;
+}
+
+/**
+ * rAF 合并版 updateStripEdges：滚动 / 尺寸变化会在同一帧内多次触发，
+ * 合并到下一帧只量一次（滚轮连滚尤其明显）。
+ */
+let stripEdgesRaf = 0;
+function queueUpdateStripEdges(): void {
+  if (stripEdgesRaf) return;
+  stripEdgesRaf = requestAnimationFrame(() => {
+    stripEdgesRaf = 0;
+    updateStripEdges();
+  });
+}
+
+/** 条带的尺寸观察器（在 onMounted 里创建、onBeforeUnmount 里断开） */
+let stripResizeObserver: ResizeObserver | null = null;
 
 /** 点击条带条目 = 附加到**输入框**（成为附件 chip，走现成管线重新 describePaths，
     路径失效自然被拒）。附件状态一变，上面的 stripFiles 计算属性即把它从条带里
@@ -1321,6 +1400,10 @@ function onRecentStripWheel(e: WheelEvent): void {
   if (delta === 0) return;
   const before = el.scrollLeft;
   el.scrollLeft = before + delta;
+  // 主动刷新左右渐隐状态。@scroll 处理器通常也会兜住（浏览器为程序改
+  // scrollLeft 也会派发 scroll 事件），但那是在下一帧且实现细节依平台而异；
+  // 这里同步排队一次，滚轮连滚时渐隐与内容同帧更新，不出现一拍的滞后。
+  queueUpdateStripEdges();
   // 已到边界（滚不动了）就不拦截，让页面/其它处理器接管
   if (el.scrollLeft !== before) e.preventDefault();
 }
@@ -1879,6 +1962,14 @@ onMounted(async () => {
   // resize 事件在视口真正更新后才触发，这里读到的 innerHeight 已是最新值。
   window.addEventListener("resize", syncPluginBoxHeight);
 
+  // 条带横向溢出 → 左右渐隐：窗口拉宽 / 收窄、条目增减都会改变溢出状态。
+  // ResizeObserver 同时覆盖「条带从 display:none 变显示」与「内容变宽」两种情况，
+  // 比只监听 window.resize 更稳（后者漏掉内容侧变化）。回调里只排队、不重量。
+  if (typeof ResizeObserver !== "undefined" && recentStripRef.value) {
+    stripResizeObserver = new ResizeObserver(() => queueUpdateStripEdges());
+    stripResizeObserver.observe(recentStripRef.value);
+  }
+
   // ── 关键：以下数据加载不阻塞首帧渲染 ──
   // Vue mount() 已完成，骨架屏已移除，搜索框已可交互。
   // 把网络/文件 IO 放到 nextTick 之后，让 WebView 先完成首帧合成，
@@ -2173,6 +2264,13 @@ onBeforeUnmount(() => {
   document.removeEventListener("keydown", onGlobalAltKeydown, true);
   document.removeEventListener("keyup", onGlobalAltKeyup, true);
   window.removeEventListener("resize", syncPluginBoxHeight);
+  // 条带尺寸观察器与待执行的 rAF 一并收掉（避免卸载后回调仍触碰已销毁的 DOM）
+  stripResizeObserver?.disconnect();
+  stripResizeObserver = null;
+  if (stripEdgesRaf) {
+    cancelAnimationFrame(stripEdgesRaf);
+    stripEdgesRaf = 0;
+  }
   window.removeEventListener("focus", onWindowFocus);
   document.removeEventListener("visibilitychange", onVisibilityChange);
   unlistenShown?.();
@@ -2224,16 +2322,21 @@ defineExpose({ inputValue });
         @detach="onDetachEntry"
         @chip-click="onChipClick"
       />
-      <!-- 「最近添加」条带（按 Alt 切换）：**搜索框正下方**的普通流内一行，
-           跟着盒子一起向下生长（窗口高度由 measuredBoxHeight 按实测下发）。
+      <!-- 「最近添加」条带：**搜索框正下方**的普通流内一行，跟着盒子一起向下
+           生长（窗口高度由 measuredBoxHeight 按实测下发）。两种展开方式：
+           ① 进入子搜索模式（关键词含 " : "）时自动展开（见 inSubSearchMode 的 watch）；
+           ② 输入框聚焦时按纯 Alt 手动切换。
            隐藏时 display:none → offsetHeight=0 天然不计入高度。
            点条目 → 附加进上方输入框（成为附件 chip），条带随即不再列出它；
            把输入框里的 chip 删掉后，它会自动回到条带（见 stripFiles）。
-           溢出时纵向滚轮映射为水平滚动（见 onRecentStripWheel），可翻出更早记录。 -->
+           溢出时纵向滚轮映射为水平滚动（见 onRecentStripWheel），可翻出更早记录；
+           还有被裁内容的一侧做边缘渐隐（fade-left / fade-right），提示「还有更多」。 -->
       <div
         id="recentStrip"
-        :class="{ show: recentVisible }"
+        ref="recentStripRef"
+        :class="{ show: recentVisible, 'fade-left': stripEdges.left, 'fade-right': stripEdges.right }"
         @wheel="onRecentStripWheel"
+        @scroll="updateStripEdges"
       >
         <TransitionGroup name="chip-move">
           <div

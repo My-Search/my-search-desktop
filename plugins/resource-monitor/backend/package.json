@@ -1,0 +1,7 @@
+{
+  "name": "com.zhuangjie.resource-monitor-backend",
+  "private": true,
+  "type": "module",
+  "description": "Backend process for the resource monitor plugin: samples per-process CPU / memory / network via a long-running PowerShell script and keeps a 1-hour rolling Top-10 history. Zero npm dependencies.",
+  "main": "index.mjs"
+}

@@ -7,6 +7,7 @@
   "author": "zhuangjie",
   "description": "将文件上传到 GitHub 仓库，支持拖拽、粘贴、选择文件与图片压缩",
   "homepage": "https://github.com/zhuangjie/github-file-upload",
+  "repository": "https://github.com/My-Search/my-search-desktop/tree/master/plugins/com.zhuangjie.github-upload",
   "icon": "icon.ico",
   "permissions": [
     "ui.inlay",

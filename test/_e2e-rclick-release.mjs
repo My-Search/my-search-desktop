@@ -115,13 +115,19 @@ for (let i = 0; i < 40; i++) {
 }
 check("设置页面渲染（非空白）", ok);
 
-// 4. 切换面板（关注标签 / 数据缓存 / 快捷键 / 关于）验证无卡死
+// 4. 切换面板（关注标签 / 数据缓存 / 快捷键 / 关于）验证无卡死；
+//    订阅市场由订阅总览页头图标打开，不再走左侧菜单
 const results = {};
-for (const pane of ["tags", "cache", "shortcut", "about", "repo"]) {
+for (const pane of ["tags", "cache", "shortcut", "about"]) {
   await cfgEval(`document.querySelector('.cfg-nav .nav-item[data-pane="${pane}"]').click(); 'clicked'`);
   await sleep(400);
-  results[pane] = await cfgEval(`!!document.querySelector('#ms-config-view .page.${pane === "repo" ? "repo" : pane}')`);
+  results[pane] = await cfgEval(`!!document.querySelector('#ms-config-view .page.${pane}')`);
 }
+await cfgEval(`document.querySelector('.cfg-nav .nav-item[data-pane="subscribes"]').click(); 'clicked'`);
+await sleep(300);
+await cfgEval(`document.querySelector('#ms-config-view .page.subscribes #openTisHub').click(); 'clicked'`);
+await sleep(500);
+results["tis-hub"] = await cfgEval(`!!document.querySelector('#ms-config-view .page.tis-hub')`);
 check("各面板可切换渲染", Object.values(results).every(Boolean), JSON.stringify(results));
 
 // 5. Esc 关闭设置窗口

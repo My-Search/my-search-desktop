@@ -49,6 +49,7 @@ const PLUGINS = [
   { dir: "screenshot", id: "com.zhuangjie.screenshot" },
   { dir: "com.zhuangjie.github-upload", id: "com.zhuangjie.github-upload" },
   { dir: "com.zhuangjie.todo-list", id: "com.zhuangjie.todo-list" },
+  { dir: "resource-monitor", id: "com.zhuangjie.resource-monitor" },
 ];
 
 const pkgsDir = path.join(root, "dist", "market-pkgs");

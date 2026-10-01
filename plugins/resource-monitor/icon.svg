@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="200" height="200">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#3B82F6"/>
+      <stop offset="100%" stop-color="#1D4ED8"/>
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#bg)"/>
+  <!-- 三根柱子（占用高低） -->
+  <rect x="250" y="560" width="120" height="230" rx="24" fill="#fff" opacity="0.55"/>
+  <rect x="452" y="430" width="120" height="360" rx="24" fill="#fff" opacity="0.8"/>
+  <rect x="654" y="300" width="120" height="490" rx="24" fill="#fff"/>
+  <!-- 上升折线 -->
+  <polyline points="250,470 452,330 654,210"
+            fill="none" stroke="#FFD166" stroke-width="44" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="654" cy="210" r="52" fill="#FFD166"/>
+</svg>

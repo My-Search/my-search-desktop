@@ -97,6 +97,8 @@ export interface PluginRecord {
   author?: string;
   description?: string;
   homepage?: string;
+  /** 插件官方仓库地址（清单 repository 字段；缺失时不写，面板回退 homepage） */
+  repository?: string;
   description_?: never;
   icon?: string;
   /** 完整清单（含 contributes / backend） */
@@ -327,6 +329,7 @@ export function createPluginRecord(input: {
     author: input.manifest.author,
     description: input.manifest.description,
     homepage: input.manifest.homepage,
+    repository: input.manifest.repository,
     icon: input.manifest.icon,
     manifest: input.manifest,
     dir: input.dir,

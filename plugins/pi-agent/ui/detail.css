@@ -1476,6 +1476,9 @@ body.pi-sidebar-resizing * {
   border: 1px solid rgba(250, 204, 21, 0.3);
 }
 
+/* Toast 三种状态：info（中性，默认）/ warn（黄）/ error（红）。
+   基础类只负责定位与排版，颜色一律由状态类给出——否则没写状态类时
+   会落到某个硬编码底色上，「本轮已完成」这类中性提示就会被当成报错。 */
 .pi-agent-container .pi-inline-toast {
   position: fixed;
   left: 50%;
@@ -1486,11 +1489,15 @@ body.pi-sidebar-resizing * {
   padding: 8px 14px;
   border-radius: 10px;
   font-size: 13px;
-  background: rgba(220, 38, 38, 0.92);
-  color: #fff;
   box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
 }
+.pi-agent-container .pi-inline-toast.info {
+  background: var(--bg-active, #2f3136);
+  color: var(--text-primary, #e0e0e0);
+  border: 1px solid var(--border-color, #3e3e42);
+}
 .pi-agent-container .pi-inline-toast.warn { background: rgba(250, 204, 21, 0.95); color: #1a1a1a; }
+.pi-agent-container .pi-inline-toast.error { background: rgba(220, 38, 38, 0.92); color: #fff; }
 
 /* ===== 消息里的图片缩略图 ===== */
 .pi-agent-container .message.user .pi-msg-images {

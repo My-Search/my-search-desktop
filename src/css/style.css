@@ -250,6 +250,47 @@ html, body {
   display: flex;
 }
 
+/* ── 左右溢出「隧道」效果（内容被裁的一侧渐隐到本行底色） ──
+   滚动条被藏掉后，用户看不出「右边还有内容」；尤其条目恰好被裁掉半个时，
+   更像样式坏了。这里用 mask-image 让靠边内容往背景淡出，既提示「还有更多」，
+   又比硬切边自然（像滑进隧道口）。判定由 lib/strip-overflow.ts 给出，
+   App.vue 据此挂 .fade-left / .fade-right。
+
+   为什么用 mask 而不是叠一层渐变遮罩节点：
+     - mask 只影响绘制、**不改变布局**，不会动到 #recentStrip 的高度（高度参与
+       窗口尺寸实测，动它会连累窗口高度）；
+     - 不新增 DOM，也不影响条目点击（遮罩层无论怎么设 pointer-events 都更易出岔子）；
+     - 只把内容淡出、露出本行**自身底色**，故浅色/深色主题共用一套，无需各自覆盖。
+
+   渐隐宽度 26px 是「让靠边的条目明显淡出」与「不吞掉整个短条目」之间的折中；
+   已含本行左右各 12px 内距，fade 实际覆盖内容侧约 14px。 */
+#recentStrip.fade-right {
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 26px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 26px), transparent);
+}
+
+#recentStrip.fade-left {
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 26px);
+  mask-image: linear-gradient(to right, transparent, #000 26px);
+}
+
+#recentStrip.fade-left.fade-right {
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent,
+    #000 26px,
+    #000 calc(100% - 26px),
+    transparent
+  );
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    #000 26px,
+    #000 calc(100% - 26px),
+    transparent
+  );
+}
+
 /* 固定条目：始终排最前、永不被 30 条上限淘汰——用暖底 + 左侧强调条区分 */
 #recentStrip .recent-item.is-pinned {
   background: #fff7e6;
@@ -1801,6 +1842,32 @@ html.theme-dark {
   opacity: 0.7;
 }
 
+/* 订阅总览页头部的「Tis 订阅市场」图标入口 */
+#ms-config-view .sub-market {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+#ms-config-view .sub-market:hover {
+  color: var(--brand);
+  border-color: var(--accent-soft-border);
+  background: var(--accent-soft-bg);
+}
+
+#ms-config-view .sub-market:active {
+  opacity: 0.7;
+}
+
 #ms-config-view .sub-toolbar .sub-view-toggle {
   display: inline-flex;
   border: 1px solid var(--line);
@@ -2181,7 +2248,7 @@ html.theme-dark #ms-config-view .sub-item .sub-op.danger:hover {
   line-height: 1.6;
 }
 
-/* ---- 公共仓库按钮 ---- */
+/* ---- 通用按钮（提交订阅 / 清理 Token / 导航等） ---- */
 #ms-config-view .cfg-btn-row {
   display: flex;
   flex-wrap: wrap;
@@ -3199,22 +3266,6 @@ html.theme-dark #ms-config-view .sub-item .sub-op.danger:hover {
   color: var(--muted);
   line-height: 1.6;
   margin: 0 0 12px;
-}
-
-#ms-config-view .token-dialog input {
-  width: 100%;
-  box-sizing: border-box;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 9px 12px;
-  font-size: 13px;
-  outline: none;
-  background: var(--field);
-  color: var(--text);
-}
-
-#ms-config-view .token-dialog input:focus {
-  border-color: var(--brand);
 }
 
 #ms-config-view .token-actions {

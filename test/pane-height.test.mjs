@@ -232,9 +232,8 @@ const seedSubs = (n) =>
   ).join("\n");
 
 const openHub = async () => {
-  await evalJs(`document.querySelector('.cfg-nav .nav-item[data-pane="repo"]').click()`);
-  await new Promise((r) => setTimeout(r, 250));
-  await evalJs(`document.getElementById('openTisHub').click()`);
+  // 「Tis 订阅市场」入口现在是订阅总览页头的图标按钮
+  await evalJs(`document.querySelector('#ms-config-view .page.subscribes #openTisHub').click()`);
   await new Promise((r) => setTimeout(r, 700));
 };
 

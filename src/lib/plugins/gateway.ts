@@ -21,7 +21,10 @@ export function gatewaySpecOf(rec: PluginRecord): {
   backendEntry: string | null;
   backendProtocol: string | null;
   idleExitSec: number;
+  /** 前台关闭后的保留窗口期（秒） */
   graceSec: number;
+  /** 优雅退出等待（秒）——deactivate 发出后等这么久再强杀 */
+  shutdownTimeoutSec: number;
   maxRestarts: number;
   startupTimeoutMs: number;
   callTimeoutMs: number;
@@ -39,6 +42,10 @@ export function gatewaySpecOf(rec: PluginRecord): {
     // 「开机自启」的插件不做空闲回收（idleExitSec=0 表示常驻）
     idleExitSec: rec.autoStart === "always" ? 0 : backend?.idleExitSec ?? 30,
     graceSec: backend?.graceSec ?? 5,
+    // 优雅退出时长：Rust 侧按此值等 deactivate 后的收尾（字段名必须与 Rust 一致，
+    // 否则声明的值不生效、永远退化成默认——这正是之前 graceSec/shutdownTimeoutSec
+    // 名字对不上留下的坑）。
+    shutdownTimeoutSec: backend?.shutdownTimeoutSec ?? 5,
     maxRestarts: backend?.maxRestarts ?? 3,
     startupTimeoutMs: backend?.startupTimeoutMs ?? 3000,
     callTimeoutMs: backend?.callTimeoutMs ?? 30000,

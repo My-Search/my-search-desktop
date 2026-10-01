@@ -7,7 +7,6 @@ import {
   SUBSCRIBES_KEY,
   TAGS_KEY,
   TISHUB_KEY,
-  TOKEN_KEY,
   UNFOLLOW_KEY,
 } from "./configShared";
 
@@ -96,12 +95,6 @@ export const CACHE_BLUEPRINT: CacheBlueprintItem[] = [
     key: TISHUB_KEY,
     label: "已安装订阅",
     desc: "TisHub 已安装订阅的本地记录",
-    clearable: false,
-  },
-  {
-    key: TOKEN_KEY,
-    label: "GitHub Token",
-    desc: "用于向 TisHub 提交订阅的 GitHub Token",
     clearable: false,
   },
 ];

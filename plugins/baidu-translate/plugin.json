@@ -7,6 +7,7 @@
   "author": "zhuangjie",
   "description": "使用百度翻译 AI 能力，支持 200+ 语言互译，输入文本即译",
   "homepage": "https://fanyi.baidu.com",
+  "repository": "https://github.com/My-Search/my-search-desktop/tree/master/plugins/baidu-translate",
   "icon": "https://api.xinac.net/icon/?url=https://fanyi.baidu.com",
   "permissions": [
     "ui.inlay"

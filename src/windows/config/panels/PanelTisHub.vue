@@ -4,7 +4,10 @@
  *
  * - 关键字搜索（已安装 / 市场订阅 两个分段）
  * - 结果列表：每行一条订阅（安装 / 移除按钮 + 标题外链）
- * - 返回公共仓库
+ * - 返回订阅总览
+ *
+ * 注：提交自己的订阅到 TisHub 由用户自行前往 TisHub 仓库（Issues）完成，
+ * 应用内不再提供「提交订阅 / GitHub Token」相关入口。
  */
 import { computed, onMounted, ref } from "vue";
 import { openExternal } from "../../../lib/tauri-bridge";
@@ -18,8 +21,8 @@ const props = defineProps<{
   tisHub: TisHubApi;
   installed: InstalledListApi;
   notify: (text: string, type?: "ok" | "error") => void;
-  /** 返回公共仓库 */
-  goRepo: () => void;
+  /** 返回订阅总览 */
+  goSubscribes: () => void;
 }>();
 
 /** 关键字输入（跨面板持久化，原版 config.js:913-920） */
@@ -138,7 +141,7 @@ defineExpose({ search });
   <section class="page tis-hub">
     <div class="cfg-card">
       <div class="cfg-card-head">
-        <button id="backHome" class="cfg-back" title="返回公共仓库" @click="props.goRepo()">
+        <button id="backHome" class="cfg-back" title="返回订阅总览" @click="props.goSubscribes()">
           ← 返回
         </button>
         <h3>订阅市场</h3>

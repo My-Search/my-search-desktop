@@ -233,6 +233,11 @@ await S(
         if (cmd === 'attachments_sync') { window.__roots = args.entries || []; return Promise.resolve(null); }
         if (cmd === 'attachment_list') {
           const list = window.__tree[args.path] || [];
+          // 流式命令（插件 1.2.0）：args.onBatch 是 Channel 序列化串，
+          // 先推一批（等价 Rust 边扫边推），再返回完整列表（去重由插件负责）。
+          if (args.onBatch) {
+            window.__pushChannel(args.onBatch, list.map((e) => ({ ...e })));
+          }
           return Promise.resolve(list.map((e) => ({ ...e })));
         }
         if (cmd === 'attachment_list_cancel') return Promise.resolve(null);
@@ -277,6 +282,21 @@ await S(
     window.__eventNextId = 1;
     window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener(){} };
     window.__emitTauriEvent = () => 0;
+    // 往一个 Tauri Channel 推一条消息（等价 Rust channel.send）。
+    // invoke 收到的可能是 Channel 实例（同进程直传），也可能是序列化串
+    // "__CHANNEL__:<id>"（真 Tauri 走 JSON.stringify），两种都认。
+    window.__channelSeq = 0;
+    window.__channelId = (token) => {
+      if (token && typeof token === 'object' && token.id != null) return String(token.id);
+      const s = String(token);
+      return s.startsWith('__CHANNEL__:') ? s.slice('__CHANNEL__:'.length) : s;
+    };
+    window.__pushChannel = (token, message) => {
+      const cb = (window.__cbIds || {})[window.__channelId(token)];
+      if (typeof cb !== 'function') return false;
+      cb({ index: window.__channelSeq++, message });
+      return true;
+    };
   `,
   },
   sessionId

@@ -54,6 +54,17 @@ const builtinEntries = ref<Awaited<ReturnType<typeof builtinList>>>([]);
 function isBuiltin(id: string): boolean {
   return builtinEntries.value.some((e) => e.id === id);
 }
+/**
+ * 「官方地址」行的标签文案，按链接形态区分：
+ *   - GitHub 仓库里的**源码目录**（…/tree/<ref>/…）→「源码」（官方插件指本仓库 plugins/<目录>）；
+ *   - GitHub 仓库根 →「仓库」；
+ *   - 其余（作者主页、项目站点等）→「主页」。
+ */
+function repoLabel(url: string): string {
+  if (/^https?:\/\/github\.com\/[^/]+\/[^/]+\/(tree|blob)\//i.test(url)) return "源码";
+  if (/^https?:\/\/github\.com\/[^/]+\/[^/]+\/?$/i.test(url)) return "仓库";
+  return "主页";
+}
 /** 取内置插件条目（可能为空=非内置/未读取） */
 function builtinOf(id: string) {
   return builtinEntries.value.find((e) => e.id === id);
@@ -844,7 +855,8 @@ function durFrom(ts: number | null): string {
             <span>{{ record.enabled ? '已启用' : '已禁用' }}</span>
           </div>
           <div class="plugin-info-row"><span class="plugin-info-label">ID</span><code>{{ record.id }}</code></div>
-          <div class="plugin-info-row" v-if="record.homepage"><span class="plugin-info-label">主页</span><a :href="record.homepage" target="_blank">{{ record.homepage }}</a></div>
+          <div class="plugin-info-row" v-if="record.repository"><span class="plugin-info-label">{{ repoLabel(record.repository) }}</span><a :href="record.repository" target="_blank">{{ record.repository }}</a></div>
+          <div class="plugin-info-row" v-if="record.homepage && record.homepage !== record.repository"><span class="plugin-info-label">主页</span><a :href="record.homepage" target="_blank">{{ record.homepage }}</a></div>
 
           <!-- 关闭界面时的行为（插件可声明建议，用户可改）
                有界面 → 决定界面是否保活；有后台进程 → 决定进程是否停止。

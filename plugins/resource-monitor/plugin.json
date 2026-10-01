@@ -1,0 +1,44 @@
+{
+  "id": "com.zhuangjie.resource-monitor",
+  "name": "资源监控",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "minAppVersion": "7.9.15",
+  "author": "zhuangjie",
+  "description": "每 5 秒采样整机 CPU / 内存 / 网络，按程序聚合，用可缩放时间范围的趋势图展示占用最高的 Top 10——快速定位 CPU 莫名 100%、内存暴涨、异常上传的程序",
+  "homepage": "https://github.com/My-Search/my-search-desktop",
+  "repository": "https://github.com/My-Search/my-search-desktop/tree/master/plugins/resource-monitor",
+  "icon": "icon.svg",
+  "permissions": [
+    "ui.inlay",
+    "ui.notify",
+    "store",
+    "backend.spawn"
+  ],
+  "contributes": {
+    "searchItem": {
+      "title": "资源监控",
+      "desc": "CPU / 内存 / 上传 占用 Top 10 趋势图（最近 1 小时）",
+      "keyword": "资源监控",
+      "icon": "icon.svg",
+      "subSearch": false
+    },
+    "detailView": {
+      "entry": "ui/detail.html",
+      "script": "ui/index.js",
+      "mode": "inlay",
+      "closeBehavior": "minimize",
+      "theme": "inherit"
+    }
+  },
+  "backend": {
+    "entry": "backend/run.cmd",
+    "protocol": "jsonrpc-stdio",
+    "autostart": "always",
+    "closeBehavior": "minimize",
+    "startupTimeoutMs": 20000,
+    "callTimeoutMs": 30000,
+    "idleExitSec": 0,
+    "maxRestarts": 0
+  }
+}

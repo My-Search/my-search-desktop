@@ -86,6 +86,7 @@ import {
   describeCatalogErrors,
   isAllowedDownloadUrl,
   parseCatalog,
+  pluginRepoUrl,
 } from "../src/lib/plugins/market-types.ts";
 import { compareVersion } from "../src/lib/plugins/manifest.ts";
 
@@ -225,6 +226,64 @@ const catalogOf = (plugins, over = {}) => ({
   // 非法类型应被拒
   const r = parseCatalog(catalogOf([entryOf({ deprecated: "yes" })]));
   ok(r.ok === false && r.errors.some((e) => e.endsWith("deprecated.invalid")), "deprecated 非布尔被拒");
+}
+{
+  // repository / changelog：可选字段，解析后必须原样保留（市场 UI 据此展示
+  // 「官方地址」链接与「新版本更新日志」）。
+  const r = parseCatalog(
+    catalogOf([
+      entryOf({ repository: "https://github.com/you/my-plugin", changelog: "修复：A\n新增：B" }),
+    ])
+  );
+  ok(r.ok === true, "带 repository/changelog 的条目解析通过");
+  ok(r.ok && r.catalog.plugins[0].repository === "https://github.com/you/my-plugin", "repository 被保留");
+  ok(r.ok && r.catalog.plugins[0].changelog === "修复：A\n新增：B", "changelog 被保留（含换行）");
+}
+{
+  // 缺席时不应凭空产生字段（旧目录兼容）
+  const r = parseCatalog(catalogOf([entryOf()]));
+  ok(r.ok && r.catalog.plugins[0].repository === undefined, "未声明时 repository 为 undefined");
+  ok(r.ok && r.catalog.plugins[0].changelog === undefined, "未声明时 changelog 为 undefined");
+}
+{
+  // pluginRepoUrl 回退链：显式 repository 优先
+  ok(
+    pluginRepoUrl({
+      repository: "https://github.com/you/declared",
+      homepage: "https://you.example.com",
+      downloadUrl: "https://github.com/org/market/releases/download/v1/x.mspp",
+    }) === "https://github.com/you/declared",
+    "pluginRepoUrl 优先取 repository"
+  );
+}
+{
+  // 无 repository → 从 GitHub Release 下载地址反解仓库
+  ok(
+    pluginRepoUrl({
+      homepage: "https://you.example.com",
+      downloadUrl: "https://github.com/org/market/releases/download/v1.0.0/com.example.demo.mspp",
+    }) === "https://github.com/org/market",
+    "pluginRepoUrl 从 downloadUrl 反解仓库"
+  );
+}
+{
+  // 既无 repository 也不是 GitHub Release → 退回 homepage
+  ok(
+    pluginRepoUrl({
+      homepage: "https://fanyi.baidu.com",
+      downloadUrl: "https://raw.githubusercontent.com/My-Search/my-search-plugin-market/main/official-plugins/x/1.0.0/x.mspp",
+    }) === "https://fanyi.baidu.com",
+    "pluginRepoUrl 退回 homepage（raw 官方包无反解）"
+  );
+}
+{
+  // 三者都没有 → undefined（UI 据此不渲染链接）
+  ok(
+    pluginRepoUrl({
+      downloadUrl: "https://raw.githubusercontent.com/My-Search/my-search-plugin-market/main/official-plugins/x/1.0.0/x.mspp",
+    }) === undefined,
+    "pluginRepoUrl 全缺 → undefined"
+  );
 }
 {
   // 重复 id：更高版本胜出

@@ -7,7 +7,7 @@
  * 约定：
  *   - 从 plugins/ 目录读取内置插件源码
  *   - 打包到 src-tauri/resources/plugins/
- *   - 只打包白名单内的插件（pi-agent、market、file-search）
+ *   - 只打包白名单内的插件（market、file-search）
  *   - market 插件不存在时跳过（不报错，CI 会填真包）
  */
 import { readFileSync, existsSync, mkdirSync } from "node:fs";
@@ -21,7 +21,6 @@ const pluginsDir = path.join(root, "plugins");
 const outputDir = path.join(root, "src-tauri", "resources", "plugins");
 
 const BUILTIN_PLUGINS = [
-  "pi-agent",
   "market",
   "file-search",
 ];

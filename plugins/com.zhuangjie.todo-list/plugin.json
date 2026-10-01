@@ -7,6 +7,7 @@
   "author": "zhuangjie",
   "description": "本地待办清单：增删改查、优先级、标签、截止日期、筛选统计与 JSON 导出导入",
   "homepage": "https://github.com/zhuangjie/todo-list",
+  "repository": "https://github.com/My-Search/my-search-desktop/tree/master/plugins/com.zhuangjie.todo-list",
   "icon": "icon.svg",
   "permissions": [
     "ui.inlay",

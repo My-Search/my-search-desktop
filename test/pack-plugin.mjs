@@ -29,10 +29,12 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 // meta.json 是「市场发布元数据」（categories/tags 等），只服务于 catalog 生成，
 // 不属于插件运行时内容，因此不进入分发给用户的包。
 // .msppignore 同理：只是打包器自身的配置，插件运行时不会读它。
+// .data 是插件的**运行时落盘目录**（如资源监控的 history.json）——含使用者本机
+// 信息，绝不能随包分发。
 const IGNORE = new Set([
   ".dev-source", ".git", ".gitignore", ".msppignore", ".npmignore",
   ".DS_Store", "Thumbs.db", "desktop.ini",
-  "node_modules", ".vscode", ".idea", "meta.json",
+  "node_modules", ".vscode", ".idea", "meta.json", ".data",
 ]);
 const IGNORE_RE = /^(\.seeded-|\.#|~$)/;
 

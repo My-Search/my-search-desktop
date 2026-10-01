@@ -22,6 +22,8 @@ const props = defineProps<{
   confirm: (text: string) => Promise<boolean>;
   /** 订阅文本变化后刷新「可提交数」等外部状态 */
   onChange: () => void;
+  /** 打开「Tis 订阅市场」 */
+  openTisHub: () => void;
 }>();
 
 /** 条块列表（从草稿派生） */
@@ -303,6 +305,32 @@ function onDrop(e: DragEvent, row: SubscribeRow): void {
             <line x1="12" y1="17" x2="12.01" y2="17" />
           </svg>
         </span>
+        <button
+          id="openTisHub"
+          type="button"
+          class="sub-market"
+          data-act="open-tis-hub"
+          title="Tis 订阅市场"
+          aria-label="Tis 订阅市场"
+          @click="props.openTisHub()"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            width="14"
+            height="14"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M3 9.5 4.6 4.4A1.5 1.5 0 0 1 6 3.4h12a1.5 1.5 0 0 1 1.4 1L21 9.5" />
+            <path d="M4.5 9.5V19a1.6 1.6 0 0 0 1.6 1.6h11.8A1.6 1.6 0 0 0 19.5 19V9.5" />
+            <path d="M9.3 20.6v-5.4a1.4 1.4 0 0 1 1.4-1.4h2.6a1.4 1.4 0 0 1 1.4 1.4v5.4" />
+            <path d="M3 9.5h18" />
+          </svg>
+        </button>
       </div>
       <!-- 顶部工具条：计数 + 操作按钮 -->
       <div class="sub-toolbar">

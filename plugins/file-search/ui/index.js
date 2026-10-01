@@ -8,26 +8,31 @@
  *      结果只剩声明了 folders 能力的插件（本插件 + 其它同能力插件）；
  *   2. 输入「文件搜索 : 关键词」回车 → 宿主打开本视图并把关键词经
  *      onSubKeyword 推过来（挂载时也会自动推一次）；
- *   3. 本插件用 ms.input.attachments() 取全部附加文件夹、ms.input.listFolder()
- *      逐根递归列举（按轮带 gen：单根失败不拖垮其余根，扫描中可「停止」——
- *      在途 walk 带着已收集的部分返回）。结果默认「全部文件」页签、按修改
- *      时间从新到旧排序，再按关键词（空格分词、AND 语义）与类型页签
- *      （图片/音频/视频/Office及常见文档/压缩包/文件夹/其它文件）双重过滤，
- *      点击条目用系统默认程序打开；行右侧「文件夹图标」始终显示，点击用资源管理器
- *      定位（打开所在目录并选中该条目）；
+ *   3. 本插件用 ms.input.attachments() 取全部附加文件夹、ms.input.listFolderStream()
+ *      逐根**流式**递归列举（按轮带 gen：单根失败不拖垮其余根；每收到一批就
+ *      增量渲染，用户能看到「边扫边出现」）。**不设条数上限——一直扫**，直到
+ *      遍历结束或用户点「停止」（红字按钮；此时立即用已扫到的部分收尾，并通知
+ *      Rust 中止在途 walk）。结果默认「全部文件」页签、按修改时间从新到旧排序，
+ *      再按关键词（空格分词、AND 语义）与类型页签（图片/音频/视频/Office及常见
+ *      文档/压缩包/文件夹/其它文件）双重过滤；点击条目用系统默认程序打开；
+ *      行右侧「文件夹图标」始终显示，点击用资源管理器定位（打开所在目录并选中）；
  *   4. 视图开着时再粘贴/移除文件夹：宿主广播 ms-attachments-changed，
  *      本插件自动重扫，不用手点「重新扫描」。
+ *
+ * 旧宿主兼容：没有 ms.input.listFolderStream 时退回 ms.input.listFolder
+ * （一次性返回、无流式；仍不设前端上限，受宿主自身保护）。
  *
  * 附件只读：ms.input 全部挂在 file.read 权限下，Rust 侧还会校验路径必须
  * 落在已附加的集合内——本插件访问不到用户没放进搜索框的路径。
  *
  * 信息分层（渲染约定）：
- *   - fs-status：只放**异常/过程**消息（扫描中、无附件、权限缺失、失败），
+ *   - fs-status：只放**异常/过程**消息（扫描中、已停止、无附件、权限缺失、失败），
  *     成功后清空并整行隐藏，不留空行；
  *   - fs-meta：常驻统计（匹配 x / 共 y 项 · 关键词…），0 命中也照常刷新；
  *   - fs-cats：类型页签（默认「全部文件」；页签数字 = 当前关键词在该类下的命中数）；
  *   - fs-folders：附加文件夹 chips，让人知道在哪些目录里搜（失败的根标红）；
- *   - fs-foot：操作提示（怎么改关键词、点击行为）。
+ *   - fs-foot：操作提示（怎么改关键词、点击行为）。**默认收起**，按住 Alt 才
+ *     显示（松开即收）——正常看结果时不必被一行说明常驻占位，需要时按一下。
  */
 (function (ms, env, plugin, host, keyword, inputValue, onSubKeyword, md2html, openExternal) {
   "use strict";
@@ -59,20 +64,29 @@
   var scanned = false;
   /** 各文件夹本轮扫描失败的错误消息（key = 文件夹 path；chips 标红用） */
   var failedPaths = {};
-  /** 本轮列举是否触到上限（单根 LIST_LIMIT 或合计 TOTAL_LIMIT），foot 提示用 */
-  var capped = false;
   /** 扫描期间附件增删过：这轮结束后补扫一次，别停在过期的文件夹集合上 */
   var pendingRescan = false;
-  /** 最多渲染的行数（防超大目录把 DOM 撑爆） */
+  /**
+   * 是否正按住 Alt（底部操作提示 fs-foot 只在按住时显示，松开即收）。
+   *
+   * 为什么默认收起：结果列表才是主体，一行常驻说明会白占高度；
+   * 「点击打开 / 点图标定位 / 正在扫描」这些提示属于「需要时才看」的信息。
+   * 与宿主搜索框「最近添加」条带的 Alt 交互呼应——但那条是开关语义
+   * （按一下展开、再按收起），这里按用户要求做成**按住显示**。
+   */
+  var altHeld = false;
+  /** 最多渲染的行数（防超大目录把 DOM 撑爆；只限「画几行」，不限「扫多少」） */
   var RENDER_LIMIT = 300;
-  /** 单个文件夹的列举上限 */
-  var LIST_LIMIT = 30000;
-  /** 全部文件夹合计的条目上限（单根上限 × 根数可能失控，这里兜底） */
-  var TOTAL_LIMIT = 50000;
+  /** 增量渲染节流定时器（扫描中批次到达得很密，合并重排避免卡顿） */
+  var liveRenderTimer = null;
+  /** 增量渲染最小间隔（毫秒）：一次重排含排序，超大树下不节流会拖慢扫描 */
+  var LIVE_RENDER_MS = 150;
   /** 宿主是否支持「在资源管理器中定位」（ms.input.reveal；旧宿主没有则不渲染图标） */
   var canReveal = !!(ms.input && typeof ms.input.reveal === "function");
   /** 宿主是否支持「取系统文件图标」（ms.input.fileIcons；旧宿主没有则退回内置字形） */
   var canFileIcons = !!(ms.input && typeof ms.input.fileIcons === "function");
+  /** 宿主是否支持「流式列举」（ms.input.listFolderStream；旧宿主没有则退回一次性列举） */
+  var canStream = !!(ms.input && typeof ms.input.listFolderStream === "function");
   /** 路径 → 系统图标 data URL（资源管理器同款；异步到达后补渲染） */
   var iconMap = {};
   /** 正在请求中的路径（避免每次 render 重复发 IPC） */
@@ -195,7 +209,7 @@
   /** 收集要取图标的条目并批量请求（同批去重、已在途/已缓存的跳过） */
   function requestIcons(list) {
     if (!canFileIcons || !list || !list.length) return;
-    // 缓存上限：data URL 不小，超大目录（TOTAL_LIMIT 级别）不该无限攒图标。
+    // 缓存上限：data URL 不小，超大目录（数十万级）不该无限攒图标。
     // 超限时整体清空（与宿主 Rust 侧 ICON_CACHE_MAX 同款策略），只影响性能不影响正确性。
     if (iconCount() >= ICON_CACHE_MAX) {
       iconMap = {};
@@ -374,6 +388,39 @@
     el.hidden = false;
   }
 
+  /** 空态下要显示的脚注文案（null = 用常规文案）；render 里按需设置 */
+  var emptyFootText = null;
+
+  /** 底部操作提示文案（按住 Alt 时显示）：随扫描状态与是否支持定位而变 */
+  function footTextNow() {
+    var tip = canReveal
+      ? "点击条目用系统默认程序打开；点行尾文件夹图标在资源管理器中定位"
+      : "点击条目用系统默认程序打开";
+    // 扫描中把「停止」的说明放进脚注，让用户知道大目录能随时收手
+    return scanning
+      ? "正在扫描…点右上角红字「停止」可随时中断，已扫到的条目会保留；" + tip
+      : splitQuery(query).length
+      ? tip
+      : "在搜索框输入「文件搜索 : 关键词」回车可筛选；" + tip;
+  }
+
+  /**
+   * 刷新底部提示的显隐与文案。**只碰 fs-foot**（不重排结果列表）——按住 Alt
+   * 的 keydown/keyup 频率高，走整轮 render() 会让大列表反复重绘。
+   * 空态下的提示文案由调用方另行给出（见 render）。
+   */
+  function syncFoot() {
+    var foot = dom["fs-foot"];
+    if (!foot) return;
+    if (!altHeld) {
+      foot.hidden = true;
+      return;
+    }
+    // 空态（还没数据）时主体区没有结果行，脚注文案用「重新扫描」提示
+    foot.textContent = emptyFootText != null ? emptyFootText : footTextNow();
+    foot.hidden = false;
+  }
+
   function render() {
     if (!dom["fs-list"]) return;
     var terms = splitQuery(query);
@@ -396,14 +443,17 @@
           "已附加的文件夹是空的，或没有可读取的内容"
         );
         if (foot) {
-          foot.textContent = "点击右上角「重新扫描」可刷新文件夹内容";
-          foot.hidden = false;
+          emptyFootText = "点击右上角「重新扫描」可刷新文件夹内容";
         }
+        syncFoot();
       } else {
         setMeta("");
+        emptyFootText = null;
+        syncFoot();
       }
       return;
     }
+    emptyFootText = null;
 
     // 当前页签文案（空态与统计行要用）
     var catLabel = "";
@@ -501,17 +551,8 @@
     );
 
     if (foot) {
-      var tip = canReveal
-        ? "点击条目用系统默认程序打开；点行尾文件夹图标在资源管理器中定位"
-        : "点击条目用系统默认程序打开";
-      var footText = terms.length
-        ? tip
-        : "在搜索框输入「文件搜索 : 关键词」回车可筛选；" + tip;
-      if (capped) {
-        footText += "；已达 " + TOTAL_LIMIT + " 项扫描上限，部分文件夹未完整列举";
-      }
-      foot.textContent = footText;
-      foot.hidden = false;
+      // 只有按住 Alt 时才写文案并显示（见 altHeld）；默认整行收起，不占高度
+      syncFoot();
     }
   }
 
@@ -538,66 +579,107 @@
   }
 
   /**
-   * 收尾一轮扫描：把已返回的结果装配成 entries（按修改时间从新到旧排序）
-   * 并渲染。两种触发：全部根返回（stopped=false）、或用户点「停止」
-   * （stopped=true，立即用已返回的部分收尾）。每轮只生效一次；停止后才
-   * 迟到的根被 round.finished 挡掉，不会覆盖已展示的部分结果。
+   * 取本轮已收集条目的**排序副本**（按修改时间从新到旧）。
+   * 扫描中的增量渲染与收尾都走它，保证「边扫边显示」的列表与最终列表口径一致。
+   */
+  function roundEntries(round) {
+    return sortByMtime(round.acc.slice());
+  }
+
+  /** 扫描中的状态行文案（带已找到条数，让人确信「边扫边出」在推进） */
+  function liveStatus(round) {
+    return "正在扫描 " + round.folders.length + " 个文件夹… 已找到 " + round.acc.length +
+      " 项（点「停止」可中断）";
+  }
+
+  /**
+   * 增量渲染（节流）：批次到达得很密，合并到 `LIVE_RENDER_MS` 一次重排，
+   * 避免每条批次都全量排序+重绘把扫描拖慢。0 项时只更新状态行，不闪空态。
+   */
+  function scheduleLiveRender(round) {
+    round.dirty = true;
+    if (liveRenderTimer) return;
+    liveRenderTimer = setTimeout(function () {
+      liveRenderTimer = null;
+      if (round.finished || activeRound !== round) return;
+      setStatus(liveStatus(round));
+      if (round.acc.length === 0) return;
+      if (!round.dirty) return; // 这段时间没有新条目：不必重排重绘
+      round.dirty = false;
+      entries = roundEntries(round);
+      scanned = true;
+      renderFolders();
+      render();
+    }, LIVE_RENDER_MS);
+  }
+
+  /**
+   * 把一批（或一次性）条目并入本轮累积。**按 path 去重**：流式批次与
+   * 最终返回的完整列表可能重叠，去重后两者都合入也不会重复。
+   */
+  function addEntries(round, rootName, list) {
+    if (!list || !list.length) return;
+    for (var i = 0; i < list.length; i++) {
+      var e = list[i];
+      if (!e || !e.path || round.seen[e.path]) continue;
+      round.seen[e.path] = true;
+      e.rootName = rootName; // 行内标注来源根（多根展示与过滤用）
+      round.acc.push(e);
+    }
+  }
+
+  /**
+   * 收尾一轮扫描：用本轮已累积的条目（按修改时间从新到旧排序）渲染。
+   * 两种触发：全部根返回（stopped=false）、或用户点「停止」（stopped=true，
+   * 立即用已扫到的部分收尾）。每轮只生效一次；停止后迟到的批次/根被
+   * round.finished 挡掉，不会覆盖已展示的部分结果。
    */
   function finishRound(round, stopped) {
     if (round.finished) return;
     if (!stopped && round.done < round.results.length) return; // 还没集齐，继续等
     if (activeRound !== round) return; // 已有新轮，旧轮作废
     round.finished = true;
+    if (liveRenderTimer) {
+      clearTimeout(liveRenderTimer);
+      liveRenderTimer = null;
+    }
     scanning = false;
     activeRound = null;
     setScanButton(false);
     if (stopped) pendingRescan = false; // 用户主动停：附件变化不再触发补扫
 
-    var got = 0;
+    // 统计失败根（成功根的结果已在扫描中经批次/返回合入）
+    var okCount = 0;
     var failCount = 0;
     var firstErr = null;
-    capped = false;
     var failed = {};
-    var list = [];
     for (var i = 0; i < round.results.length; i++) {
       var r = round.results[i];
       if (!r) continue; // 停止时尚未返回的根
-      var root = round.folders[i] || {};
-      got++;
-      if (r.list) {
-        var rootName = baseName(root.path);
-        if (r.list.length >= LIST_LIMIT) capped = true; // 单根被 Rust 侧截断
-        for (var j = 0; j < r.list.length; j++) {
-          if (list.length >= TOTAL_LIMIT) {
-            capped = true;
-            break;
-          }
-          r.list[j].rootName = rootName; // 行内标注来源根（多根展示与过滤用）
-          list.push(r.list[j]);
-        }
-      } else {
+      if (r.err) {
         failCount++;
-        failed[root.path] = explainError(r.err);
+        failed[round.folders[i].path] = explainError(r.err);
         if (!firstErr) firstErr = r.err;
+      } else {
+        okCount++;
       }
     }
 
-    entries = list;
+    entries = roundEntries(round);
     failedPaths = failed;
     // 换了结果集：旧图标缓存按路径仍然有效（同文件图标不变），保留即可；
     // 但「在途」标记要清，避免上一轮未返回的请求挡住本轮重取。
     iconPending = {};
-    sortByMtime(entries);
     renderFolders(); // 失败根标红（部分失败时尤其需要：定位是哪一路挂了）
 
     // 没有任何可展示数据：停止 → 中性提示；否则是整体扫描失败
     //（不能进「文件夹里没有文件」的空态，会误导）
-    if (entries.length === 0 && (got === 0 || failCount === got)) {
+    if (entries.length === 0 && okCount === 0) {
       scanned = false;
       render();
       setStatus(
         stopped
-          ? got === 0
+          ? round.done === 0
             ? "已停止：未收集到结果"
             : "已停止：" + failCount + " 个文件夹扫描失败"
           : "扫描失败（" + failCount + " 个文件夹）：" + explainError(firstErr),
@@ -610,8 +692,8 @@
     scanned = true;
     if (stopped) {
       setStatus(
-        "已停止：收集到 " + entries.length + " 项（" + got + "/" + round.results.length +
-          " 个文件夹完成）" + (failCount ? "，" + failCount + " 个失败" : ""),
+        "已停止：已保留 " + entries.length + " 项（" + round.done + "/" + round.results.length +
+          " 个文件夹已扫，可能不完整）" + (failCount ? "，" + failCount + " 个失败" : ""),
         "warn"
       );
     } else if (failCount > 0) {
@@ -655,7 +737,6 @@
     }
     folders = atts.filter(function (a) { return a && a.kind === "folder"; });
     failedPaths = {};
-    capped = false;
     renderFolders();
 
     if (folders.length === 0) {
@@ -666,6 +747,10 @@
       return;
     }
 
+    if (liveRenderTimer) {
+      clearTimeout(liveRenderTimer);
+      liveRenderTimer = null;
+    }
     scanning = true;
     setScanButton(true);
     setStatus("正在扫描 " + folders.length + " 个文件夹…（点「停止」可中断）");
@@ -674,6 +759,9 @@
       gen: ++scanGen, // 本轮代次：停止时 Rust 按它中止在途 walk
       folders: folders.slice(), // 快照：收尾时与 results 按下标配对
       results: new Array(folders.length).fill(null),
+      acc: [], // 已收集条目（流式批次 + 各根返回；按 path 去重）
+      seen: {}, // path 去重表
+      dirty: false, // 自上次增量渲染以来是否有新条目（节流用）
       done: 0,
       finished: false,
     };
@@ -681,16 +769,37 @@
 
     // 逐根发起（不用 allSettled：「停止」需要在部分根返回时就能收尾展示）
     round.folders.forEach(function (f, i) {
+      var rootName = baseName(f.path);
       var p;
       try {
-        p = ms.input.listFolder(f.path, { limit: LIST_LIMIT, gen: round.gen });
+        if (canStream) {
+          // 流式：每批到达就累积 + 节流增量渲染（“边扫边显示”）
+          p = ms.input.listFolderStream(
+            f.path,
+            function (batch) {
+              if (round.finished || activeRound !== round) return;
+              addEntries(round, rootName, batch);
+              scheduleLiveRender(round);
+            },
+            { gen: round.gen }
+          );
+        } else {
+          // 旧宿主：一次性返回（仍不传 limit = 不限条数，受宿主自身保护）
+          p = ms.input.listFolder(f.path, { gen: round.gen });
+        }
       } catch (e2) {
         p = Promise.reject(e2);
       }
       Promise.resolve(p)
         .then(
-          function (list) { round.results[i] = { list: list || [] }; },
-          function (err) { round.results[i] = { err: err }; }
+          function (list) {
+            round.results[i] = { list: list || [] };
+            // 流式下批次已合入；此处再合一次做兜底（path 去重保证不重复）
+            addEntries(round, rootName, list || []);
+          },
+          function (err) {
+            round.results[i] = { err: err };
+          }
         )
         .then(function () {
           round.done++;
@@ -699,7 +808,7 @@
     });
   }
 
-  /** 「停止」：立即用已返回的部分收尾，并通知 Rust 中止在途 walk */
+  /** 「停止」：立即用已扫到的部分收尾，并通知 Rust 中止在途 walk */
   function stopScan() {
     if (!scanning || !activeRound) return;
     var round = activeRound;
@@ -755,6 +864,47 @@
       else refresh();
     });
   }
+
+  // 会话卸载（closeBehavior: "exit"）后本实例失效：清掉在途的增量渲染定时器，
+  // 免得 setTimeout 醒在一个已脱离文档的老实例上（render 会写旧的 DOM）。
+  window.addEventListener("beforeunload", function () {
+    if (liveRenderTimer) {
+      clearTimeout(liveRenderTimer);
+      liveRenderTimer = null;
+    }
+  });
+
+  /**
+   * 按住 Alt → 显示底部操作提示；松开 → 收起。挂在 window 的 **捕获阶段**：
+   * 视图里若有人 stopPropagation 也拦不住这里（提示属全局兜底信息）。
+   *
+   * 兼容两类 Alt：
+   *   - keydown/keyup 的 key === "Alt"：正常按下 / 松开；
+   *   - 组合键（Alt+Tab 切走等）与焦点丢失：窗口失焦时无法保证收到 keyup，
+   *     用 blur / 可见性变化兜底清掉，避免「提示卡在显示态」。
+   * 只认「纯 Alt」（不叠加 Ctrl/Shift/Win）：Alt+点击/F4 等组合键不应弹提示。
+   */
+  function setAltHeld(next) {
+    if (altHeld === next) return;
+    altHeld = next;
+    syncFoot(); // 只切换底部提示的显隐，不重排结果列表
+  }
+  function onAltDown(e) {
+    if (e.key !== "Alt" || e.repeat) return;
+    if (e.ctrlKey || e.shiftKey || e.metaKey) return;
+    setAltHeld(true);
+  }
+  function onAltUp(e) {
+    if (e.key !== "Alt") return;
+    setAltHeld(false);
+  }
+  window.addEventListener("keydown", onAltDown, true);
+  window.addEventListener("keyup", onAltUp, true);
+  // 失焦 / 页面隐藏：收不到 keyup 时兜底收起（否则提示会一直挂着）
+  window.addEventListener("blur", function () { setAltHeld(false); });
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) setAltHeld(false);
+  });
 
   // 类型页签切换（只重渲列表与统计；计数跟着关键词实时变）
   if (dom["fs-cats"]) {

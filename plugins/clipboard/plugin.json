@@ -6,6 +6,7 @@
   "minAppVersion": "7.9.15",
   "author": "zhuangjie",
   "description": "自动记录你复制过的文本与图片，按快捷键呼出即可搜索、复制、删除、收藏。收藏的条目永久保留、不会被上限淘汰或清空。监听在后台原生完成，不干扰系统剪贴板。",
+  "repository": "https://github.com/My-Search/my-search-desktop/tree/master/plugins/clipboard",
   "icon": "icon.svg",
   "permissions": [
     "ui.inlay",

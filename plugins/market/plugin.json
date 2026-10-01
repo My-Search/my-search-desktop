@@ -7,6 +7,7 @@
   "author": "my-search",
   "description": "浏览、安装、更新与卸载插件",
   "homepage": "https://github.com/My-Search",
+  "repository": "https://github.com/My-Search/my-search-desktop/tree/master/plugins/market",
   "icon": "icon.svg",
   "permissions": [
     "ui.inlay",

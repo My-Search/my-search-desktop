@@ -7,6 +7,11 @@
 //! 2. **登记附加集合**（`attachments_sync`）：前端增删附件时下发路径集合；
 //! 3. **受控访问**（`attachment_read/list/open`）：读内容、递归列举、系统打开。
 //!
+//! 递归列举（`attachment_list`）默认**不限条数**：一直枚举到遍历结束，
+//! 或用户经 `attachment_list_cancel(gen)` 主动中止（walk 立即带着已收集的
+//! 部分返回，走 `Ok` 出口）。另有可选**流式**通道（`on_batch`）：每攒够
+//! 一批就推给前端，供插件「边扫边显示」；不传通道的调用方（旧插件）行为不变。
+//!
 //! 与 `plugin_net_fetch` 同构的纵深防御：每个受控命令都先查**网关 grants**
 //! 是否含 `file.read`（第一道在前端 host.ts），再校验目标路径落在已登记的
 //! 附加集合内——插件因此拿不到集合之外的本地文件。
@@ -23,6 +28,7 @@ use std::time::UNIX_EPOCH;
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
+use tauri::ipc::Channel;
 
 use crate::plugin_host::{gateway_get, has_base_permission};
 
@@ -30,8 +36,9 @@ use crate::plugin_host::{gateway_get, has_base_permission};
 const MAX_READ_BYTES: u64 = 100 * 1024 * 1024;
 /// 递归列举的深度上限（防符号链接/超深树）
 const MAX_WALK_DEPTH: usize = 16;
-/// 递归列举的默认条数上限（前端可传，最终夹紧到 [1, 100000]）
-const DEFAULT_LIST_LIMIT: usize = 20000;
+/// 流式列举的批量阈值：攒够这么多条就推一批给前端（配合「边扫边显示」）。
+/// 太小会放大 IPC 次数，太大又削弱「边扫边看」的即时感。
+const WALK_BATCH: usize = 256;
 
 /// 已登记的附加根（由前端 `attachments_sync` 下发）
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -352,8 +359,14 @@ pub fn attachment_preview(path: String, max_bytes: Option<u64>) -> Result<String
 
 /// 递归列举一个附加文件夹（返回文件+子目录，按相对路径排序）。
 ///
+/// **无固定条数上限**：`limit` 传 `None`/`0` = 不限，一直枚举到结束或用户中止。
 /// `gen` = 本轮列举的代次：只有与 `attachment_list_cancel` 传入值相同的轮次
 /// 才会受取消影响；不传 `gen` 的调用方（旧宿主）永不被取消。
+///
+/// **可选流式**：`on_batch` 是前端 Channel（`new Channel()` 序列化为
+/// `__CHANNEL__:<id>`）。传了它 → 每攒够 `WALK_BATCH` 条就推一批，前端可
+/// 「边扫边显示」；不传（旧插件/旧宿主）→ 完全保持旧行为，走完一次性返回。
+///
 /// 声明为 async 并把实际遍历丢进 `spawn_blocking`：列举是密集 I/O，
 /// 占住主线程会让整个应用在长列举期间卡死——「停止」按钮也就点不动了。
 #[tauri::command]
@@ -362,10 +375,19 @@ pub async fn attachment_list(
     path: String,
     limit: Option<usize>,
     gen: Option<u64>,
+    on_batch: Option<tauri::ipc::JavaScriptChannelId>,
+    webview: tauri::Webview,
 ) -> Result<Vec<AttachmentDirEntry>, String> {
-    tauri::async_runtime::spawn_blocking(move || list_blocking(&plugin_id, &path, limit, gen))
-        .await
-        .map_err(|e| err(&format!("列举任务执行失败: {e}")))?
+    // JavaScriptChannelId → 真正的发送通道（需要 webview 才能 eval 回去）。
+    // `Option<Channel<T>>` 不被命令宏支持（Channel 不是 Deserialize），
+    // 所以参数收 JavaScriptChannelId、在命令体内再 `channel_on`。
+    let channel: Option<Channel<Vec<AttachmentDirEntry>>> =
+        on_batch.map(|id| id.channel_on(webview));
+    tauri::async_runtime::spawn_blocking(move || {
+        list_blocking(&plugin_id, &path, limit, gen, channel)
+    })
+    .await
+    .map_err(|e| err(&format!("列举任务执行失败: {e}")))?
 }
 
 /// `attachment_list` 的本体（在线程池上执行）
@@ -374,17 +396,26 @@ fn list_blocking(
     path: &str,
     limit: Option<usize>,
     gen: Option<u64>,
+    channel: Option<Channel<Vec<AttachmentDirEntry>>>,
 ) -> Result<Vec<AttachmentDirEntry>, String> {
     check_access(plugin_id, path, true)?;
-    let limit = limit
-        .unwrap_or(DEFAULT_LIST_LIMIT)
-        .clamp(1, 100_000);
+    // None/0 = 不限条数（用户点「停止」或走完为止）；正数才作为上限。
+    let limit = limit.filter(|n| *n > 0).unwrap_or(usize::MAX);
     let root = PathBuf::from(path);
     if !root.is_dir() {
         return Err(err("目标不是文件夹"));
     }
-    let mut out = Vec::new();
-    walk(&root, "", 0, limit, gen, &mut out)?;
+    let mut ctx = WalkCtx {
+        out: Vec::new(),
+        limit,
+        gen,
+        channel: channel.as_ref(),
+        sent: 0,
+        batch: WALK_BATCH,
+    };
+    walk(&root, "", 0, &mut ctx)?;
+    ctx.flush(); // 把最后不足一批的尾巴也推出去（若还在流式）
+    let mut out = ctx.out;
     out.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     Ok(out)
 }
@@ -408,24 +439,74 @@ fn walk_cancelled(gen: Option<u64>) -> bool {
     }
 }
 
+/// 一次列举的可变上下文：累积结果、条数上限、取消代次与（可选）流式通道。
+/// 打包成一个结构体而不是给 walk 堆 6 个参数，递归调用处也清爽。
+struct WalkCtx<'a> {
+    /// 全部条目（返回时排序；流式只用作「取尚未推送的那一段」的源）
+    out: Vec<AttachmentDirEntry>,
+    /// 条数上限（`usize::MAX` = 不限）
+    limit: usize,
+    /// 取消代次（`None` = 永不取消）
+    gen: Option<u64>,
+    /// 流式通道（`None` = 不推，走完一次性返回）
+    channel: Option<&'a Channel<Vec<AttachmentDirEntry>>>,
+    /// 已推送条数（`out[sent..]` = 尚未推送的部分）
+    sent: usize,
+    /// 批量阈值
+    batch: usize,
+}
+
+impl WalkCtx<'_> {
+    /// 是否该停：到达上限或用户取消。
+    #[inline]
+    fn stop(&self) -> bool {
+        self.out.len() >= self.limit || walk_cancelled(self.gen)
+    }
+
+    /// 把尚未推送的条目按批推给前端（不足一批时 `force` 才推）。
+    /// send 失败**吞掉**：流是 best-effort，通道那头（视图已卸载）断了
+    /// 不该让整次列举失败——最终返回值仍会带上完整结果。
+    fn flush_ready(&mut self, force: bool) {
+        let Some(ch) = self.channel else { return };
+        loop {
+            let pending = self.out.len() - self.sent;
+            if pending == 0 || (!force && pending < self.batch) {
+                return;
+            }
+            let n = if force { pending } else { self.batch };
+            if ch.send(self.out[self.sent..self.sent + n].to_vec()).is_err() {
+                return;
+            }
+            self.sent += n;
+            // 非 force 时推满一批就停，等下一批攒够再推（保持批量语义）
+            if !force {
+                return;
+            }
+        }
+    }
+
+    /// 收尾：把尾巴（不足一批的）也推出去。
+    fn flush(&mut self) {
+        self.flush_ready(true);
+    }
+}
+
 /// 深度优先列举：目录本身也入列（用户也能按文件夹名搜），符号链接不跟随（防环）。
 /// `gen` 用于取消：命中时与「到深/到量」一样立即 Ok 返回，已收集的部分保留。
 fn walk(
     dir: &Path,
     rel_base: &str,
     depth: usize,
-    limit: usize,
-    gen: Option<u64>,
-    out: &mut Vec<AttachmentDirEntry>,
+    ctx: &mut WalkCtx,
 ) -> Result<(), String> {
-    if depth > MAX_WALK_DEPTH || out.len() >= limit || walk_cancelled(gen) {
+    if depth > MAX_WALK_DEPTH || ctx.stop() {
         return Ok(());
     }
     let rd = std::fs::read_dir(dir).map_err(|e| err(&format!("读取目录失败: {e}")))?;
     let mut children: Vec<_> = rd.filter_map(|e| e.ok()).collect();
     children.sort_by_key(|e| e.file_name());
     for child in children {
-        if out.len() >= limit || walk_cancelled(gen) {
+        if ctx.stop() {
             break;
         }
         let name = child.file_name().to_string_lossy().to_string();
@@ -443,7 +524,7 @@ fn walk(
         let size = md.as_ref().map(|m| m.len()).unwrap_or(0);
         let mtime = md.as_ref().map(mtime_ms).unwrap_or(0);
         let path_str = child_path.to_string_lossy().to_string();
-        out.push(AttachmentDirEntry {
+        ctx.out.push(AttachmentDirEntry {
             path: path_str,
             name,
             rel_path: rel.clone(),
@@ -451,8 +532,9 @@ fn walk(
             size,
             mtime_ms: mtime,
         });
-        if is_dir && depth < MAX_WALK_DEPTH && out.len() < limit {
-            walk(&child_path, &rel, depth + 1, limit, gen, out)?;
+        ctx.flush_ready(false); // 攒够一批就推，配合「边扫边显示」
+        if is_dir && depth < MAX_WALK_DEPTH && !ctx.stop() {
+            walk(&child_path, &rel, depth + 1, ctx)?;
         }
     }
     Ok(())
@@ -1004,6 +1086,18 @@ mod tests {
         assert!(!PREVIEW_IMAGE_EXTS.contains(&"txt"));
     }
 
+    /// 便捷构造「不流式」的 walk 上下文（测试用；channel=None → 不推批）。
+    fn ctx(limit: usize, gen: Option<u64>) -> WalkCtx<'static> {
+        WalkCtx {
+            out: Vec::new(),
+            limit,
+            gen,
+            channel: None,
+            sent: 0,
+            batch: WALK_BATCH,
+        }
+    }
+
     #[test]
     fn walk_cancel_by_gen_returns_partial_ok() {
         let dir = std::env::temp_dir().join(format!("ms-att-cancel-{}", std::process::id()));
@@ -1012,21 +1106,85 @@ mod tests {
 
         // 本轮 gen 已取消：入口即停，Ok 返回且一个都没收集
         CANCELLED_GEN.store(424_242, Ordering::Relaxed);
-        let mut out = Vec::new();
-        walk(&dir, "", 0, 1000, Some(424_242), &mut out).unwrap();
-        assert!(out.is_empty());
+        let mut c = ctx(1000, Some(424_242));
+        walk(&dir, "", 0, &mut c).unwrap();
+        assert!(c.out.is_empty());
 
         // 新一轮 gen 不受影响：正常列举
-        let mut out2 = Vec::new();
-        walk(&dir, "", 0, 1000, Some(424_243), &mut out2).unwrap();
-        assert_eq!(out2.len(), 1);
+        let mut c2 = ctx(1000, Some(424_243));
+        walk(&dir, "", 0, &mut c2).unwrap();
+        assert_eq!(c2.out.len(), 1);
 
         // 不带 gen 的调用方永不被取消
-        let mut out3 = Vec::new();
-        walk(&dir, "", 0, 1000, None, &mut out3).unwrap();
-        assert_eq!(out3.len(), 1);
+        let mut c3 = ctx(1000, None);
+        walk(&dir, "", 0, &mut c3).unwrap();
+        assert_eq!(c3.out.len(), 1);
 
         CANCELLED_GEN.store(u64::MAX, Ordering::Relaxed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `limit = usize::MAX`（前端「一直搜索」）不应截断：目录里有 5 个文件
+    /// 就收集 5 个，而不是被某个默认上限卡住。
+    #[test]
+    fn walk_without_limit_collects_everything() {
+        let dir = std::env::temp_dir().join(format!("ms-att-nolimit-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        for i in 0..5 {
+            std::fs::write(dir.join(format!("f{i}.txt")), b"x").unwrap();
+        }
+        std::fs::write(dir.join("sub").join("nested.txt"), b"y").unwrap();
+
+        let mut c = ctx(usize::MAX, None);
+        walk(&dir, "", 0, &mut c).unwrap();
+        // 根下 5 个文件 + 1 个 sub 目录 + sub 内 1 个文件 = 7
+        assert_eq!(c.out.len(), 7, "不限条数应收集全部（含子目录与其中文件）");
+
+        // 显式上限仍然生效（旧调用方传 limit）
+        let mut c2 = ctx(2, None);
+        walk(&dir, "", 0, &mut c2).unwrap();
+        assert_eq!(c2.out.len(), 2, "有上限时应在上限处停止");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 批量流式：批次阈值调小，验证 flush 把 `out` 按批推送、`sent` 游标推进，
+    /// 且**不重复**推送（合并所有批次 == 完整结果）。
+    #[test]
+    fn walk_streams_batches_without_duplication() {
+        use std::sync::Mutex as StdMutex;
+        // 用 Channel::new 造一个「本地」通道，回调把收到的批存进共享 Vec。
+        let seen: std::sync::Arc<StdMutex<Vec<AttachmentDirEntry>>> =
+            std::sync::Arc::new(StdMutex::new(Vec::new()));
+        let sink = seen.clone();
+        let ch: Channel<Vec<AttachmentDirEntry>> = Channel::new(move |body| {
+            if let tauri::ipc::InvokeResponseBody::Json(js) = body {
+                let batch: Vec<AttachmentDirEntry> = serde_json::from_str(&js).unwrap();
+                sink.lock().unwrap().extend(batch);
+            }
+            Ok(())
+        });
+
+        let dir = std::env::temp_dir().join(format!("ms-att-stream-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..5 {
+            std::fs::write(dir.join(format!("f{i}.txt")), b"x").unwrap();
+        }
+
+        let mut c = WalkCtx {
+            out: Vec::new(),
+            limit: usize::MAX,
+            gen: None,
+            channel: Some(&ch),
+            sent: 0,
+            batch: 2, // 每 2 条推一批：5 条 → 批 2/2/…，收尾 flush 推尾巴 1 条
+        };
+        walk(&dir, "", 0, &mut c).unwrap();
+        c.flush();
+        assert_eq!(c.sent, c.out.len(), "收尾后应全部推完");
+        let got = seen.lock().unwrap().clone();
+        assert_eq!(got.len(), c.out.len(), "推送总数应等于完整结果数（无重复无遗漏）");
+
         std::fs::remove_dir_all(&dir).ok();
     }
 }

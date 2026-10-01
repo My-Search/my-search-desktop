@@ -54,6 +54,7 @@ import {
   normalizeRegion,
 } from "./ffmpeg-args.mjs";
 import { normalizeWatermark, DEFAULT_WATERMARK } from "./watermark.mjs";
+import { listFonts as detectFonts, ensureWatermarkFont } from "./fonts.mjs";
 import {
   provisionFfmpeg,
   existingBundled,
@@ -379,7 +380,10 @@ async function startRecord(params = {}) {
 
   ensureOutDir();
   const region = normalizeRegion(params.region);
-  const spec = normalizeWatermark(params.watermark || DEFAULT_WATERMARK);
+  // 文字水印若没指定字体，自动补一个中文字体——否则自带 ffmpeg 没有
+  // fontconfig 配置，中文会渲染成方块（见 fonts.mjs 的说明）
+  const ensured = ensureWatermarkFont(normalizeWatermark(params.watermark || DEFAULT_WATERMARK));
+  const spec = ensured.spec;
   const output = join(OUT_DIR, timestampName("rec") + ".mp4");
 
   const cfg = readConfig();
@@ -401,6 +405,9 @@ async function startRecord(params = {}) {
     videoWidth: region ? region.width : probe && probe.virtual ? probe.virtual.w : undefined,
   };
   let { args, notes } = buildRecordArgs(launch);
+  if (ensured.missingFont) {
+    notes = notes.concat("本机未找到中文字体，水印中文可能显示为方块");
+  }
   if (format === "gdigrab" && process.platform === "win32" && cfg.captureBackend !== "gdi") {
     notes = notes.concat(
       probe && probe.dda && !probe.singleMonitor
@@ -789,7 +796,9 @@ async function applyWatermark(params = {}) {
   const info = requireFfmpeg(await ensureFfmpeg(params.ffmpegPath));
 
   ensureOutDir();
-  const spec = normalizeWatermark(params.watermark || DEFAULT_WATERMARK);
+  // 同录制路径：文字水印缺字体时自动补一个中文字体，避免导出后中文变方块
+  const ensured = ensureWatermarkFont(normalizeWatermark(params.watermark || DEFAULT_WATERMARK));
+  const spec = ensured.spec;
   // 用户可指定输出名（仍需落在私有目录内，防止越权写盘）
   const wantName = String(params.outputName || "").trim();
   const safeName = wantName ? basename(wantName).replace(/[^\w\u4e00-\u9fa5.-]+/g, "_") : "";
@@ -808,7 +817,7 @@ async function applyWatermark(params = {}) {
     }
   }
 
-  const { args, hasFilterComplex } = buildWatermarkArgs({
+  const { args, hasFilterComplex, notes } = buildWatermarkArgs({
     input,
     output,
     watermark: spec,
@@ -817,6 +826,10 @@ async function applyWatermark(params = {}) {
     timestampMode: params.timestampMode || "pts",
     progress: true,
   });
+  if (ensured.missingFont) {
+    sendLog("warn", "本机未找到中文字体，水印中文可能显示为方块");
+  }
+  for (const n of notes || []) sendLog("info", n);
 
   sendLog("info", `加水印: ${args.join(" ")}`);
   const child = spawn(info.path, args, { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
@@ -1036,31 +1049,7 @@ async function capabilities(params = {}) {
   };
 }
 
-/** 探测常见中文字体，供 drawtext 避免中文方块 */
-function listFonts() {
-  const cands =
-    process.platform === "win32"
-      ? [
-          "C:\\Windows\\Fonts\\msyh.ttc",
-          "C:\\Windows\\Fonts\\msyhbd.ttc",
-          "C:\\Windows\\Fonts\\simhei.ttf",
-          "C:\\Windows\\Fonts\\simsun.ttc",
-          "C:\\Windows\\Fonts\\deng.ttf",
-        ]
-      : process.platform === "darwin"
-        ? ["/System/Library/Fonts/PingFang.ttc", "/Library/Fonts/Arial Unicode.ttf"]
-        : [
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-          ];
-  return cands.filter((p) => {
-    try {
-      return existsSync(p);
-    } catch {
-      return false;
-    }
-  });
-}
+/* 探测/兜底逻辑见 fonts.mjs（纯探测 + 可注入依赖，便于单测） */
 
 /* ======================= 请求分发 ======================= */
 
@@ -1133,7 +1122,7 @@ async function handleRequest(id, method, params) {
     }
 
     case "listFonts":
-      sendResult(id, { fonts: listFonts() });
+      sendResult(id, { fonts: detectFonts() });
       return;
 
     case "startRecord":

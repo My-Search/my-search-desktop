@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>资源监控</title>
+  <link rel="stylesheet" href="detail.css">
+</head>
+<body>
+  <!--
+    资源监控插件前台。
+
+    布局：系统卡片（整机 CPU / 内存 / 真实上传 / 真实下载）+ 三个类别页签
+    （CPU / 内存 / 上传），每个页签是「多线趋势图 + 当前 Top 10」。
+
+    约定（见 docs/plugin-market-publish.md「界面与主题」）：
+      - 所有 class 以 `rm-` 前缀，避免与宿主及别的插件撞车；
+      - 颜色走宿主共享变量 `var(--token, 兜底)`，深浅色自适应；
+      - 不用 :root / body 选择器（宿主会把插件 CSS 作用域化）。
+  -->
+  <div id="app" class="rm-app">
+    <!-- 顶部：系统卡片（占满整行宽度） -->
+    <div class="rm-head">
+      <div class="rm-cards">
+        <div class="rm-card">
+          <span class="rm-card-k">整机 CPU</span>
+          <b id="rm-c-cpu" class="rm-card-v">--</b>
+        </div>
+        <div class="rm-card">
+          <span class="rm-card-k">内存</span>
+          <b id="rm-c-mem" class="rm-card-v">--</b>
+          <span id="rm-c-mem-sub" class="rm-card-sub"></span>
+        </div>
+        <div class="rm-card">
+          <span class="rm-card-k">真实上传</span>
+          <b id="rm-c-up" class="rm-card-v">--</b>
+        </div>
+        <div class="rm-card">
+          <span class="rm-card-k">真实下载</span>
+          <b id="rm-c-down" class="rm-card-v">--</b>
+        </div>
+      </div>
+    </div>
+
+    <!-- 阈值设置：进圈 / 出圈（动态可调） -->
+    <div class="rm-cfg">
+      <span class="rm-cfg-k">趋势圈线：</span>
+      <label class="rm-cfg-f">进圈 <input id="rm-enter" class="rm-input" type="number" min="1" max="200" step="1" value="10"> 名</label>
+      <label class="rm-cfg-f">出圈 <input id="rm-exit" class="rm-input" type="number" min="1" max="200" step="1" value="15"> 名</label>
+      <button id="rm-apply" class="rm-btn sm" data-act="apply-th">应用</button>
+      <span class="rm-cfg-hint" id="rm-cfg-hint">进圈看 10 名；掉到 15 名之外才移出趋势图</span>
+    </div>
+
+    <!-- 类别页签 + 右侧操作按钮 -->
+    <div class="rm-tabsbar">
+      <div class="rm-tabs" role="tablist">
+        <button class="rm-tab active" data-cat="cpu" data-act="tab" role="tab" aria-selected="true">CPU 占用</button>
+        <button class="rm-tab" data-cat="mem" data-act="tab" role="tab" aria-selected="false">内存占用</button>
+        <button class="rm-tab" data-cat="up" data-act="tab" role="tab" aria-selected="false">上传占用</button>
+      </div>
+      <div class="rm-tabs-actions">
+        <span id="rm-status" class="rm-status">正在连接后台…</span>
+        <button id="rm-export" class="rm-btn" data-act="export" title="把当前保留窗口（35 分钟）的数据导出为 CSV">导出 CSV</button>
+        <button id="rm-clear" class="rm-btn" data-act="clear" title="清空采样历史">清空</button>
+      </div>
+    </div>
+
+    <!-- 趋势图（时间范围可用右上角图标放大/缩小；放大后按住拖动可平移；单击可定格某一时刻） -->
+    <div id="rm-chartwrap" class="rm-chartwrap">
+      <div class="rm-zoombar">
+        <button id="rm-zin" class="rm-zbtn" data-act="zoom-in" title="放大：缩小时间范围（看细节）" aria-label="放大">
+          <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+            <circle cx="6.5" cy="6.5" r="4.5"></circle>
+            <line x1="10" y1="10" x2="14" y2="14"></line>
+            <line x1="6.5" y1="4.4" x2="6.5" y2="8.6"></line>
+            <line x1="4.4" y1="6.5" x2="8.6" y2="6.5"></line>
+          </svg>
+        </button>
+        <span id="rm-zlabel" class="rm-zlabel">最近 10 分</span>
+        <button id="rm-zout" class="rm-zbtn" data-act="zoom-out" title="缩小：扩大时间范围" aria-label="缩小">
+          <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+            <circle cx="6.5" cy="6.5" r="4.5"></circle>
+            <line x1="10" y1="10" x2="14" y2="14"></line>
+            <line x1="4.4" y1="6.5" x2="8.6" y2="6.5"></line>
+          </svg>
+        </button>
+        <button id="rm-zreset" class="rm-zbtn" data-act="zoom-reset" title="回到最新（取消平移）" aria-label="回到最新">
+          <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M13 8a5 5 0 1 1-1.6-3.7"></path>
+            <polyline points="13,2.5 13,5 10.5,5"></polyline>
+          </svg>
+        </button>
+      </div>
+      <div id="rm-chart" class="rm-chart"></div>
+      <div id="rm-cross" class="rm-cross" hidden></div>
+      <div id="rm-tip" class="rm-tip" hidden></div>
+    </div>
+
+    <!-- 图例：点击可显隐某条线 -->
+    <div id="rm-legend" class="rm-legend"></div>
+
+    <!-- 类别说明（含上传近似的诚实标注） -->
+    <div id="rm-note" class="rm-note"></div>
+
+    <!-- 定格提示条：单击图表某时刻后出现，点「回到最新」或按 Esc 清除 -->
+    <div id="rm-pinbar" class="rm-pinbar" hidden></div>
+
+    <!-- 当前 Top 10（定格时显示「那一刻」的数据） -->
+    <div id="rm-list" class="rm-list"></div>
+
+    <!-- 空态 / 采集中 -->
+    <div id="rm-empty" class="rm-empty">
+      正在采集…首个采样点只建立基线，约 5~10 秒后出现数据。
+    </div>
+  </div>
+  <script src="index.js"></script>
+</body>
+</html>

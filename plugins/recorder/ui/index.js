@@ -354,9 +354,22 @@
       spec.enabled = !!v;
       fill();
     }
+    /** 由字体探测结果反填 fontFile（同步预览），并触发 onChange 持久化 */
+    function setFontFile(path) {
+      spec.fontFile = path || "";
+      fill();
+      onChange(getSpec());
+    }
 
     fill();
-    return { node: node, getSpec: getSpec, setSpec: setSpec, setEnabled: setEnabled, drawPreview: drawPreview };
+    return {
+      node: node,
+      getSpec: getSpec,
+      setSpec: setSpec,
+      setEnabled: setEnabled,
+      setFontFile: setFontFile,
+      drawPreview: drawPreview,
+    };
   }
 
   /* ======================= 页签切换 ======================= */
@@ -1163,27 +1176,47 @@
     }
   }
 
+  /**
+   * 拉取后端探测到的中文字体，填进两个编辑器的「中文字体」下拉。
+   *
+   * 关键行为：若用户还没选过字体（fontFile 为空），**自动选中第一个**探测到的
+   * 中文字体并持久化。否则默认停在「自动」，而后端自带 ffmpeg 没有 fontconfig，
+   * 中文会渲染成方块——这正是本功能要根治的问题。探测不到字体时给出可见提示，
+   * 而不是静默失败（后端仍会用兜底逻辑再试一次）。
+   */
   async function loadFonts() {
+    var fonts = [];
     try {
       var r = await call("listFonts", {});
-      var fonts = (r && r.fonts) || [];
-      if (!fonts.length) return;
-      Object.keys(wmEditors).forEach(function (k) {
-        var sel = wmEditors[k].node.querySelector('[data-wm="fontFile"]');
-        if (!sel) return;
-        var cur = wmEditors[k].getSpec().fontFile;
-        sel.innerHTML = '<option value="">自动（可能显示方块）</option>';
-        fonts.forEach(function (f) {
-          var o = document.createElement("option");
-          o.value = f;
-          o.textContent = f.split(/[\\/]/).pop() + "  —  " + f;
-          sel.appendChild(o);
-        });
-        sel.value = cur || "";
-      });
+      fonts = (r && r.fonts) || [];
     } catch (e) {
-      /* 字体探测失败不致命，drawtext 会退回 fontconfig 默认 */
+      setStatus("中文字体探测失败，水印中文可能显示为方块", "error");
+      return;
     }
+    if (!fonts.length) {
+      setStatus("本机未找到中文字体，水印中文可能显示为方块；可在设置里手动指定字体文件", "error");
+      return;
+    }
+    Object.keys(wmEditors).forEach(function (k) {
+      var ed = wmEditors[k];
+      var sel = ed.node.querySelector('[data-wm="fontFile"]');
+      if (!sel) return;
+      sel.innerHTML = '<option value="">自动（可能显示方块）</option>';
+      fonts.forEach(function (f) {
+        var o = document.createElement("option");
+        o.value = f;
+        o.textContent = f.split(/[\\/]/).pop() + "  —  " + f;
+        sel.appendChild(o);
+      });
+      var cur = ed.getSpec().fontFile;
+      if (!cur) {
+        // 首次使用：直接把第一个探测到的中文字体选上，预览/导出立刻正常
+        sel.value = fonts[0];
+        ed.setFontFile(fonts[0]);
+      } else {
+        sel.value = cur;
+      }
+    });
   }
 
   async function refreshBackendState() {

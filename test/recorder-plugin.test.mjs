@@ -14,7 +14,7 @@
  * 用法: node test/recorder-plugin.test.mjs
  */
 import { readFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { spawn, execFileSync } from "node:child_process";
+import { spawn, spawnSync, execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -110,16 +110,29 @@ const wm = await importFile(path.join(backendDir, "watermark.mjs"));
 }
 
 {
-  // 用户文字里的特殊字符必须转义，否则 ffmpeg 报语法错
-  eq(wm.escapeDrawtext("a:b"), "a\\:b", "冒号转义");
-  eq(wm.escapeDrawtext("50%"), "50%%", "百分号转义（drawtext 用它当占位符前缀）");
-  eq(wm.escapeDrawtext("a'b"), "a\\'b", "单引号转义");
-  eq(wm.escapeDrawtext("a\\b"), "a\\\\b", "反斜杠转义");
+  // 用户文字里的特殊字符必须转义，否则 ffmpeg 报语法错（层数按滤镜图两层实测）
+  // 冒号：两个反斜杠——滤镜图先吃一层，只写一个会被判成选项分隔符（旧 bug）
+  eq(wm.escapeDrawtext("a:b"), "a\\\\:b", "冒号转义（两层，防被当选项分隔符）");
+  // 未开时间戳（expansion=none）时 % 原样输出即可渲染字面百分号
+  eq(wm.escapeDrawtext("50%"), "50%", "默认（expansion=none）下 % 原样保留");
+  // 开时间戳（normal 扩展）时字面 % 必须四个反斜杠，%% 在该构建上反而报 Stray %
+  eq(wm.escapeDrawtext("50%", { percentAsLiteral: true }), "50\\\\\\\\%", "normal 扩展下 % 用四个反斜杠");
+  eq(wm.escapeDrawtext("a'b"), "a\\\\\\'b", "单引号转义");
+  eq(wm.escapeDrawtext("a\\b"), "a\\\\\\\\b", "反斜杠转义");
+  eq(wm.escapeDrawtext("a,b"), "a\\,b", "逗号是滤镜图分隔符，需转义");
+  eq(wm.escapeDrawtext("a;b"), "a\\;b", "分号需转义");
+  eq(wm.escapeDrawtext("a[b]"), "a\\[b\\]", "方括号（标签字符）需转义");
   eq(wm.escapeDrawtext("上\n下"), "上\\n下", "换行转成 drawtext 的 \\n");
 }
 
 {
-  // 时间戳占位符
+  // 时间戳占位符：反斜杠层数按滤镜图两层写死，且 % 只能一个（不能 %%）
+  const phPts = wm.timestampPlaceholder("pts");
+  const phLt = wm.timestampPlaceholder("localtime");
+  eq(phPts, "%{pts\\\\:hms}", "pts 占位符（两个反斜杠）");
+  eq(phLt, "%{localtime\\\\:%Y-%m-%d %T}", "localtime 占位符（单冒号 %T，避免多段冒号在该构建上失败）");
+
+  // withTimestamp 兼容旧名：文字 + 空格 + 占位符
   const rec = wm.withTimestamp("前缀", "localtime");
   ok(rec.includes("%{localtime"), "录制模式用挂钟时间戳");
   const file = wm.withTimestamp("前缀", "pts");
@@ -127,8 +140,26 @@ const wm = await importFile(path.join(backendDir, "watermark.mjs"));
 }
 
 {
-  const f = wm.buildTextFilter({ text: "x", timestamp: true });
-  ok(f.includes("%{pts"), "开启时间戳后滤镜里出现占位符");
+  // 未开时间戳：必须用 expansion=none，这样用户文字里的 % / {} 才不会被扩展
+  const f = wm.buildTextFilter({ text: "进度100%完成" });
+  ok(f.includes("expansion=none"), "未开时间戳时用 expansion=none");
+  ok(f.includes("text=进度100%完成"), "字面 % 原样写出（expansion=none 下可正常渲染）");
+
+  // 开启时间戳：用默认扩展，占位符不得被二次转义成字面量
+  const ts = wm.buildTextFilter({ text: "我的搜索", timestamp: true });
+  ok(ts.includes("%{pts\\\\:hms}"), "占位符原样进入滤镜", ts.match(/text=[^:]*/)?.[0]);
+  ok(!ts.includes("expansion=none"), "开启时间戳时不写 expansion=none");
+  // 回归护栏：旧实现把占位符二次转义成 %%{...}，会渲染成字面量或直接报错
+  ok(!/%%\{/.test(ts), "占位符不得被二次转义成 %%{");
+  ok(!ts.includes("%%{"), "输出不得含 %%{ 字面量");
+
+  // 用户文字 + 时间戳：字面 % 用 normal 规则（四个反斜杠）
+  const mix = wm.buildTextFilter({ text: "进度100%", timestamp: true });
+  ok(mix.includes("进度100\\\\\\\\% %{pts"), "文字里的 % 与占位符共存且各自转义正确");
+
+  // 只开时间戳、文字留空：不能抛错，只输出占位符
+  const only = wm.buildTextFilter({ text: "", timestamp: true });
+  ok(only.includes("text=%{pts\\\\:hms}"), "空文字 + 时间戳 → 只渲染时间戳");
 }
 
 {
@@ -139,10 +170,17 @@ const wm = await importFile(path.join(backendDir, "watermark.mjs"));
 }
 
 {
-  // 路径进滤镜前转义（Windows 反斜杠 + 盘符冒号）
-  eq(wm.escapeFilterPath("C:\\Windows\\Fonts\\msyh.ttc"), "C\\:/Windows/Fonts/msyh.ttc", "Windows 字体路径转义");
+  // 路径进滤镜前转义：Windows 盘符路径必须「正斜杠 + 冒号单反斜杠 + 单引号包裹」
+  // （实测只有这一种写法在本插件自带的 ffmpeg 上能解析通过，见 watermark.mjs）
+  eq(
+    wm.escapeFilterPath("C:\\Windows\\Fonts\\msyh.ttc"),
+    "'C\\:/Windows/Fonts/msyh.ttc'",
+    "Windows 字体路径转义（引号 + 冒号转义 + 正斜杠）"
+  );
   const f = wm.buildTextFilter({ text: "x", fontFile: "C:\\Windows\\Fonts\\msyh.ttc" });
-  ok(f.includes("fontfile=C\\:/Windows/Fonts/msyh.ttc"), "fontfile 出现在滤镜里且已转义");
+  ok(f.includes("fontfile='C\\:/Windows/Fonts/msyh.ttc'"), "fontfile 出现在滤镜里且已转义", f.match(/fontfile=[^:]*/)?.[0]);
+  // Unix 路径不含冒号，保持原样（不加多余引号）
+  eq(wm.escapeFilterPath("/usr/share/fonts/wqy.ttc"), "/usr/share/fonts/wqy.ttc", "Unix 字体路径原样");
 }
 
 {
@@ -199,6 +237,85 @@ const wm = await importFile(path.join(backendDir, "watermark.mjs"));
   const tl = wm.previewBox({ anchor: "top-left", marginPct: 2 }, 320, 180, 40, 10);
   ok(tl.x < 20 && tl.y < 20, "预览：左上角落点靠左上", JSON.stringify(tl));
   eq(wm.previewFontSize({ sizePct: 10 }, 200), 20, "预览字号 = 高度 × 百分比");
+}
+
+/* ==================== 2.5 中文字体探测 / 兜底 ==================== */
+
+console.log("\n--- 中文字体探测与兜底 ---");
+
+const fonts = await importFile(path.join(backendDir, "fonts.mjs"));
+
+{
+  // 白名单：只返回**真实存在**的字体（注入 exists 便于在无字体的 CI 上断言）
+  const fakeExists = (p) => p === "C:\\Windows\\Fonts\\msyh.ttc";
+  const found = fonts.listFonts({
+    platform: "win32",
+    exists: fakeExists,
+    readdir: () => {
+      throw new Error("no dir");
+    },
+  });
+  eq(found.length, 1, "白名单只保留存在的字体");
+  eq(found[0], "C:\\Windows\\Fonts\\msyh.ttc", "命中微软雅黑");
+
+  // 白名单全不存在 → 扫字体目录按文件名补捞 CJK 字体
+  const scanned = fonts.listFonts({
+    platform: "win32",
+    exists: (p) => /SourceHanSansSC-Regular\.otf$|NotoSansCJK-Regular\.ttc$/.test(p),
+    fontDir: "C:\\Windows\\Fonts",
+    readdir: () => ["arial.ttf", "SourceHanSansSC-Regular.otf", "consola.ttf", "NotoSansCJK-Regular.ttc"],
+  });
+  ok(scanned.includes("C:\\Windows\\Fonts\\SourceHanSansSC-Regular.otf"), "扫目录补捞白名单外的 CJK 字体");
+  ok(scanned.includes("C:\\Windows\\Fonts\\NotoSansCJK-Regular.ttc"), "扫目录识别 Noto CJK");
+  ok(!scanned.some((p) => /arial|consola/i.test(p)), "扫目录不会把纯拉丁字体当中文字体");
+
+  // 去重 + 保序
+  const dup = fonts.listFonts({
+    platform: "win32",
+    exists: () => true,
+    readdir: () => ["msyh.ttc", "msyh.ttc"],
+  });
+  eq(new Set(dup).size, dup.length, "字体列表去重");
+}
+
+{
+  // 兜底：未指定字体的文字水印 → 自动补第一个探测到的中文字体
+  const ensured = fonts.ensureWatermarkFont(
+    { type: "text", text: "我的搜索", fontFile: "" },
+    { platform: "win32", exists: (p) => /msyh\.ttc$/.test(p), readdir: () => [] }
+  );
+  eq(ensured.spec.fontFile, "C:\\Windows\\Fonts\\msyh.ttc", "文字水印自动补字体");
+  eq(ensured.missingFont, false, "补到了字体 → missingFont=false");
+
+  // 用户已指定且文件仍在：原样尊重，不改写
+  const kept = fonts.ensureWatermarkFont(
+    { type: "text", text: "x", fontFile: "D:\\my.ttf" },
+    { platform: "win32", exists: (p) => p === "D:\\my.ttf", readdir: () => [] }
+  );
+  eq(kept.spec.fontFile, "D:\\my.ttf", "用户已指定字体（文件仍在）则不改写");
+
+  // 用户指定的字体已被卸载（文件不存在）→ 兜底换一个探测到的字体，避免 ffmpeg 报错
+  const stale = fonts.ensureWatermarkFont(
+    { type: "text", text: "x", fontFile: "D:\\uninstalled.ttf" },
+    { platform: "win32", exists: (p) => p === "C:\\Windows\\Fonts\\msyh.ttc", readdir: () => [] }
+  );
+  eq(stale.spec.fontFile, "C:\\Windows\\Fonts\\msyh.ttc", "旧字体已不存在 → 换用探测到的字体");
+
+  // 图片水印与字体无关，不应被加上 fontFile
+  const img = fonts.ensureWatermarkFont(
+    { type: "image", imagePath: "D:\\logo.png", fontFile: "" },
+    { platform: "win32", exists: () => true, readdir: () => [] }
+  );
+  eq(img.spec.fontFile, "", "图片水印不注入字体");
+  eq(img.missingFont, false, "图片水印不报缺字体");
+
+  // 本机一个中文字体都没有 → 标记 missingFont（调用方据此提示「可能方块」）
+  const none = fonts.ensureWatermarkFont(
+    { type: "text", text: "x", fontFile: "" },
+    { platform: "win32", exists: () => false, readdir: () => [] }
+  );
+  eq(none.font, null, "找不到字体时不硬塞路径");
+  eq(none.missingFont, true, "找不到字体 → missingFont=true");
 }
 
 /* ============================ 3. 参数拼装 ============================ */
@@ -337,7 +454,7 @@ const args = await importFile(path.join(backendDir, "ffmpeg-args.mjs"));
 
 {
   // 转码：音频 copy、输出在最后、进度走 pipe:2
-  const { args: a } = args.buildWatermarkArgs({
+  const { args: a, notes } = args.buildWatermarkArgs({
     input: "in.mp4",
     output: "out.mp4",
     watermark: { enabled: true, type: "text", text: "署名" },
@@ -349,6 +466,8 @@ const args = await importFile(path.join(backendDir, "ffmpeg-args.mjs"));
   ok(joined.includes("-c:a copy"), "音频不重编码");
   ok(joined.includes("-progress pipe:2"), "开启进度输出");
   eq(a[a.length - 1], "out.mp4", "输出在最后");
+  // 与录制路径同口径：未指定字体时给出「可能变方块」提示（两页行为一致）
+  ok(Array.isArray(notes) && notes.some((n) => /方块/.test(n)), "转码路径也提示未指定字体");
 }
 
 {
@@ -1189,6 +1308,83 @@ function openBackend() {
     } finally {
       await b.close();
     }
+  }
+}
+
+/* ============ 6b. 水印滤镜实机渲染冒烟（本机有 ffmpeg 才跑） ============ */
+
+console.log("\n--- 水印滤镜实机渲染冒烟 ---");
+
+/**
+ * 用真实 ffmpeg 把 buildTextFilter 的输出渲染一帧，断言命令不会因
+ * 转义/语法问题失败。这是**唯一**能挡住「滤镜串语法对但 ffmpeg 解析不了」
+ * 这类回归的测试——纯字符串断言拦不住（旧实现的中文方块、fontfile 与
+ * 占位符转义错误都属于这一类）。
+ *
+ * 找不到 ffmpeg、或本机没有中文字体时自动 SKIP，不阻塞 CI。
+ */
+{
+  const ff = findLocalFfmpeg();
+  const cjkFont = fonts.listFonts().find((p) => /\.(ttf|ttc|otf)$/i.test(p)) || null;
+  if (!ff) {
+    console.log("SKIP  本机没有可用 ffmpeg，水印实机渲染冒烟跳过");
+  } else if (!cjkFont) {
+    console.log("SKIP  本机未探测到中文字体，水印实机渲染冒烟跳过");
+  } else {
+    const outDir = mkdtempSync(path.join(tmpdir(), "rec-wm-render-"));
+    const renderOne = (tag, filter) => {
+      const out = path.join(outDir, tag + ".png");
+      const r = spawnSync(
+        ff,
+        ["-hide_banner", "-y", "-f", "lavfi", "-i", "color=c=black:s=640x160:d=2",
+         "-vf", filter, "-frames:v", "1", "-update", "1", out],
+        { encoding: "utf8" }
+      );
+      const parseErr = /No option name|Error parsing|Stray %|Could not open|Invalid argument|Error while filtering/i.test(r.stderr || "") &&
+        !/fontconfig/i.test(r.stderr || "");
+      return { ok: r.status === 0 && existsSync(out), parseErr, stderr: (r.stderr || "").slice(-300) };
+    };
+
+    // 1) 默认场景（中文 + 描边 + 字体）：修复前是方块/报错，现在必须能出图
+    {
+      const spec = { text: "我的搜索", fontFile: cjkFont, sizePct: 8, border: true, opacity: 1, anchor: "bottom-right", marginPct: 2 };
+      const res = renderOne("default", wm.buildTextFilter(spec));
+      ok(res.ok, "实机：中文水印默认配置可渲染", res.stderr);
+      ok(!res.parseErr, "实机：默认配置无滤镜语法错误", res.stderr);
+    }
+    // 2) 特殊字符（冒号/百分号/逗号/方括号/单引号）
+    {
+      const spec = { text: "时间:12,30 100% A[B]C 'q'", fontFile: cjkFont, sizePct: 6, border: false, opacity: 1 };
+      const res = renderOne("special", wm.buildTextFilter(spec));
+      ok(res.ok, "实机：含 : % , [ ] ' 的文字可渲染", res.stderr);
+    }
+    // 3) 时间戳（pts）—— 回归护栏：占位符二次转义会直接让命令失败
+    {
+      const spec = { text: "我的搜索", timestamp: true, fontFile: cjkFont, sizePct: 6, border: false, opacity: 1 };
+      const res = renderOne("pts", wm.buildTextFilter(spec, { timestampMode: "pts" }));
+      ok(res.ok, "实机：pts 时间戳可渲染", res.stderr);
+    }
+    // 4) 时间戳（localtime）+ 字面百分号
+    {
+      const spec = { text: "进度100%", timestamp: true, fontFile: cjkFont, sizePct: 6, border: false, opacity: 1 };
+      const res = renderOne("localtime", wm.buildTextFilter(spec, { timestampMode: "localtime" }));
+      ok(res.ok, "实机：localtime 时间戳 + 字面 % 可渲染", res.stderr);
+    }
+    // 5) ddagrab 场景的滤镜链（hwdownload 前缀 + drawtext）语法要成立
+    {
+      const spec = { text: "署名", fontFile: cjkFont, sizePct: 6, border: false, opacity: 1 };
+      const filter = "hwdownload,format=bgra," + wm.buildTextFilter(spec);
+      const r = spawnSync(
+        ff,
+        ["-hide_banner", "-y", "-f", "lavfi", "-i", "color=c=black:s=640x160:d=2",
+         "-vf", filter, "-frames:v", "1", "-f", "null", "-"],
+        { encoding: "utf8" }
+      );
+      // hwdownload 在非硬件帧上必然失败，这里只关心「drawtext 部分没有语法错」
+      ok(!/No option name|Stray %|Error parsing/.test(r.stderr || ""), "实机：ddagrab 滤镜链无 drawtext 语法错误", (r.stderr || "").slice(-200));
+    }
+
+    try { rmSync(outDir, { recursive: true, force: true }); } catch {}
   }
 }
 

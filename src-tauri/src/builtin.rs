@@ -1,6 +1,6 @@
 //! 内置插件：随应用资源分发、可卸载且升级不复活。
 //!
-//! 交付形态（P1）：三个内置插件打包为 `.mspp` 放进 `resources/plugins/`,
+//! 交付形态（P1）：两个内置插件打包为 `.mspp` 放进 `resources/plugins/`,
 //! 由本模块在启动时把「可用但未安装」的 id 广播给前端，前端复用既有
 //! 「从文件安装」管线（`install.ts` 解包 → 校验清单 → 权限确认 → `plugin_install`
 //! 原子落盘）完成安装。
@@ -19,8 +19,7 @@ use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
 /// 允许随资源引导的内置插件 id（防资源被篡改成任意插件走免确认通道）。
-pub(crate) const BUILTIN_ALLOWLIST: [&str; 3] = [
-    "com.mysearch.pi-agent",
+pub(crate) const BUILTIN_ALLOWLIST: [&str; 2] = [
     "com.mysearch.market",
     "com.mysearch.file-search",
 ];
@@ -334,7 +333,6 @@ mod tests {
 
     #[test]
     fn allowlist_matches_official_ids() {
-        assert!(is_builtin("com.mysearch.pi-agent"));
         assert!(is_builtin("com.mysearch.market"));
         assert!(is_builtin("com.mysearch.file-search"));
         assert!(!is_builtin("com.example.evil"));
@@ -343,6 +341,8 @@ mod tests {
         assert!(!is_builtin("com.mysearch.baidu-translate"));
         // clipboard 已移出内置清单，改为官方非内置插件经市场安装
         assert!(!is_builtin("com.mysearch.clipboard"));
+        // pi-agent 已移出内置清单，改为官方非内置插件经市场安装
+        assert!(!is_builtin("com.mysearch.pi-agent"));
     }
 
     #[test]
@@ -350,9 +350,9 @@ mod tests {
         let mut state = BuiltinsState {
             schema_version: 0,
             removed: vec![
-                "com.mysearch.pi-agent".into(),
+                "com.mysearch.file-search".into(),
                 "com.example.evil".into(), // 白名单外：应被清掉
-                "com.mysearch.pi-agent".into(), // 重复：应去重
+                "com.mysearch.file-search".into(), // 重复：应去重
                 "com.mysearch.market".into(),
             ],
         };
@@ -361,8 +361,8 @@ mod tests {
         assert_eq!(
             state.removed,
             vec![
-                "com.mysearch.market".to_string(),
-                "com.mysearch.pi-agent".to_string()
+                "com.mysearch.file-search".to_string(),
+                "com.mysearch.market".to_string()
             ]
         );
     }
@@ -370,11 +370,11 @@ mod tests {
     #[test]
     fn removed_semantics_are_stable_across_schema_evolution() {
         // 缺字段 / 旧版本文件解析：应得到空集而不是报错（不阻断启动）
-        let legacy: BuiltinsState = serde_json::from_str("{\"removed\":[\"com.mysearch.pi-agent\"]}")
+        let legacy: BuiltinsState = serde_json::from_str("{\"removed\":[\"com.mysearch.market\"]}")
             .expect("缺 schemaVersion 也能解析");
         let mut legacy = legacy;
         legacy.normalize();
-        assert_eq!(legacy.removed, vec!["com.mysearch.pi-agent".to_string()]);
+        assert_eq!(legacy.removed, vec!["com.mysearch.market".to_string()]);
 
         let empty: BuiltinsState = serde_json::from_str("{}").expect("空对象也能解析");
         assert_eq!(empty.schema_version, BUILTINS_SCHEMA_VERSION);

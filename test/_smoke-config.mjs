@@ -196,7 +196,6 @@ const paneResults = {};
 for (const [pane, expectSel] of [
   ["subscribes", ".page.subscribes"],
   ["tags", ".page.tags"],
-  ["repo", ".page.repo"],
   ["cache", ".page.cache"],
   ["shortcut", ".page.shortcut"],
   ["general", ".page.general"],
@@ -206,10 +205,22 @@ for (const [pane, expectSel] of [
   await sleep(250);
   paneResults[pane] = await evalJs(`!!document.querySelector('#ms-config-view ${expectSel}')`);
 }
+// 订阅市场不再是左侧入口，改由订阅总览页头的图标按钮打开
+await evalJs(`document.querySelector('.cfg-nav .nav-item[data-pane="subscribes"]').click()`);
+await sleep(200);
+await evalJs(`document.querySelector('#ms-config-view .page.subscribes #openTisHub').click()`);
+await sleep(500);
+paneResults["tis-hub"] = await evalJs(`!!document.querySelector('#ms-config-view .page.tis-hub')`);
 check(
-  "七个导航面板均可切换渲染",
+  "六个导航面板 + 订阅市场均可切换渲染",
   Object.values(paneResults).every(Boolean),
   JSON.stringify(paneResults)
+);
+
+// 订阅市场不再提供「提交我的订阅」入口（改由用户自行前往 GitHub 仓库提交）
+check(
+  "订阅市场页不含「提交我的订阅」入口",
+  (await evalJs(`!document.querySelector('#ms-config-view .page.tis-hub #pushTis')`)) === true
 );
 
 // 2. 底栏显隐
@@ -336,8 +347,8 @@ check(
 await evalJs(`document.querySelector('.cfg-nav .nav-item[data-pane="cache"]').click()`);
 await sleep(300);
 const cacheItems = await evalJs(`document.querySelectorAll('#cacheList .cache-item').length`);
-// 与 CACHE_BLUEPRINT 条目数保持一致（当前 11，新增缓存条目时同步更新）
-check("缓存面板列出全部缓存条目", cacheItems === 11, `items=${cacheItems}`);
+// 与 CACHE_BLUEPRINT 条目数保持一致（当前 10，新增/移除缓存条目时同步更新）
+check("缓存面板列出全部缓存条目", cacheItems === 10, `items=${cacheItems}`);
 check(
   "订阅数据缓存显示剩余有效期",
   (await evalJs(`document.querySelector('#cacheList .cache-item[data-key="SEARCH_DATA_KEY"] .cache-count')?.textContent.includes('剩')`)) === true,

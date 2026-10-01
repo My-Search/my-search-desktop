@@ -138,6 +138,32 @@ let streamGateOpen = true;
  */
 let savedState = { projectPath: "", sessionId: "" };
 
+/**
+ * 事件绑定幂等标记 + 文档级监听登记表。
+ *
+ * `init()` 可能被调用多次（例如安装完 pi 后重新 init）。若每次都向 `sendBtn`
+ * 等元素、以及全局 `document` 再挂一遍匿名监听：
+ *   - 元素监听会重复触发（一次点击跑两遍）；
+ *   - document 上的匿名闭包永远不会被回收——视图重挂后，一次拖放会触发**新旧
+ *     两份** ingestDroppedPaths（表现为重复加项目 / 重复贴图）。
+ * 这里用标记保证同一次会话内只绑一次，并把已绑的 document 监听登记下来，
+ * 交由 cleanup() 在视图销毁时统一移除。
+ */
+let eventsBound = false;
+let imageInputsBound = false;
+/** [{ target, type, fn, capture }] —— cleanup 时统一 removeEventListener */
+const docListeners = [];
+function onDoc(target, type, fn, capture = false) {
+  target.addEventListener(type, fn, capture);
+  docListeners.push({ target, type, fn, capture });
+}
+function removeDocListeners() {
+  for (const { target, type, fn, capture } of docListeners) {
+    try { target.removeEventListener(type, fn, capture); } catch (e) { /* ignore */ }
+  }
+  docListeners.length = 0;
+}
+
 // DOM 引用
 const $ = (id) => document.getElementById(id);
 const projectListEl = $("pi-project-list");
@@ -270,7 +296,10 @@ function setupTheme() {
     })
     .catch(() => { /* 读不到就用清单声明（dark） */ });
 
-  // 宿主主题变化时重绘「外观」页（"跟随系统" 下选中态要跟着变）
+  // 宿主主题变化时重绘「外观」页（"跟随系统" 下选中态要跟着变）。
+  // 先清掉旧的订阅：init() 可能被重复调用（如安装完 pi 后重新 init），而宿主把
+  // 主题 handler 存在 Set 里、不会自动去重，重复注册会让一次主题变化重绘多次。
+  ms.ui?._clearThemeHandlers?.();
   ms.ui?.onThemeChanged?.(() => renderSettingsBody());
 }
 
@@ -2503,7 +2532,12 @@ async function selectSession(sessionId) {
       showWelcome("Pi Agent", "这个会话还没有消息，在下面输入开始对话吧");
     } else {
       renderFrom(findLastRoundStart(loadedMessages), true);
+      // 若该会话正在跑：把历史里那条半截回答认领为当前轮气泡，后续 delta 原地覆盖，
+      // 避免「半截回答 + 完整回答」两份并存（见 adoptPartialTurnNode）。
+      // 注意：此刻 runningSessions 可能还没被下面的对账填上，adoptPartialTurnNode
+      // 只把它当作**可写性**判定；真正的对账完成后还会再补一次（见下方）。
       turnAgentNode = null;
+      adoptPartialTurnNode();
 
       // 恢复后同步发送按钮状态——如果该会话正在运行中，显示「停止」并恢复打字指示器
       // 注意根据 runningSessions 判断，而不是 sessions[].flag（内存 flag 在运行中不会被刷新，会丢状态）
@@ -2519,13 +2553,21 @@ async function selectSession(sessionId) {
     try {
       const st = await ms.backend.call("getSessionStatus", { projectPath, sessionId });
       if (currentProject?.path === projectPath && currentSessionId === sessionId) {
-        if (st?.running) {
-          runningSessions.set(sessionId, { projectPath, sessionId });
-          setSendButtonRunning(true);
-          showTyping();
-        } else {
-          runningSessions.delete(sessionId);
-          syncSendButton();
+        // 只信明确的布尔答案：后端未实现该方法 / 返回空时**保持现有账本**。
+        // 否则一次「问不到」就会被当成「没在跑」，把列表 flag 刚水合出来的
+        // 运行态一笔抹掉（表现为切到运行中的会话，按钮却是「发送」）。
+        if (typeof st?.running === "boolean") {
+          if (st.running) {
+            runningSessions.set(sessionId, { projectPath, sessionId });
+            setSendButtonRunning(true);
+            showTyping();
+            // 对账前可能因账本尚未水合而没认领到半截回答气泡，这里补一次
+            //（幂等：已认领时 turnAgentNode 已指向该节点，重复调用无副作用）。
+            if (!turnAgentNode) adoptPartialTurnNode();
+          } else {
+            runningSessions.delete(sessionId);
+            syncSendButton();
+          }
         }
       }
     } catch (e) { /* 查不到状态就按现有账本处理 */ }
@@ -2541,6 +2583,30 @@ async function selectSession(sessionId) {
     clearChat();
     showWelcome("Pi Agent", "无法读取该会话的历史消息");
   }
+}
+
+/**
+ * 切回一个**正在运行**的会话时，把历史里那条「半截回答」气泡认领为本轮气泡。
+ *
+ * 为什么需要：openSession 读到的 transcript 可能已经包含本轮**已流出的部分文本**，
+ * 它会被当成历史气泡渲染（sealed=1）；而随后的 chat:delta 带的是**累积全文**、
+ * 会新建一个气泡再写一遍完整回答——用户就会同时看到「半截回答」和「完整回答」
+ * 两份。这里把那条尚未收尾的 agent 气泡（转录最后一条就是它）改挂成当前轮节点，
+ * 后续 delta 用累积全文原地覆盖，视觉上自然衔接。
+ *
+ * @returns 是否已认领（未认领时保持 turnAgentNode=null，由 currentTurnNode 新建）
+ */
+function adoptPartialTurnNode() {
+  if (!currentSessionIsRunning()) return false;
+  const last = loadedMessages[loadedMessages.length - 1];
+  if (!last || last.role !== "assistant") return false;
+  const nodes = chatBody.querySelectorAll(".message.agent");
+  const node = nodes[nodes.length - 1];
+  if (!node) return false;
+  // 摘掉「历史/已收尾」标记（renderFrom 给历史气泡打过 sealed=1），恢复可写
+  delete node.dataset.sealed;
+  turnAgentNode = node;
+  return true;
 }
 
 /**
@@ -2805,6 +2871,10 @@ function appendMessage(role, content, before, entryId, images) {
   bubble.className = "message-content";
   if (role === "agent") {
     bubble.innerHTML = md2html(content);
+    // 记下**纯文本原文**：它是流式累积全文（chat:delta 的 content）的对照基准，
+    // 供「切回运行中会话时采纳半截回答」判断前缀（见 adoptPartialTurnNode）。
+    bubble.dataset.raw = content || "";
+    div.dataset.raw = content || "";
   } else {
     const thumbs = role === "user" ? buildImageThumbs(images) : null;
     if (thumbs) bubble.appendChild(thumbs);
@@ -3931,6 +4001,9 @@ function dataUrlToBlob(dataUrl) {
 
 /** 绑定图片相关的输入事件（粘贴 / 选择文件 / 拖放投递） */
 function bindImageInputs() {
+  // 幂等：理由同 bindEvents（init 可能被多次调用）
+  if (imageInputsBound) return;
+  imageInputsBound = true;
   // 粘贴：剪贴板里的图片（截图 / 复制的图片）
   inputEl.addEventListener("paste", (e) => {
     const cd = e.clipboardData || (e.originalEvent && e.originalEvent.clipboardData);
@@ -3962,7 +4035,7 @@ function bindImageInputs() {
 
   // 宿主把拖入本界面（真实路径）的文件投递过来。
   // detail.entries 带 {path,isDir}，据此把「文件夹」当项目、「图片」当附件。
-  document.addEventListener("ms-dropped-paths", (e) => {
+  onDoc(document, "ms-dropped-paths", (e) => {
     const detail = (e && e.detail) || {};
     setDropActive(false);
     ingestDroppedPaths(detail.paths, detail.entries);
@@ -3971,7 +4044,7 @@ function bindImageInputs() {
   // 拖拽悬停高亮（原生拖放下 HTML5 dragover 不会触发，靠宿主投递的状态）：
   // detail = { active, hit }，hit 是宿主 elementFromPoint 找到的悬停元素。
   // 只有悬停落在左侧项目栏内才高亮——拖到输入区/会话列表不应误导用户。
-  document.addEventListener("ms-drop-hover", (e) => {
+  onDoc(document, "ms-drop-hover", (e) => {
     const detail = (e && e.detail) || {};
     if (!detail.active) { setDropActive(false); return; }
     setDropActive(isOverSidebar(detail.hit));
@@ -4064,12 +4137,86 @@ function jumpToLatest() {
   }
 }
 
+/**
+ * 后端是否曾处于 running（用于「重启一次只对账一次」）。
+ * 初值 true：首次收到 running 通知不算「重连」，避免启动时多打一次后端。
+ */
+let backendWasRunning = true;
+
+/**
+ * 后端重启后的权威对账。
+ *
+ * 后端进程重启会丢掉内存里的会话 runtime 与 pendingAsk——前端必须放弃本地
+ * 账本、重新问后端，否则「运行中 / 待回答」会一直是过期状态（卡片点了没反应）。
+ * 这里只对**当前打开的会话**对账（其余会话在切回时本来就会走 selectSession 的
+ * 对账路径，不必提前唤醒它们的后端 runtime）。
+ */
+async function reconcileAfterReconnect() {
+  const projectPath = currentProject?.path || "";
+  const sessionId = currentSessionId || "";
+  if (!projectPath || !sessionId) return;
+  try {
+    // 运行态：以这次查询为准（后端刚重启，之前的 running 已不存在）
+    const st = await ms.backend.call("getSessionStatus", { projectPath, sessionId });
+    if (currentProject?.path !== projectPath || currentSessionId !== sessionId) return;
+    if (st?.running) {
+      runningSessions.set(sessionId, { projectPath, sessionId });
+      setSendButtonRunning(true);
+      showTyping();
+    } else {
+      runningSessions.delete(sessionId);
+      removeTyping();
+      syncSendButton();
+    }
+  } catch (e) { /* 后端不可用时保持现状，等下一次对账 */ }
+  try {
+    // 待回答卡片：后端重启后 pendingAsk 已空，前端的卡片要一并撤掉
+    await restoreAskCard(sessionId);
+  } catch (e) { /* ignore */ }
+  void refreshProjectFlags();
+}
+
 // ===================== 后端通知 =====================
 
 function setupNotificationHandlers() {
   if (typeof ms.backend.onNotification !== "function") return;
   if (typeof ms.backend._clearNotifications === "function") {
     try { ms.backend._clearNotifications(); } catch (e) { /* ignore */ }
+  }
+
+  /**
+   * 后端进程状态变更（崩溃 / 重启 / 被停止）。
+   *
+   * 后端一重启，它内存里的会话运行态与 pendingAsk 全部归零；前端若继续拿旧账本
+   * 显示「运行中 / 待回答」，用户会看到卡片点了没反应、按钮卡在「停止」。
+   * 这里在后端进入非 running 状态时清掉本地运行账本，并在恢复为 running 后
+   * 对当前会话做一次权威对账（getSessionStatus / getPendingAsk）。
+   */
+  const onBackendState = (state) => {
+    try {
+      const status = String(state?.status || "");
+      if (!status) return;
+      const wasRunning = backendWasRunning;
+      // 后端进程不在了（停止/崩溃/出错）：本地一切运行态都不可信，先清账本
+      if (status !== "running") {
+        backendWasRunning = false;
+        for (const [sid, rec] of [...runningSessions]) {
+          runningSessions.delete(sid);
+          patchSessionFlag(sid, "unseen");
+        }
+        syncSendButton();
+        removeTyping();
+        return;
+      }
+      // 后端重新拉起：恢复对账（仅一次，避免重复通知时反复打后端）
+      if (!wasRunning) {
+        backendWasRunning = true;
+        void reconcileAfterReconnect();
+      }
+    } catch (e) { /* ignore */ }
+  };
+  if (typeof ms.backend.onBackendChanged === "function") {
+    ms.backend.onBackendChanged(onBackendState);
   }
 
   ms.backend.onNotification("chat:delta", (params) => {
@@ -4184,7 +4331,12 @@ function setupNotificationHandlers() {
     closeExtUiById(params?.id);
   });
   ms.backend.onNotification("ext_ui:notify", (params) => {
-    piToast(String(params?.message || ""), params?.type === "error" ? "warn" : "info");
+    // pi 的 notify 类型是 info / warning / error，映射到 toast 的三种样式。
+    // 关键：info（例如扩展在 agent_end 报「本轮已完成」）必须是中性色。
+    // 以前它落到没有专属样式的基础类上，而基础类是报错红——正常完成提示看起来像报错。
+    const type = params?.type;
+    const kind = type === "error" ? "error" : type === "warning" ? "warn" : "info";
+    piToast(String(params?.message || ""), kind);
   });
   ms.backend.onNotification("plugin:progress", (params) => {
     if (!isSettingsOpen() || settingsPane !== "plugins") return;
@@ -4212,6 +4364,14 @@ function setupNotificationHandlers() {
     if (reloaded + deferred > 0) {
       piToast(`pi 插件设置已变化，会话已重载${reloadHint({ reloaded, deferred })}`);
     }
+  });
+
+  // 后端进程级兜底（uncaughtException / unhandledRejection）：后端不会因此退出，
+  // 但当前这一轮很可能是坏的——提示用户并做一次运行态对账，避免「一直转圈」。
+  ms.backend.onNotification("backend:fatal", (params) => {
+    console.warn("[PI] 后端异常:", params);
+    piToast("后台发生异常（已自动恢复），如本轮无响应请重试");
+    void reconcileAfterReconnect();
   });
 }
 
@@ -4705,6 +4865,21 @@ function cssEscape(s) {
 
 // ===================== 发送消息 =====================
 
+/**
+ * 后端单次调用的超时上限（毫秒）：清单声明 → 宿主下发 → 兜底 5 分钟。
+ * 只用于文案展示，避免把时长写死在与 manifest 脱节的地方。
+ */
+function callTimeoutMs() {
+  const n = Number(ms.plugin?.info?.callTimeoutMs);
+  return Number.isFinite(n) && n > 0 ? n : 300000;
+}
+
+/** 超时文案：<60s 显示秒，否则显示分钟 */
+function formatCallTimeout() {
+  const sec = Math.round(callTimeoutMs() / 1000);
+  return sec < 60 ? `${sec} 秒` : `${Math.round(sec / 60)} 分钟`;
+}
+
 async function sendMessage(text) {
   if (!text.trim() && pendingImages.length === 0) return;
   if (currentSessionId && runningSessions.has(currentSessionId)) return;
@@ -4780,9 +4955,10 @@ async function sendMessage(text) {
       if (e.message && (e.message.includes("abort") || e.message.includes("cancel"))) {
         // 静默处理
       } else if (e.message && e.message.includes("调用超时")) {
-        // 宿主侧超时：后端可能仍在流式执行，给一个友好提示且保留「停止」能力
+        // 宿主侧超时：后端可能仍在流式执行，给一个友好提示且保留「停止」能力。
+        // 时长取自清单（避免与 callTimeoutMs 脱节后文案说谎）。
         showError(
-          "请求超时（已等待 5 分钟）：后台可能仍在运行，可继续等待或点「停止」。" +
+          `请求超时（已等待 ${formatCallTimeout()}）：后台可能仍在运行，可继续等待或点「停止」。` +
           "若持续无响应，请检查模型服务是否可用。"
         );
       } else {
@@ -4879,6 +5055,10 @@ async function refreshSessionMeta({ force = false } = {}) {
 
 /** 定期同步会话列表 */
 function startSessionPolling() {
+  // 先清后设：本函数在每次 loadSessions() 成功后都会调用（切项目/加项目），
+  // 不清就会每切一次项目多留一个 8s 定时器在打后端（与 startRelTimeRefresh /
+  // startProjectPolling 的写法保持一致）。
+  if (sessionPollTimer) clearInterval(sessionPollTimer);
   sessionPollTimer = setInterval(() => {
     // 任一会话在跑就避让轮询——此时内存里的 flag 是「正在运行」的实时态，
     // 轮询反而会用旧数据干扰列表；运行结束后 map 清空、恢复轮询。
@@ -4991,6 +5171,10 @@ function startProjectPolling() {
 // ===================== 事件绑定 =====================
 
 function bindEvents() {
+  // 幂等：init() 可能被多次调用（如安装完 pi 后重新 init），重复绑定会让一次
+  // 点击触发两遍、并让 document 上的匿名监听越积越多。每次会话只绑一次。
+  if (eventsBound) return;
+  eventsBound = true;
   sendBtn.addEventListener("click", () => {
     if (sendBtn.classList.contains("running")) {
       stopAgent();
@@ -5037,7 +5221,7 @@ function bindEvents() {
     if (e.key === "Enter") confirmAddProject();
     if (e.key === "Escape") hideAddProjectPopover();
   });
-  document.addEventListener("click", (e) => {
+  onDoc(document, "click", (e) => {
     const pop = $("pi-add-popover");
     if (pop && !pop.hidden && !pop.contains(e.target) && e.target.closest?.("#pi-add-project") == null) {
       hideAddProjectPopover();
@@ -5052,7 +5236,7 @@ function bindEvents() {
     el.addEventListener("click", () => setSettingsPane(el.getAttribute("data-pane")));
   });
   if (settingsCloseBtn) settingsCloseBtn.addEventListener("click", closeSettings);
-  document.addEventListener("keydown", (e) => {
+  onDoc(document, "keydown", (e) => {
     if (e.key === "Escape" && isSettingsOpen()) {
       e.stopPropagation();
       closeSettings();
@@ -5114,14 +5298,30 @@ async function restoreSavedState() {
   }
 }
 
+let cleanedUp = false;
 function cleanup() {
+  // 幂等：宿主在会话销毁时调用，重挂/重复调用不应重复清理。
+  if (cleanedUp) return;
+  cleanedUp = true;
   // 保存当前视图状态到后端 config（跨 mount 恢复用）
   if (savedState.projectPath || savedState.sessionId) {
-    ms.backend.call('setConfig', { savedState }).catch(() => {});
+    try { ms.backend.call('setConfig', { savedState }).catch(() => {}); } catch (e) { /* ignore */ }
   }
+  // 清掉**所有**轮询定时器：早先只清了 sessionPollTimer / relTimeTimer，
+  // 漏掉 projectPollTimer（6s）与 turnWorkTicker——视图已销毁却仍在打后端。
   if (sessionPollTimer) { clearInterval(sessionPollTimer); sessionPollTimer = null; }
   if (relTimeTimer) { clearInterval(relTimeTimer); relTimeTimer = null; }
+  if (projectPollTimer) { clearInterval(projectPollTimer); projectPollTimer = null; }
+  if (typeof turnWorkTicker !== "undefined" && turnWorkTicker) {
+    clearInterval(turnWorkTicker);
+    turnWorkTicker = null;
+  }
+  // 移掉本会话挂到 document/window 上的监听，避免重挂后重复触发
+  removeDocListeners();
+  // 释放可能挂在浮层里的扩展 UI 对话框（连同定时器等）
+  try { for (const id of [...extUiDialogs.keys()]) closeExtUiById(id); } catch (e) { /* ignore */ }
   if (ms.backend._clearNotifications) ms.backend._clearNotifications();
+  if (ms.ui?._clearThemeHandlers) ms.ui._clearThemeHandlers();
 }
 if (host.__msPluginCleanup === undefined) {
   host.__msPluginCleanup = cleanup;

@@ -44,6 +44,7 @@ import {
   attachmentFileIcons,
   attachmentList,
   attachmentListCancel,
+  attachmentListStream,
   attachmentOpen,
   attachmentRead,
   attachmentReveal,
@@ -363,6 +364,53 @@ function pushAudit(entry: AuditEntry): void {
 const notificationHandlers = new Map<string, Map<string, Set<(params: unknown) => void>>>();
 /** 全局 Tauri 事件监听器 */
 let globalNotificationListener: (() => void) | null = null;
+
+/** 后端状态变更监听器：pluginId → Set<handler> */
+const backendChangedHandlers = new Map<string, Set<(state: unknown) => void>>();
+let globalBackendChangedListener: (() => void) | null = null;
+
+/** 确保宿主「插件后端状态变更」事件的全局 listener 已注册（懒惰，避免启动依赖 Tauri） */
+function ensureGlobalBackendChangedListener(): void {
+  if (globalBackendChangedListener) return;
+  import("@tauri-apps/api/event").then(({ listen }) => {
+    listen<{ pluginId?: string; status?: string }>(
+      "plugin://backend-changed",
+      (event) => {
+        const pluginId = event.payload?.pluginId;
+        if (!pluginId) return;
+        const handlers = backendChangedHandlers.get(pluginId);
+        if (!handlers) return;
+        for (const h of handlers) {
+          try { h(event.payload); } catch (e) { console.warn(`[插件 ${pluginId}] 后端状态处理器异常:`, e); }
+        }
+      },
+    ).then((unlisten) => { globalBackendChangedListener = unlisten; })
+      .catch((e) => console.warn("[插件] 注册后端状态监听失败:", e));
+  });
+}
+
+/** 订阅插件后端进程状态变更（崩溃/重启/停止）。返回取消订阅函数 */
+function addBackendChangedHandler(
+  pluginId: string,
+  handler: (state: unknown) => void,
+): () => void {
+  if (typeof handler !== "function") return () => {};
+  ensureGlobalBackendChangedListener();
+  let handlers = backendChangedHandlers.get(pluginId);
+  if (!handlers) {
+    handlers = new Set();
+    backendChangedHandlers.set(pluginId, handlers);
+  }
+  handlers.add(handler);
+  return () => {
+    if (handlers) handlers.delete(handler);
+    if (handlers?.size === 0) backendChangedHandlers.delete(pluginId);
+  };
+}
+
+function clearBackendChangedHandlers(pluginId: string): void {
+  backendChangedHandlers.delete(pluginId);
+}
 
 /** 确保全局 listener 已注册（延迟加载避免模块启动时依赖 Tauri runtime） */
 function ensureGlobalNotificationListener(): void {
@@ -789,6 +837,13 @@ export function createHostApi(pluginId: string, ctx: PluginHostContext): Record<
                * 口径与视图宿主一致：用户面板选择 → 清单声明 → inherit。
                */
               theme: resolvePluginTheme(rec),
+              /**
+               * 宿主对**本插件后端单次调用**的超时上限（毫秒）。
+               *
+               * 供插件在界面上如实提示用户（例如「已等待 N 分钟」），避免插件把
+               * 超时文案硬编码成和清单不一致的值。
+               */
+              callTimeoutMs: rec.manifest.backend?.callTimeoutMs ?? 30000,
             }
           : { id: pluginId, name: pluginId, version: "?", enabled: false, theme: "inherit" as const };
       },
@@ -1060,7 +1115,11 @@ export function createHostApi(pluginId: string, ctx: PluginHostContext): Record<
             return await attachmentRead(pluginId, p);
           },
         }),
-      /** 递归列举附加文件夹（{path,name,relPath,isDir,size,mtimeMs}[]；gen 见 cancelListFolder） */
+      /**
+       * 递归列举附加文件夹（{path,name,relPath,isDir,size,mtimeMs}[]；
+       * gen 见 cancelListFolder）。默认**不限条数**：`limit` 传 0/省略 = 一直
+       * 枚举到结束或 cancelListFolder 中止。结果一次性返回。
+       */
       listFolder: (path: string, opts: { limit?: number; gen?: number } = {}) =>
         call({
           api: "input.listFolder",
@@ -1069,11 +1128,44 @@ export function createHostApi(pluginId: string, ctx: PluginHostContext): Record<
           run: async () => {
             const p = String(path ?? "").trim();
             if (!p) throw new Error("缺少文件夹路径");
-            const limit = Number(opts?.limit) || 20000;
+            const limit = Math.max(0, Math.floor(Number(opts?.limit)) || 0);
             const gen = Math.floor(Number(opts?.gen));
             return await attachmentList(
               pluginId,
               p,
+              limit,
+              Number.isFinite(gen) && gen > 0 ? gen : undefined
+            );
+          },
+        }),
+      /**
+       * 递归列举附加文件夹，**边扫边回调**（流式，供「边扫边显示」）。
+       *
+       * `onBatch(entries)` 每收到一批就调用一次（约 256 条），返回值仍是完整
+       * 结果（排序后）。`limit` 传 0/省略 = 不限条数；`opts.gen` 与
+       * `cancelListFolder` 配对可随时中止。与 `listFolder` 同权限、同校验。
+       *
+       * 需要本宿主支持流式命令；不支持时抛错（调用方应回退 `listFolder`）。
+       */
+      listFolderStream: (
+        path: string,
+        onBatch: (entries: unknown[]) => void,
+        opts: { limit?: number; gen?: number } = {}
+      ) =>
+        call({
+          api: "input.listFolderStream",
+          permission: "file.read",
+          detail: String(path ?? "").slice(0, 300),
+          run: async () => {
+            const p = String(path ?? "").trim();
+            if (!p) throw new Error("缺少文件夹路径");
+            if (typeof onBatch !== "function") throw new Error("缺少批次回调 onBatch");
+            const limit = Math.max(0, Math.floor(Number(opts?.limit)) || 0);
+            const gen = Math.floor(Number(opts?.gen));
+            return await attachmentListStream(
+              pluginId,
+              p,
+              (batch) => onBatch(batch as unknown[]),
               limit,
               Number.isFinite(gen) && gen > 0 ? gen : undefined
             );
@@ -1687,6 +1779,31 @@ export function createHostApi(pluginId: string, ctx: PluginHostContext): Record<
       _clearNotifications: (): void => {
         clearNotificationHandlers(pluginId);
       },
+
+      /**
+       * 监听**本插件后端进程**的状态变更（crashed / error / stopped / running）。
+       *
+       * 用途：后端崩溃或重启后，插件之前缓存的运行态/待回答卡片可能已经失效，
+       * 需要据此做一次对账（而不是等用户手动切会话才发现）。返回取消订阅函数。
+       */
+      onBackendChanged: (handler: (state: unknown) => void): (() => void) =>
+        addBackendChangedHandler(pluginId, handler),
+
+      /** 清理后端状态监听（视图销毁时调用） */
+      _clearBackendHandlers: (): void => {
+        clearBackendChangedHandlers(pluginId);
+      },
+
+      /** 查询本插件后端进程当前状态（status: running/crashed/error/stopped…） */
+      status: () =>
+        call({
+          api: "backend.status",
+          run: async () => {
+            const { listPluginBackends } = await import("./ipc.ts");
+            const list = await listPluginBackends();
+            return list.find((s) => s.pluginId === pluginId) ?? null;
+          },
+        }),
     },
 
     /** 自定义快捷键动作（插件清单 `contributes.shortcut` 声明，宿主注册全局热键） */
@@ -1791,9 +1908,16 @@ function createMarketApi(
     return { reg, catalog: parsed.catalog, diff };
   }
 
-  self.list = () => guarded("list", async () => {
-    const result = await catalogFetch();
-    if (!result) return { entries: [], installedMap: {}, updates: [], blocked: [], error: "解析目录失败" };
+  /**
+   * 组装市场视图（list / refreshCatalog 共用）。
+   *
+   * 除目录条目与更新集合外，这里还补两样 UI 直接要用的东西：
+   *   - 每条 entry 的 `repoUrl`：官方地址（仓库优先，退回 homepage），卡片据此渲染可点链接；
+   *   - 每条 update 的 `changelog` / `repoUrl`：**新版本**的更新日志，让用户在
+   *     点「更新」前先看清这一版改了什么（changelog 为空时 UI 不渲染该块）。
+   */
+  async function buildMarketView(result: NonNullable<Awaited<ReturnType<typeof catalogFetch>>>) {
+    const { pluginRepoUrl } = await import("./market-types.ts");
     const installedMap: Record<string, string> = {};
     for (const rec of result.reg.plugins) {
       if (rec.source.kind === "builtin" || rec.source.kind === "market") {
@@ -1801,13 +1925,26 @@ function createMarketApi(
       }
     }
     return {
-      entries: result.catalog.plugins,
+      entries: result.catalog.plugins.map((e) => ({ ...e, repoUrl: pluginRepoUrl(e) })),
       installedMap,
-      updates: result.diff.updates.map((u) => ({ id: u.rec.id, currentVersion: u.rec.version, availableVersion: u.entry.version })),
+      updates: result.diff.updates.map((u) => ({
+        id: u.rec.id,
+        currentVersion: u.rec.version,
+        availableVersion: u.entry.version,
+        changelog: u.entry.changelog,
+        repoUrl: pluginRepoUrl(u.entry),
+      })),
       blocked: result.diff.blocked.map((b) => b.id),
       error: null as string | null,
     };
+  }
+
+  self.list = () => guarded("list", async () => {
+    const result = await catalogFetch();
+    if (!result) return { entries: [], installedMap: {}, updates: [], blocked: [], error: "解析目录失败" };
+    return buildMarketView(result);
   });
+
   /**
    * 市场安装 / 更新的公共实现（两者只差确认弹窗的文案与来源标记）。
    *
@@ -1945,19 +2082,7 @@ function createMarketApi(
   self.refreshCatalog = () => guarded("refreshCatalog", async () => {
     const result = await catalogFetch();
     if (!result) return { entries: [], installedMap: {}, updates: [], blocked: [], error: null };
-    const installedMap: Record<string, string> = {};
-    for (const rec of result.reg.plugins) {
-      if (rec.source.kind === "builtin" || rec.source.kind === "market") {
-        installedMap[rec.id] = rec.version;
-      }
-    }
-    return {
-      entries: result.catalog.plugins,
-      installedMap,
-      updates: result.diff.updates.map((u) => ({ id: u.rec.id, currentVersion: u.rec.version, availableVersion: u.entry.version })),
-      blocked: result.diff.blocked.map((b) => b.id),
-      error: null as string | null,
-    };
+    return buildMarketView(result);
   });
 
   return self;
