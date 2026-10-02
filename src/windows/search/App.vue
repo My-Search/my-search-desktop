@@ -56,6 +56,7 @@ import {
   setWindowHeight,
   setWindowWidthOverride,
   getWindowWidthOverride,
+  setMainWindowViewSize,
   cancelPendingHeight,
   applyWindowSize,
   animateWindowSize,
@@ -783,19 +784,48 @@ function resetToInitialView(): void {
 function resumeDetailViewIfAny(): boolean {
   if (state.mode !== MODE.SHOW_ITEM_DETAIL || !detailVisible.value) return false;
   // 原样还原：窗口高度贴回内容。
-  // 隐藏时 Rust 侧已把窗口物理收回到 48px，因此必须强制重新下发高度：
-  // 先清掉 fitTextViewHeight 的去重缓存，再重新测量。
   detailRef.value?.resetHeightCache();
+
+  // 插件详情 + 有自定义尺寸：Rust 侧已在 `show()` **之前**按前端登记的尺寸
+  // （setMainWindowViewSize → PENDING_PLUGIN_VIEW_SIZE）建好窗口并完全居中。
+  // 因此这里**只把前端布局状态复位到「插件拉伸态」、当帧钉高**，
+  // **不再下发任何尺寸/位置 IPC**——没有窗口尺寸动画，也就不存在
+  // 「窗口先放大、内容再放大」的两条时间线（这正是用户报的观感问题）。
+  const pluginSize = pluginWindowSize.value;
+  // 显式收窄成非空变量，供下方闭包安全引用（TS 不会从派生布尔值反推收窄）
+  const restoreSize =
+    getWindowWidthOverride() != null && pluginSize != null ? pluginSize : null;
+  if (restoreSize) {
+    // 宽度覆盖与高度锁在隐藏期间会保留；这里显式重申，避免被其它路径清掉。
+    setWindowWidthOverride(restoreSize.width);
+    setDetailManualHeightLock(true);
+    setPluginSizedClass(true);
+    // 必须重新钉高：隐藏时 Rust 把窗口物理收到 48px，resize 监听
+    // （syncPluginBoxHeight）会把变量改写成 48，不钉回则盒子只有 48 高。
+    pinPluginBoxHeight(restoreSize.height);
+    // 丢掉可能残留的防抖高度：它一旦落地就会走 applyWindowSize 覆盖 Rust 刚建好
+    // 的窗口尺寸（表现回「窗口在呼出后再被改一次」）。
+    cancelPendingHeight();
+  }
+
   void nextTick(() => {
     detailRef.value?.reapply();
-    detailRef.value?.flushHeight();
-    // 插件详情：呼出时 Rust 已把窗口复位成屏幕分档宽，必须重新套用该插件的
-    // 记忆尺寸（否则会退回默认尺寸，用户拖出来的大小「白记了」）。
-    // 只在**确实有自定义尺寸**时套用（宽度覆盖非空）：没有记忆的插件应继续
-    // 走内容自适应，不能被误锁成打开那一刻的默认高度。
-    if (getWindowWidthOverride() != null) {
-      const size = pluginWindowSize.value;
-      if (size) void applyPluginWindowSize(size, true, true);
+    if (restoreSize) {
+      // 视口更新可能滞后，再钉一次（幂等）。
+      pinPluginBoxHeight(restoreSize.height);
+      // 自愈（等窗口可见、视口应已到位后再判）：万一 Rust 没能在 show() 前按登记
+      // 尺寸建窗（旧版二进制 / 「登记 IPC 尚未落地就隐藏」的极窄竞态），此刻窗口
+      // 会明显小于目标。补一次**瞬时**下发（预钉值已就绪，盒子与窗口同帧对齐，
+      // 不会产生二次放大）。正常情况下窗口已到位，此分支不触发、零 IPC。
+      requestAnimationFrame(() => {
+        if (window.innerHeight > 0 && window.innerHeight < restoreSize.height - 24) {
+          void applyWindowSize(restoreSize.width, restoreSize.height);
+        }
+      });
+    } else {
+      // 文本/脚本详情、以及无自定义尺寸的插件：仍按内容自适应重新下发高度
+      // （隐藏时 Rust 收回到 48px，必须强制重来一次）。
+      detailRef.value?.flushHeight();
     }
   });
   return true;
@@ -920,6 +950,8 @@ async function applyPluginViewSize(pluginId: string): Promise<void> {
     setWindowWidthOverride(null);
     setDetailManualHeightLock(false);
     setPluginSizedClass(false);
+    // 没有自定义尺寸：清除 Rust 的呼出登记，下次呼出走常态（48px/分档宽）。
+    void setMainWindowViewSize(null);
     return;
   }
   const size = resolveViewSize(remembered, base, limits);
@@ -928,6 +960,9 @@ async function applyPluginViewSize(pluginId: string): Promise<void> {
   // 高度打回内容高度、且窗口变高时内容不跟着长（下方留白）。
   setDetailManualHeightLock(true);
   setPluginSizedClass(true);
+  // 登记到 Rust：隐藏后再呼出时由 show_main_window 在 show() 前按此尺寸建窗，
+  // 呼出即最终尺寸、不再走「窗口先放大、内容再放大」的补尺寸动画（见其注释）。
+  void setMainWindowViewSize(size);
   // 打开插件（尤其从「记忆尺寸」恢复）用平滑过渡，避免瞬间跳变
   await applyPluginWindowSize(size, true, true);
 }
@@ -1037,6 +1072,10 @@ function onPluginResizeEnd(size: ViewSize): void {
   pluginWindowSize.value = size;
   const id = pluginSizeId.value;
   if (id) writePluginViewSize(id, size);
+  // 登记到 Rust：之后隐藏再呼出，由 show_main_window 在 show() 前按此尺寸建窗
+  // （避免了呼出时「窗口先放大、内容再放大」的补尺寸动画）。**只在松手时**登记，
+  // 拖拽过程中不逐帧 IPC——那会堆积跨进程调用、拖拽掉帧。
+  void setMainWindowViewSize(size);
   // 松手后才定位（上下左右完全居中）：拖动过程不做位移，避免上下滑动。
   // 尺寸下发时已按目标预钉高度；落定后的实测纠正交给 window resize 监听
   // （见 pinPluginBoxHeight 注释）——不再用 rAF 读 innerHeight 回写：
@@ -1076,6 +1115,8 @@ function onPluginResizeReset(): void {
   const id = pluginSizeId.value;
   const base = pluginSizeBase.value;
   if (id) clearPluginViewSize(id);
+  // 记忆已清除：同时清掉 Rust 的呼出登记，下次呼出回到常态（内容自适应尺寸）。
+  void setMainWindowViewSize(null);
   if (!base) return;
   pluginWindowSize.value = base;
 
@@ -1154,6 +1195,9 @@ function clearPluginViewSizeState(): boolean {
   pluginSizeBase.value = null;
   pluginMonitorRect = null;
   setWindowWidthOverride(null);
+  // 清除 Rust 的呼出尺寸登记：退出插件视图后（切到普通搜索/文本详情/关闭），
+  // 下次呼出必须回到常态（48px/分档宽），不能再用插件的自定义尺寸建窗。
+  void setMainWindowViewSize(null);
   // 解除手动高度锁：离开插件视图后，详情区高度重新交回内容自适应
   // （否则普通结果/文本视图的窗口高度也会被冻住）。
   setDetailManualHeightLock(false);

@@ -23,6 +23,7 @@ import type {
 import {
   compareVersion,
   DEFAULT_CLOSE_BEHAVIOR,
+  DEFAULT_PLUGIN_AUTOSTART,
   DEFAULT_PLUGIN_THEME,
   detailViewCloseBehaviorOf,
   detailViewThemeOf,
@@ -97,7 +98,7 @@ export interface PluginRecord {
   author?: string;
   description?: string;
   homepage?: string;
-  /** 插件官方仓库地址（清单 repository 字段；缺失时不写，面板回退 homepage） */
+  /** 插件官方仓库地址（清单 repository 字段；面板与 repository 合并为一条「首页」，缺失时退回 homepage） */
   repository?: string;
   description_?: never;
   icon?: string;
@@ -172,11 +173,11 @@ export function emptyRuntime(): PluginRuntimeState {
 /**
  * 清单请求 → 有效策略的默认落点。
  *
- * 默认**绝不开机自启**：用户没表态前，新装插件不该就常驻后台。
- * - `always` / `never` 原样尊重插件的明确请求；
- * - `on-demand` 按需启动；
- * - `prompt`（作者把决定权交给用户）与清单缺省在用户表态前折成 `on-demand`
- *   ——面板上以「插件建议：由你决定/按需启动」呈现，用户可在设置里改。
+ * 缺省（作者未声明、或清单被手工构造漏了该字段）默认**开机自启**：
+ * 带后台进程的插件安装后即随桌面版启动常驻，用户可在面板上改成按需/关闭。
+ * - `always` / `on-demand` / `never` 原样尊重作者的明确请求；
+ * - `prompt`（作者把决定权交给用户）在用户表态前折成 `on-demand`——保守起见不
+ *   替作者做主，面板上以「插件建议：由你决定」呈现，用户可在设置里改。
  */
 export function defaultAutoStartFrom(requested: PluginAutostart): AutoStartMode {
   switch (requested) {
@@ -186,8 +187,10 @@ export function defaultAutoStartFrom(requested: PluginAutostart): AutoStartMode 
       return "never";
     case "on-demand":
     case "prompt":
-    default:
       return "on-demand";
+    default:
+      // 缺省/非法（手改注册表等）：落到「开机自启」的默认
+      return DEFAULT_PLUGIN_AUTOSTART;
   }
 }
 
@@ -245,7 +248,7 @@ export interface BehaviorSuggestion {
  */
 export function behaviorSuggestionOf(manifest: PluginManifest | null | undefined): BehaviorSuggestion {
   const backend = manifest?.backend;
-  const requested = backend?.autostart ?? "on-demand";
+  const requested = backend?.autostart ?? DEFAULT_PLUGIN_AUTOSTART;
   return {
     autoStart: defaultAutoStartFrom(requested),
     fromPrompt: requested === "prompt",
@@ -320,7 +323,7 @@ export function createPluginRecord(input: {
   now?: number;
 }): PluginRecord {
   const now = input.now ?? Date.now();
-  const requested = input.manifest.backend?.autostart ?? "on-demand";
+  const requested = input.manifest.backend?.autostart ?? DEFAULT_PLUGIN_AUTOSTART;
   return {
     id: input.manifest.id,
     name: input.manifest.name,

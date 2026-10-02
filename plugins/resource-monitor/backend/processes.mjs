@@ -8,10 +8,16 @@
  *   - **不把程序名拼进命令行**：进程名可能带空格 / 引号 / 中日文，直接拼进
  *     PowerShell 字符串会有注入风险。这里统一把目标名放进**环境变量**
  *     （`MS_RM_NAME`），脚本侧用 `$env:MS_RM_NAME` 读，命令行里永远不含用户输入。
- *   - **绝不杀自己**：目标 pid 与传入的 `selfPid`（插件后台进程）比对，命中即跳过。
- *   - 杀进程用 `taskkill /PID <n> /T /F`（/T 带上子进程树）。
- *   - 定位文件：拿到的可执行路径来自系统（非用户输入），只交给 `explorer /select,`
- *     的原生打开，不做字符串拼接进 shell。
+ *   - **绝不杀自己**：目标 pid 与 `selfPid`（插件后台进程）/ `protectedPids`
+ *     （如长驻采样 PowerShell）比对，命中即跳过。
+ *   - **枚举自身不算目标**：列举时那次 PowerShell 会被 `Get-CimInstance` 枚举到它
+ *     自己，而它随即退出；若不排除，每次终止都会凭空多出一个「已找不到该进程」的
+ *     假失败（尤其当目标名就是 `powershell.exe`）。
+ *   - **成败以探活为准**：`taskkill` 的退出码在「进程已自行退出」「同名父子进程
+ *     被 /T 连带杀掉」等正常情形下也会非 0。故杀前 pid 已消失 → 跳过，杀后 pid
+ *     消失 → 成功，仍存活才算失败。这样判定与系统语言无关。
+ *   - **输出按 OEM 代码页解码**：`taskkill` 的错误走 stderr 且是 OEM 代码页
+ *     （中文机为 GBK/936），按 UTF-8 会得到乱码，故优先 `gb18030` 解码。
  */
 import { spawn as nodeSpawn } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -39,6 +45,10 @@ function resolvePowerShell() {
 
 /**
  * 列举某程序名对应的所有进程实例。
+ *
+ * 返回列表**不含枚举自身**那次 PowerShell：它会被 `Get-CimInstance` 枚举到，
+ * 但随即退出，留着只会造成「已找不到该进程」的假失败。
+ *
  * @returns Promise<Array<{pid:number,name:string,ws:number,cpuTicks:number}>>
  */
 export function listProcesses(name, { spawnFn = nodeSpawn } = {}) {
@@ -50,9 +60,12 @@ export function listProcesses(name, { spawnFn = nodeSpawn } = {}) {
     if (!ps) return reject(new Error("未找到 Windows PowerShell，无法列举进程"));
 
     // 脚本从环境变量读目标名；命令行里不含用户输入。
+    // 显式把输出编码设为 UTF-8：否则中文机默认按 OEM 代码页（GBK）输出，
+    // Node 端按 UTF-8 解码后程序名（含中日文时）会对不上，表现为「匹配 0 个」。
     // ExecutablePath 在「受保护进程」上会是空（如 svchost.exe），如实留空由上层提示。
     const script = [
       "$ErrorActionPreference='SilentlyContinue'",
+      "try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch {}",
       "$n=$env:MS_RM_NAME",
       "$out=@()",
       "foreach($p in (Get-CimInstance Win32_Process -Property ProcessId,Name,ExecutablePath,KernelModeTime,UserModeTime,WorkingSetSize)){",
@@ -71,6 +84,8 @@ export function listProcesses(name, { spawnFn = nodeSpawn } = {}) {
     } catch (e) {
       return reject(e);
     }
+    /** 枚举自身的 pid（解析完成后据此剔除） */
+    const selfEnumPid = child.pid;
 
     let out = "";
     let err = "";
@@ -90,6 +105,8 @@ export function listProcesses(name, { spawnFn = nodeSpawn } = {}) {
       resolve(
         arr
           .filter((p) => p && Number.isFinite(Number(p.pid)) && p.name === target)
+          // 排除枚举自身（它随本次调用结束即退出，不该成为可终止的目标）
+          .filter((p) => selfEnumPid == null || Math.trunc(Number(p.pid)) !== selfEnumPid)
           .map((p) => ({
             pid: Math.trunc(Number(p.pid)),
             name: String(p.name),
@@ -221,21 +238,90 @@ function existsAsync(path, exists) {
 }
 
 /**
+ * 判断某 pid 此刻是否仍存在。
+ *
+ * 用 `process.kill(pid, 0)` 做「零信号」探测：
+ *   - 正常返回        → 进程存在（同用户）；
+ *   - 抛 `ESRCH`      → 进程不存在；
+ *   - 抛 `EPERM`      → 进程存在但无权操作（受保护 / 提权）→ 仍算存在。
+ * 不依赖系统语言，也不受 taskkill 退出码语义影响。
+ *
+ * @param {number} pid
+ * @returns {boolean}
+ */
+export function isAlive(pid) {
+  const n = Math.trunc(Number(pid));
+  if (!Number.isFinite(n) || n <= 0) return false;
+  try {
+    process.kill(n, 0);
+    return true;
+  } catch (e) {
+    // EPERM = 存在但无权限；其它（ESRCH 等）视为不存在
+    return !!(e && e.code === "EPERM");
+  }
+}
+
+/**
+ * 把 Windows 控制台程序的输出字节解码成可读文本。
+ *
+ * `taskkill` / `cmd` 一类程序向 stderr 写的是 **OEM 代码页**（中文机为 GBK/936），
+ * 直接按 UTF-8 解码会得到 `����` 乱码。这里先试 UTF-8：若出现替换字符
+ * （U+FFFD）说明不是 UTF-8，改用 `gb18030`（GBK 超集，纯 ASCII 时两者等价）。
+ *
+ * @param {Buffer} buf
+ * @returns {string}
+ */
+function decodeConsoleOutput(buf) {
+  const b = Buffer.isBuffer(buf) ? buf : Buffer.from(String(buf ?? ""), "utf8");
+  if (b.length === 0) return "";
+  const utf8 = new TextDecoder("utf-8").decode(b);
+  if (!utf8.includes("\uFFFD")) return utf8;
+  try {
+    return new TextDecoder("gb18030").decode(b);
+  } catch {
+    return utf8;
+  }
+}
+
+/**
  * 终止某程序名对应的所有进程实例。
+ *
+ * **成败以探活为准**（见文件头注释）：
+ *   - 命中受保护 pid（`selfPid` / `protectedPids`）→ skipped；
+ *   - 杀之前进程已不存在 → skipped（「进程已不再运行」，不算失败）；
+ *   - 杀之后进程消失       → killed；
+ *   - 杀之后进程仍存活     → failed（带可读的 taskkill 输出）。
  *
  * @param {string} name 程序名（精确匹配，如 chrome.exe）
  * @param {object} opts
- * @param {number} opts.selfPid 调用方自己的 pid（插件后台进程），命中则拒绝
+ * @param {number} [opts.selfPid] 插件后台进程 pid（命中则拒绝）
+ * @param {number[]} [opts.protectedPids] 额外受保护的 pid（如长驻采样 PowerShell）
  * @param {boolean} [opts.force] 默认 true（/F）。false 时发温和的关闭请求
  * @param {typeof nodeSpawn} [opts.spawnFn]
  * @param {(p:string)=>Promise<Array>} [opts.listFn] 便于测试注入
- * @returns Promise<{ name, matched, killed, failed:[{pid,error}], skipped:[{pid,reason}] }>
+ * @param {(pid:number)=>boolean} [opts.aliveFn] 便于测试注入
+ * @returns Promise<{ name, matched, killed, killedPids, failed:[{pid,error}], skipped:[{pid,reason}] }>
  */
 export async function killProcess(name, opts = {}) {
-  const { selfPid = null, force = true, spawnFn = nodeSpawn, listFn = listProcesses } = opts;
+  const {
+    selfPid = null,
+    protectedPids = [],
+    force = true,
+    spawnFn = nodeSpawn,
+    listFn = listProcesses,
+    aliveFn = isAlive,
+  } = opts;
   const target = String(name ?? "").trim();
   if (!target) throw new Error("缺少程序名");
   if (process.platform !== "win32") throw new Error("终止进程目前仅支持 Windows");
+
+  // 受保护 pid 集合：插件后台进程 + 调用方额外指定的（如采样进程），一律不碰
+  const guard = new Set();
+  if (selfPid != null && Number.isFinite(Number(selfPid))) guard.add(Math.trunc(Number(selfPid)));
+  for (const p of protectedPids ?? []) {
+    const n = Math.trunc(Number(p));
+    if (Number.isFinite(n)) guard.add(n);
+  }
 
   const list = await listFn(target, { spawnFn });
   const killed = [];
@@ -243,22 +329,38 @@ export async function killProcess(name, opts = {}) {
   const skipped = [];
 
   for (const p of list) {
-    if (selfPid != null && p.pid === selfPid) {
-      skipped.push({ pid: p.pid, reason: "拒绝终止插件自身的采样进程" });
+    const pid = Math.trunc(Number(p.pid));
+    if (guard.has(pid)) {
+      skipped.push({ pid, reason: "拒绝终止监控自身相关进程" });
       continue;
     }
+    // 枚举之后、动手之前就已消失（自行退出，或作为同名父进程的子树被连带杀掉）
+    if (!aliveFn(pid)) {
+      skipped.push({ pid, reason: "进程已不再运行" });
+      continue;
+    }
+    let err = null;
     try {
-      await runTaskkill(p.pid, force, spawnFn);
-      killed.push(p.pid);
+      await runTaskkill(pid, force, spawnFn);
     } catch (e) {
-      failed.push({ pid: p.pid, error: e instanceof Error ? e.message : String(e) });
+      err = e instanceof Error ? e.message : String(e);
+    }
+    // 以探活定成败：taskkill 退出码在正常情形下也可能非 0
+    if (!aliveFn(pid)) {
+      killed.push(pid);
+    } else {
+      failed.push({ pid, error: err || "进程仍在运行（可能受保护或需要管理员权限）" });
     }
   }
 
   return { name: target, matched: list.length, killed: killed.length, killedPids: killed, failed, skipped };
 }
 
-/** 调 taskkill 结束单个 pid（含子进程树） */
+/**
+ * 调 taskkill 结束单个 pid（含子进程树）。
+ *
+ * 输出按 OEM 代码页解码（见 `decodeConsoleOutput`），失败原因才是可读中文。
+ */
 function runTaskkill(pid, force, spawnFn) {
   return new Promise((resolve, reject) => {
     const exe = existsSync(TASKKILL) ? TASKKILL : "taskkill";
@@ -270,13 +372,40 @@ function runTaskkill(pid, force, spawnFn) {
     } catch (e) {
       return reject(e);
     }
-    let err = "";
+    const errChunks = [];
     if (child.stdout) child.stdout.on("data", () => {});
-    if (child.stderr) child.stderr.on("data", (c) => (err += c));
+    if (child.stderr) child.stderr.on("data", (c) => errChunks.push(c));
     child.on("error", reject);
     child.on("exit", (code) => {
-      if (code === 0) resolve(true);
-      else reject(new Error(err.trim() || `taskkill 退出码 ${code}`));
+      if (code === 0) {
+        resolve(true);
+        return;
+      }
+      const text = summarizeTaskkillError(
+        decodeConsoleOutput(Buffer.concat(errChunks.map((c) => (Buffer.isBuffer(c) ? c : Buffer.from(String(c), "utf8")))))
+      );
+      reject(new Error(text || `taskkill 退出码 ${code}`));
     });
   });
+}
+
+/**
+ * 把 taskkill 的多行错误压成一行可读文本。
+ *
+ * taskkill 对一棵子树可能逐条报错（`/T` 打到 System 时会列出十几个子进程），
+ * 原样塞进 toast 会撑成一大团。但关键信息通常分两行——首行的「无法终止 PID …」
+ * 加上紧随其后的「原因: 拒绝访问。」。这里取**首行 + 首条「原因」行**，折叠空白
+ * 并截断长度，既保留可读原因，又不至于刷屏。
+ */
+function summarizeTaskkillError(raw) {
+  const lines = String(raw ?? "")
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return "";
+  const picked = [lines[0]];
+  const reason = lines.find((l) => /^原因[:：]/.test(l));
+  if (reason && !picked.includes(reason)) picked.push(reason);
+  const text = picked.join(" ").replace(/\s{2,}/g, " ");
+  return text.length > 160 ? text.slice(0, 160) + "…" : text;
 }

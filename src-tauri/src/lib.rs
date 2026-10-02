@@ -444,6 +444,52 @@ const EVENT_MAIN_WINDOW_SHOWN: &str = "my-search://main-window-shown";
 /// 48 = 2(上边框)+44(#searchBox)+2(下边框)，缩放下取整对称、上下灰边等厚。
 const COLLAPSED_WINDOW_HEIGHT: f64 = 48.0;
 
+/// 「插件视图自定义窗口尺寸」的待应用值（逻辑像素：宽、高）。
+///
+/// ## 为什么需要它（消除「窗口先放大、内容再放大」）
+///
+/// 插件页允许用户拖右下角改整个主窗口的尺寸，并**按插件记忆**。隐藏时
+/// `on_window_event` 会把窗口物理收回到 [`COLLAPSED_WINDOW_HEIGHT`]（48px），
+/// 于是再次呼出必须把尺寸补回记忆值。旧实现是「先把窗口显示成 48px/屏幕分档宽，
+/// 再由前端发一次 90ms 的窗口尺寸动画补回」——窗口（原生 set_size）先长满，
+/// 内容（`height:100%` 的 WebView 视口）滞后到最后一帧才跟上，用户看到两次放大。
+///
+/// 修法：前端在**隐藏前**把该插件的尺寸登记到这里，`show_main_window` 在
+/// `show()` **之前**就按它建好窗口（尺寸 + 完全居中定位）。呼出时窗口已是最终
+/// 尺寸，前端不再产生任何 resize，也就不存在两条时间线。
+///
+/// 与 [`PENDING_PLUGIN_OPEN`] 同款「全局槽」模式：跨 WebView / 跨线程只靠这一个
+/// 幂等登记点，前端负责在进入/退出插件视图、拖拽结束、双击还原时同步（见
+/// 前端 `setMainWindowViewSize`）。
+///
+/// `None` 表示当前不处于「有自定义尺寸的插件视图」——呼出走常态路径
+/// （屏幕分档宽 + 48px 高 + 顶部 22% 定位）。
+static PENDING_PLUGIN_VIEW_SIZE: Mutex<Option<(f64, f64)>> = Mutex::new(None);
+
+/// 校验并规整「插件视图自定义尺寸」：宽高都必须有限且为正，否则整体判为无效（None）。
+///
+/// 抽成纯函数便于单测（不触碰全局槽）：宁可退回常态呼出，也不给窗口喂非法尺寸。
+fn sanitize_view_size(size: Option<(f64, f64)>) -> Option<(f64, f64)> {
+    size.filter(|(w, h)| w.is_finite() && h.is_finite() && *w > 0.0 && *h > 0.0)
+}
+
+/// 登记 / 清除插件视图自定义尺寸（宽、高，逻辑像素）。
+///
+/// 宽高任一非有限或非正即整体清除：宁可退回常态呼出，也不给窗口喂非法尺寸。
+fn set_pending_plugin_view_size(size: Option<(f64, f64)>) {
+    if let Ok(mut guard) = PENDING_PLUGIN_VIEW_SIZE.lock() {
+        *guard = sanitize_view_size(size);
+    }
+}
+
+/// 读取当前登记的插件视图自定义尺寸（不取出，呼出可重复读）
+fn pending_plugin_view_size() -> Option<(f64, f64)> {
+    PENDING_PLUGIN_VIEW_SIZE
+        .lock()
+        .ok()
+        .and_then(|guard| *guard)
+}
+
 // ===================== 窗口定位 =====================
 /// 选择目标显示器：优先取鼠标所在屏幕（多显示器下更符合直觉），
 /// 取不到时回退到窗口当前所在屏幕。
@@ -488,19 +534,88 @@ fn position_window_top_center(
     let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
 }
 
+/// 计算「完全居中」时窗口相对显示器左上角的偏移（物理像素）。
+///
+/// 与 [`position_window_top_center`] 的差异只在**垂直方向**：
+///   - top_center：`y = 屏高 × 0.22`（原版搜索窗口径：偏上），窗口高于屏幕时贴顶；
+///   - full_center：`y = max(0, 屏高 − 窗高) / 2`（上下边距相等，真居中）。
+///
+/// 水平方向两者一致（严格居中）。窗口高于屏幕时余量为负，取 0 贴顶，
+/// 避免把窗口推到屏幕上方之外（与 top_center 的 min 分支同款保护）。
+///
+/// 抽成纯函数（输入输出都是整数物理像素）便于单测覆盖边界，不依赖真实窗口。
+fn full_center_offsets(screen_w: u32, screen_h: u32, win_w: u32, win_h: u32) -> (u32, u32) {
+    let x = screen_w.saturating_sub(win_w) / 2;
+    let y = screen_h.saturating_sub(win_h) / 2;
+    (x, y)
+}
+
+/// 把窗口「完全居中」（上下左右都居中）于指定显示器。
+///
+/// 用途：插件视图呼出时，尺寸来自 [`PENDING_PLUGIN_VIEW_SIZE`]（用户拖出来的
+/// 记忆尺寸），定位口径必须与前端 `centeredPosition(..., FULL_CENTER_RATIO)`
+/// 一致——即**完全居中**，而不是常态搜索窗的「顶部 22%」。前端在打开插件后的
+/// 重定位用的就是完全居中，若这里沿用 top_center 公式，呼出与打开会落在两个
+/// 不同位置（`FULL_CENTER_RATIO = 0.5` 的「剩余空间×0.5」等价于真居中，
+/// 但 `TOP_RATIO` 那套「屏高×0.22」不是）。
+///
+/// `logical_w` / `logical_h`：即将设置的窗口逻辑尺寸（高 DPI 下需按缩放换算成
+/// 物理像素再参与居中，与 top_center 同款处理）。
+fn position_window_full_center(
+    window: &tauri::WebviewWindow,
+    monitor: &tauri::Monitor,
+    logical_w: f64,
+    logical_h: f64,
+) {
+    let screen = monitor.size();
+    let origin = monitor.position();
+    let scale = monitor.scale_factor();
+    let scale = if scale > 0.0 { scale } else { 1.0 };
+    let win_w = (logical_w * scale).round().max(0.0) as u32;
+    let win_h = (logical_h * scale).round().max(0.0) as u32;
+    let (dx, dy) = full_center_offsets(screen.width, screen.height, win_w, win_h);
+    let _ = window.set_position(tauri::PhysicalPosition::new(
+        origin.x + dx as i32,
+        origin.y + dy as i32,
+    ));
+}
+
 /// 显示主窗口（呼出）：先选定目标屏幕（鼠标所在屏，回退窗口当前屏），
 /// 按该屏宽度比例定宽，再居中定位，最后显示并聚焦，最后广播「窗口已显示」事件。
 ///
 /// 宽度与居中必须用同一块屏幕、且先定宽再定位，否则会按旧宽度居中而偏左/偏右
 /// （多显示器下更明显）。
+///
+/// ## 插件视图：按登记尺寸建窗（消除「窗口先放大、内容再放大」）
+///
+/// 若前端登记过插件视图自定义尺寸（[`PENDING_PLUGIN_VIEW_SIZE`]，见其注释），
+/// 这里就在 `show()` **之前**把窗口设成该尺寸并**完全居中**：呼出瞬间窗口已是
+/// 最终尺寸，前端不再需要发尺寸动画去补，窗口与内容天然同帧，不会出现两次放大。
+///
+/// 未登记（常态搜索窗 / 插件未调过大小）时维持原逻辑：屏幕分档宽 + 48px 高 +
+/// 顶部 22% 定位。尺寸合法性由登记侧 [`set_pending_plugin_view_size`] 保证。
 fn show_main_window(app: &tauri::AppHandle) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
+    let pending = pending_plugin_view_size();
     if let Some(monitor) = target_monitor(&window) {
-        let width = target_window_width(&monitor);
-        let _ = window.set_size(tauri::LogicalSize::new(width, COLLAPSED_WINDOW_HEIGHT));
-        position_window_top_center(&window, &monitor, width);
+        match pending {
+            Some((w, h)) => {
+                // 插件自定义尺寸：直接建好 + 完全居中（与前端打开插件时的口径一致）
+                let _ = window.set_size(tauri::LogicalSize::new(w, h));
+                position_window_full_center(&window, &monitor, w, h);
+            }
+            None => {
+                let width = target_window_width(&monitor);
+                let _ = window.set_size(tauri::LogicalSize::new(width, COLLAPSED_WINDOW_HEIGHT));
+                position_window_top_center(&window, &monitor, width);
+            }
+        }
+    } else if let Some((w, h)) = pending {
+        // 取不到显示器也要用登记尺寸：宁可定位交给系统兜底，也别把高度丢掉
+        let _ = window.set_size(tauri::LogicalSize::new(w, h));
+        let _ = window.center();
     } else {
         collapse_main_window(&window);
         let _ = window.center();
@@ -1737,6 +1852,23 @@ fn get_default_window_width(app: tauri::AppHandle) -> f64 {
     } else {
         MIN_WINDOW_WIDTH
     }
+}
+
+/// 登记 / 清除「插件视图自定义窗口尺寸」（逻辑像素；传 null 或非法值即清除）。
+///
+/// 前端在**进入插件视图**（有记忆尺寸）、**拖拽结束**、以及**退出插件视图**时调用，
+/// 把当前该应用的尺寸同步给 Rust。之后每次呼出，`show_main_window` 会在
+/// `show()` 之前按它建好窗口并完全居中——呼出瞬间即最终尺寸，不再产生会「窗口先
+/// 放大、内容再放大」的尺寸动画。详见 [`PENDING_PLUGIN_VIEW_SIZE`] 的说明。
+///
+/// 两个参数都可为 null：任一为空/非法即视为「退出插件自定义尺寸」，整体清除。
+#[tauri::command]
+fn set_main_window_view_size(width: Option<f64>, height: Option<f64>) {
+    let size = match (width, height) {
+        (Some(w), Some(h)) => Some((w, h)),
+        _ => None,
+    };
+    set_pending_plugin_view_size(size);
 }
 
 /// 当前生效的窗口尺寸动画令牌（0 = 无动画）。
@@ -3132,6 +3264,7 @@ pub fn run() {
             http_request,
             set_window_height,
             get_default_window_width,
+            set_main_window_view_size,
             animate_window_size,
             cancel_window_resize_animation,
             reset_main_window_position,
@@ -4268,5 +4401,53 @@ mod tests {
         );
         // 后缀不匹配 → None
         assert!(super::pick_asset(&assets, ".msi", &["x64"]).is_none());
+    }
+
+    #[test]
+    fn sanitize_view_size_rejects_illegal_values() {
+        use super::sanitize_view_size;
+        // 合法尺寸原样通过
+        assert_eq!(sanitize_view_size(Some((900.0, 700.0))), Some((900.0, 700.0)));
+        // 未设置 / 任一为空 / 非有限 / 非正 → 一律判为无效（呼出退回常态）
+        assert_eq!(sanitize_view_size(None), None);
+        assert_eq!(sanitize_view_size(Some((0.0, 700.0))), None);
+        assert_eq!(sanitize_view_size(Some((900.0, 0.0))), None);
+        assert_eq!(sanitize_view_size(Some((-1.0, 700.0))), None);
+        assert_eq!(sanitize_view_size(Some((f64::NAN, 700.0))), None);
+        assert_eq!(sanitize_view_size(Some((900.0, f64::INFINITY))), None);
+    }
+
+    #[test]
+    fn full_center_centers_both_axes() {
+        use super::full_center_offsets;
+        // 1920×1080 屏幕，900×700 窗口：水平 (1920-900)/2=510，垂直 (1080-700)/2=190
+        assert_eq!(full_center_offsets(1920, 1080, 900, 700), (510, 190));
+        // 上下左右边距相等（真居中，而非 top_center 的「顶部 22%」）
+        let (x, y) = full_center_offsets(1000, 1000, 400, 200);
+        assert_eq!(x, 300);
+        assert_eq!(y, 400);
+    }
+
+    #[test]
+    fn full_center_clamps_when_window_exceeds_screen() {
+        use super::full_center_offsets;
+        // 窗口高于屏幕：余量为负 → 取 0 贴顶，绝不能为负（否则窗口被推到屏幕上方）
+        assert_eq!(full_center_offsets(1280, 720, 800, 900), (240, 0));
+        // 窗口宽于屏幕：同理取 0 贴左
+        assert_eq!(full_center_offsets(800, 600, 1000, 400), (0, 100));
+        // 恰好等宽等高：偏移为 0（不 panic、不溢出）
+        assert_eq!(full_center_offsets(600, 400, 600, 400), (0, 0));
+    }
+
+    #[test]
+    fn full_center_takes_precedence_over_top_center_ratio() {
+        use super::full_center_offsets;
+        // 回归守卫：完全居中的 y 必须是「余量的一半」，而不是 top_center 的
+        // 「屏高×0.22」。用同一组输入分别算两种口径，断言两者确实不同——
+        // 防止将来有人图省事把呼出定位错接到 top_center 公式上。
+        let (_, center_y) = full_center_offsets(1920, 1080, 900, 700);
+        let top_center_y = (1080.0 * 0.22) as u32; // = 237
+        assert_eq!(center_y, 190);
+        assert_ne!(center_y, top_center_y);
     }
 }

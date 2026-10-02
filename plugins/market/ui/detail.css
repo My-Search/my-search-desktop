@@ -117,7 +117,7 @@ button { cursor: pointer; }
   background: color-mix(in srgb, var(--market-accent-strong, #2868f5) 14%, var(--surface, #f5f6f8));
 }
 
-/* 仓库入口：hero 右侧的 GitHub 图标。
+/* 首页入口：hero 右侧的 GitHub 图标。
    z-index 高于装饰形状（它们是 absolute 覆盖层），保证可点。
    颜色跟随主题次要文字色，hover 时用品牌蓝。 */
 .hero-repo {
@@ -350,7 +350,7 @@ button { cursor: pointer; }
 /* 更新日志：仅「已安装且可更新」时出现，展示**新版**改了什么。
    浅色块 + 左侧品牌蓝竖条，与「可更新」徽标呼应；正文保留作者书写的换行
    （white-space: pre-line），超长时最多 8 行、超出裁掉（列表里不做展开，
-   完整内容可点官方地址去仓库看）。颜色全部走宿主 token，随主题明暗同步。 */
+   完整内容可点首页去看）。颜色全部走宿主 token，随主题明暗同步。 */
 .plugin-changelog {
   margin: 0 0 7px;
   padding: 6px 9px 7px 11px;
@@ -368,7 +368,7 @@ button { cursor: pointer; }
   display: -webkit-box; -webkit-line-clamp: 8; -webkit-box-orient: vertical; overflow: hidden;
 }
 
-/* 官方地址链接（仓库 / 主页）：说明下方的小号链接，悬停下划线。
+/* 首页链接：说明下方的小号链接，悬停下划线。
    行内排布，图标随文字色，不抢卡片主体信息的注意力。 */
 .plugin-link {
   display: inline-flex; align-items: center; gap: 4px;

@@ -258,7 +258,7 @@ await S(
       const list = window.__eventHandlers.get(event) || [];
       list.forEach((idOrFn) => {
         const cb = typeof idOrFn === 'function' ? idOrFn : (window.__cbIds || {})[idOrFn];
-        if (typeof cb === 'function') { try { cb({ event, id: window.__eventNextId++, payload }); } catch (e) {} }
+        if (typeof cb === 'function') { try { cb({ event, id: window.__eventNextId++, payload }); } catch (e) { window.__emitErrors = window.__emitErrors || []; window.__emitErrors.push(String(e && e.stack || e)); } }
       });
       return list.length;
     };
@@ -696,6 +696,99 @@ check(
   `settled=${dragAfterResetProbe.settledH} dy=${dragAfterResetProbe.dy} lastH=${dragAfterResetLastH}`
 );
 
+/* ================= 呼出还原：不得再产生窗口尺寸动画 =================
+ * 用户报的观感问题：插件页拖大 → 隐藏 → 再呼出时，是「整个窗口先放大、内容
+ * 再放大回来」，不是同步。
+ *
+ * 根因：旧实现在还原路径调用 applyPluginWindowSize(size, true, true)，即
+ *   (1) unpinPluginBoxHeight()（解除高度预钉，退回 height:100%）；
+ *   (2) animateWindowSize()（Rust 后台线程 90ms 逐帧改窗口）。
+ * 而 WebView2 视口更新滞后于窗口尺寸 —— 窗口先长满，内容等最后一帧视口到位才
+ * 一次性放大回来 = 两次放大。
+ *
+ * 契约（本测试守卫）：
+ *   1. 拖拽结束（mouseup）时把尺寸登记到 Rust（set_main_window_view_size），
+ *      供 show_main_window 在 show() 前按此建窗；
+ *   2. 呼出（my-search://main-window-shown）还原插件尺寸时，前端**不得**再下发
+ *      任何窗口尺寸/位置 IPC（set_size / set_position / animate_window_size /
+ *      set_window_height）——窗口由 Rust 在 show() 前设好，呼出即最终尺寸；
+ *   3. 前端只需把盒子当帧钉到记忆高度（plugin-sized + --plugin-view-height），
+ *      且盒子高度不得塌回 48。
+ */
+// 先清掉可能残留的拖拽监听（上一步的 drag-after-reset 只 mousedown+mousemove）
+await evalJs(`document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })); 1`);
+await sleep(150);
+// 干净地拖一次（含 mouseup → 会登记尺寸到 Rust）
+await evalJs(`
+  (() => {
+    const handle = document.querySelector('.plugin-resize-handle');
+    const r = handle.getBoundingClientRect();
+    const cx = r.x + r.width / 2, cy = r.y + r.height / 2;
+    handle.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, clientX: cx, clientY: cy, button: 0 }));
+    document.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: cx + 140, clientY: cy + 90 }));
+    window.__summonEnd = { x: cx + 140, y: cy + 90 };
+  })(); 1`);
+await sleep(180);
+await evalJs(`document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: window.__summonEnd.x, clientY: window.__summonEnd.y })); 1`);
+await sleep(250);
+const beforeSummon = JSON.parse(await evalJs(`JSON.stringify((() => {
+  window.__summonMark = (window.__calls || []).length;
+  const box = document.getElementById('my_search_box');
+  return {
+    boxH: box ? Math.round(box.getBoundingClientRect().height) : null,
+    pinned: box ? box.style.getPropertyValue('--plugin-view-height') : null,
+    sized: box ? box.classList.contains('plugin-sized') : null,
+    // 到此刻为止登记过的尺寸（拖拽结束必须登记一次）
+    registered: (window.__calls || []).filter((c) => c.cmd === 'set_main_window_view_size').map((c) => c.args),
+  };
+})())`));
+
+// 模拟呼出（Rust 已按登记尺寸在 show() 前建好窗；这里只触发前端的还原分支）
+await evalJs(`window.__emitTauriEvent('my-search://main-window-shown', null)`);
+await sleep(450);
+const afterSummon = JSON.parse(await evalJs(`JSON.stringify((() => {
+  const box = document.getElementById('my_search_box');
+  const fresh = (window.__calls || []).slice(window.__summonMark || 0);
+  const cmds = fresh.map((c) => c.cmd);
+  return {
+    freshCmds: cmds,
+    resizeIpc: cmds.filter((c) =>
+      c === 'plugin:window|set_size' ||
+      c === 'plugin:window|set_position' ||
+      c === 'animate_window_size' ||
+      c === 'set_window_height'
+    ),
+    boxH: box ? Math.round(box.getBoundingClientRect().height) : null,
+    pinned: box ? box.style.getPropertyValue('--plugin-view-height') : null,
+    sized: box ? box.classList.contains('plugin-sized') : null,
+    pluginViewVisible: !!document.querySelector('#text_show .plugin-view'),
+  };
+})())`));
+
+check(
+  "拖拽结束时登记了插件尺寸（set_main_window_view_size，供 Rust show() 前建窗）",
+  beforeSummon.registered.length > 0 &&
+    beforeSummon.registered.some((a) => a && a.width > 0 && a.height > 0),
+  `registered=${JSON.stringify(beforeSummon.registered)}`
+);
+check(
+  "呼出还原插件尺寸时不再下发任何窗口尺寸/位置 IPC（无二次放大来源）",
+  afterSummon.resizeIpc.length === 0,
+  `resizeIpc=${JSON.stringify(afterSummon.resizeIpc)}`
+);
+check(
+  "呼出还原后盒子仍是拉伸态（plugin-sized + 钉住记忆高度）",
+  afterSummon.sized === true && afterSummon.pinned != null && parseFloat(afterSummon.pinned) > 100,
+  `sized=${afterSummon.sized} pinned=${afterSummon.pinned}`
+);
+check(
+  "呼出还原后盒子高度未塌回 48（内容当帧钉到记忆高度）",
+  afterSummon.boxH != null && afterSummon.boxH >= 100 &&
+    beforeSummon.boxH != null && Math.abs(afterSummon.boxH - beforeSummon.boxH) <= 8,
+  `before=${beforeSummon.boxH} after=${afterSummon.boxH}`
+);
+check("呼出还原后插件视图仍在前台", afterSummon.pluginViewVisible === true);
+
 /* ================= 退出插件：窗口位置必须复位到常态 =================
  * 回归：插件页会把窗口移到自定义位置（set_position），退出时若只改尺寸不改位置，
  * 窗口会停在插件页那次定位的位置。合同：退出（Esc → hideTextView）后必须再发一次
@@ -736,8 +829,6 @@ const exitProbe = JSON.parse(await evalJs(`JSON.stringify((() => {
     hasPluginView: !!document.querySelector('#text_show .plugin-view'),
   };
 })())`));
-console.log("\n=== 退出插件后 ===");
-console.log(JSON.stringify({ exitSized, beforeExitCalls, ...exitProbe }, null, 2));
 
 check("重新拖拽后回到插件调整态", exitSized === true);
 check("退出插件时调用了 reset_main_window_position（复位窗口位置）", exitProbe.resetCalls > beforeExitCalls, `before=${beforeExitCalls} after=${exitProbe.resetCalls}`);

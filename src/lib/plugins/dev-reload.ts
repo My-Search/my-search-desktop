@@ -29,7 +29,7 @@
  */
 
 import type { PluginChangedPayload } from "../plugins/ipc.ts";
-import { parsePluginManifest, type PluginManifest } from "./manifest.ts";
+import { DEFAULT_PLUGIN_AUTOSTART, parsePluginManifest, type PluginManifest } from "./manifest.ts";
 import { grantPermission, resolveAutoStartOnUpgrade, shouldKeepFrontendOnClose, type PluginRecord } from "./registry.ts";
 import { isKnownPermission, permissionCovers } from "./permissions.ts";
 
@@ -177,7 +177,7 @@ export function planReload(rec: PluginRecord, manifestText: string): ReloadPlan 
       prevManifest: rec.manifest,
       nextManifest: next,
     }),
-    requestedAutoStart: next.backend?.autostart ?? "on-demand",
+    requestedAutoStart: next.backend?.autostart ?? DEFAULT_PLUGIN_AUTOSTART,
     // 用户态一律保留（与 upsertPlugin 的保留列表一致）：
     // enabled / closeBehavior / grants / denied / runtime / installedAt
     dir: rec.dir,

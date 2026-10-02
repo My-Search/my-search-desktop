@@ -46,6 +46,13 @@ const LOCAL_ACTION_NAME_RE = /^[a-z][a-z0-9_-]*$/;
 export type PluginAutostart = "always" | "on-demand" | "prompt" | "never";
 
 /**
+ * 后台自启的缺省策略：作者**未声明** `backend.autostart` 时默认随应用启动常驻
+ * （即安装后「开机自启」开关为开启状态）。作者显式声明 `on-demand` / `prompt` /
+ * `never` 时一律尊重其请求，不受此默认值影响；用户仍可在插件面板随时改。
+ */
+export const DEFAULT_PLUGIN_AUTOSTART = "always" as const;
+
+/**
  * 关闭插件界面时的行为（同样是「请求」，有效值由用户在面板决定）：
  * - `minimize`：最小化——后台进程继续运行，由空闲回收（`idleExitSec`）决定何时退出；
  * - `exit`    ：退出——关闭界面即停止后台进程（deactivate 优雅退出，超时强杀）。
@@ -71,7 +78,7 @@ export interface PluginBackendSpec {
   entry: string;
   /** 通信协议：stdio JSON-RPC（默认，无端口）/ 本地 HTTP（插件自起服务） */
   protocol?: "jsonrpc-stdio" | "localhost-http";
-  /** 请求的自动启动策略（默认 on-demand） */
+  /** 请求的自动启动策略（默认 always：未声明时安装后即随应用启动常驻） */
   autostart?: PluginAutostart;
   /**
    * 关闭插件界面时的行为（默认 minimize）。
@@ -256,9 +263,9 @@ export interface PluginManifest {
   /**
    * 插件源码仓库地址（如 `https://github.com/you/my-plugin`）。
    *
-   * 与 `homepage` 的分工：homepage 是「作者主页 / 项目主页」（可能不是仓库），
-   * repository 才是**插件官方仓库**。市场卡片与设置面板优先展示 repository，
-   * 缺失时退回 homepage（见 `market-types.ts` 的 `pluginRepoUrl`）。可选。
+   * 与 `homepage` 一起构成插件的**首页**地址：UI（市场卡片与设置面板）统一显示为
+   * 「首页」，优先取 repository，缺失时退回 homepage。首页即源码地址——官方插件
+   * 的 repository 指向本仓库的 `plugins/<目录>`。可选。
    */
   repository?: string;
   /**
@@ -444,7 +451,7 @@ export function normalizeBackendSpec(
   const spec: PluginBackendSpec = {
     entry: entry as string,
     protocol: (protocol as PluginBackendSpec["protocol"]) ?? "jsonrpc-stdio",
-    autostart: (autostart as PluginAutostart) ?? "on-demand",
+    autostart: (autostart as PluginAutostart) ?? DEFAULT_PLUGIN_AUTOSTART,
     closeBehavior: (closeBehavior as PluginCloseBehavior) ?? DEFAULT_CLOSE_BEHAVIOR,
   };
   for (const key of Object.keys(NUMBER_LIMITS) as Array<keyof typeof NUMBER_LIMITS>) {

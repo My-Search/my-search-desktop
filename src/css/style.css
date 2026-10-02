@@ -1908,7 +1908,7 @@ html.theme-dark {
   border: 1px solid var(--line);
   background: var(--field);
   border-radius: 8px;
-  padding: 10px 12px;
+  padding: 18px 12px;
 }
 
 /* 拖拽手柄（条块左侧的握把图标） */
@@ -1976,23 +1976,26 @@ html.theme-dark {
   font-size: 13px;
   font-weight: 600;
   color: var(--text);
+  margin-bottom: 3px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 #ms-config-view .sub-item .sub-url {
-  font-size: 12px;
+  font-size: 11px;
   color: var(--muted);
   font-family: Consolas, Menlo, monospace;
+  opacity: 0.55;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 #ms-config-view .sub-item .sub-describe {
-  font-size: 12px;
+  font-size: 11px;
   color: var(--muted);
+  opacity: 0.55;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2028,6 +2031,7 @@ html.theme-dark {
 #ms-config-view .sub-item .sub-main input.sub-edit-url {
   font-family: Consolas, Menlo, monospace;
   color: var(--muted);
+  opacity: 1;
 }
 
 #ms-config-view .sub-item .sub-op {

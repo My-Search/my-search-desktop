@@ -35,6 +35,10 @@ import { fileURLToPath } from "url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dialogVue = readFileSync(path.join(root, "src/components/MessageDialog.vue"), "utf8");
 const styleCss = readFileSync(path.join(root, "src/css/style.css"), "utf8");
+const panelVue = readFileSync(
+  path.join(root, "src/windows/config/panels/PanelPlugins.vue"),
+  "utf8",
+);
 
 let pass = 0;
 let fail = 0;
@@ -106,6 +110,23 @@ check(
   "CSS：抹掉 [popover] 的 UA 默认样式（margin/border/padding）",
   /\.token-overlay\[popover\][\s\S]{0,400}?margin:\s*0[\s\S]{0,200}?padding:\s*0/.test(styleCss),
 );
+
+/* ============================================================
+ * 1.6 卸载的第二次确认：左侧按钮文案为「保留」（用户诉求）
+ *   弹窗是「是否同时删除插件保存的数据？」——左=保留（cancel，不动数据），
+ *   右=确定（删数据）。用户要求把原来的「取消」改成「保留」，语义更直白。
+ *   两处卸载（内置 / 普通）都要带上这个文案。
+ * ============================================================ */
+{
+  const re = /props\.confirm\("是否同时删除插件保存的数据？",\s*\{\s*cancelText:\s*"保留"\s*\}\)/g;
+  const hits = panelVue.match(re) || [];
+  check(
+    "PanelPlugins：卸载的「是否删除数据」二次确认带 cancelText: 保留",
+    hits.length === 2,
+    `命中 ${hits.length} 处（内置 + 普通各一）`,
+  );
+}
+
 
 /* ============================================================
  * 2. 语义层：复刻 useMessageDialog 的状态机

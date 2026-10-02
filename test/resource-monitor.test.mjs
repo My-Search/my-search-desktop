@@ -13,9 +13,10 @@
  *
  * 用法: node test/resource-monitor.test.mjs
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync } from "node:fs";
 import { spawn } from "node:child_process";
-import path from "node:path";
+import { tmpdir } from "node:os";
+import path, { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 /** Windows 上动态 import 必须给 file:// URL，直接给绝对路径会被当成 'd:' 协议 */
@@ -553,15 +554,40 @@ function fakeSpawn(record) {
   };
 }
 
+/**
+ * 假 spawn：记录调用，并在成功时把该 pid 从「存活集合」移除。
+ * 这样 `aliveFn: (pid) => alive.has(pid)` 就能模拟「taskkill 生效后进程消失」。
+ */
+function fakeKillSpawn(record, alive) {
+  return (exe, args, opts) => {
+    record.push({ exe: String(exe), args, env: opts && opts.env });
+    const pid = Number(args[args.indexOf("/PID") + 1]);
+    const listeners = {};
+    const child = {
+      stdout: { on: () => {}, setEncoding: () => {} },
+      stderr: { on: () => {}, setEncoding: () => {} },
+      on: (ev, fn) => { listeners[ev] = fn; return child; },
+      kill: () => {},
+      pid: 999,
+    };
+    setTimeout(() => { alive.delete(pid); listeners.exit && listeners.exit(0); }, 0);
+    return child;
+  };
+}
+
 {
   // killProcess 用注入的 listFn 提供实例，spawnFn 记录 taskkill
   const calls = [];
-  const spawnFn = fakeSpawn(calls);
-  const listFn = async () => [
-    { pid: 111, name: "chrome.exe" },
-    { pid: 222, name: "chrome.exe" },
-  ];
-  const r = await procMod.killProcess("chrome.exe", { selfPid: 555, spawnFn, listFn });
+  const alive = new Set([111, 222]);
+  const r = await procMod.killProcess("chrome.exe", {
+    selfPid: 555,
+    spawnFn: fakeKillSpawn(calls, alive),
+    listFn: async () => [
+      { pid: 111, name: "chrome.exe" },
+      { pid: 222, name: "chrome.exe" },
+    ],
+    aliveFn: (pid) => alive.has(pid),
+  });
   eq(r.matched, 2, "匹配到 2 个实例");
   eq(r.killed, 2, "成功终止 2 个");
   eq(calls.length, 2, "调用了 2 次 taskkill");
@@ -572,12 +598,16 @@ function fakeSpawn(record) {
 {
   // 自身进程必须跳过
   const calls = [];
-  const spawnFn = fakeSpawn(calls);
-  const listFn = async () => [
-    { pid: 555, name: "node.exe" },
-    { pid: 777, name: "node.exe" },
-  ];
-  const r = await procMod.killProcess("node.exe", { selfPid: 555, spawnFn, listFn });
+  const alive = new Set([555, 777]);
+  const r = await procMod.killProcess("node.exe", {
+    selfPid: 555,
+    spawnFn: fakeKillSpawn(calls, alive),
+    listFn: async () => [
+      { pid: 555, name: "node.exe" },
+      { pid: 777, name: "node.exe" },
+    ],
+    aliveFn: (pid) => alive.has(pid),
+  });
   eq(r.skipped.length, 1, "自身进程被跳过");
   eq(r.killed, 1, "另一个实例被终止");
   eq(calls.length, 1, "只对非自身实例调 taskkill");
@@ -585,7 +615,7 @@ function fakeSpawn(record) {
 }
 
 {
-  // taskkill 失败 → 进 failed，不抛
+  // taskkill 失败且进程仍在 → 进 failed，不抛
   const spawnFn = (exe, args, opts) => {
     const listeners = {};
     const child = {
@@ -596,7 +626,7 @@ function fakeSpawn(record) {
     return child;
   };
   const listFn = async () => [{ pid: 42, name: "x.exe" }];
-  const r = await procMod.killProcess("x.exe", { selfPid: 1, spawnFn, listFn });
+  const r = await procMod.killProcess("x.exe", { selfPid: 1, spawnFn, listFn, aliveFn: () => true });
   eq(r.killed, 0, "失败时不计数为成功");
   eq(r.failed.length, 1, "失败项进入 failed");
   ok(/access denied/.test(r.failed[0].error), "带上 taskkill 的错误信息");
@@ -613,12 +643,162 @@ function fakeSpawn(record) {
 }
 
 {
+  // 已退出的实例不算失败：杀前探活就发现不存在 → skipped
+  const calls = [];
+  const alive = new Set([222]); // 111 已消失
+  const r = await procMod.killProcess("chrome.exe", {
+    spawnFn: fakeKillSpawn(calls, alive),
+    listFn: async () => [
+      { pid: 111, name: "chrome.exe" },
+      { pid: 222, name: "chrome.exe" },
+    ],
+    aliveFn: (pid) => alive.has(pid),
+  });
+  eq(r.killed, 1, "存活的实例被终止");
+  eq(r.failed.length, 0, "已退出的实例不算失败");
+  eq(r.skipped.length, 1, "已退出的实例进入 skipped");
+  ok(/已不再运行/.test(r.skipped[0].reason), "跳过原因说明进程已不在");
+  eq(calls.length, 1, "只对存活的实例调 taskkill");
+}
+
+{
+  // 成败以探活为准：taskkill 退出码非 0，但进程确实没了 → 记为成功（同名父子的常见情形）
+  const spawnFn = (exe, args, opts) => {
+    const listeners = {};
+    const child = {
+      stdout: { on: () => {} },
+      stderr: { on: (ev, fn) => { if (ev === "data") fn(Buffer.from("ERROR: not found", "utf8")); } },
+      on: (ev, fn) => { listeners[ev] = fn; return child; },
+      kill: () => {},
+    };
+    setTimeout(() => listeners.exit && listeners.exit(128), 0); // 非 0 退出
+    return child;
+  };
+  let probes = 0;
+  const r = await procMod.killProcess("x.exe", {
+    spawnFn,
+    listFn: async () => [{ pid: 42, name: "x.exe" }],
+    aliveFn: () => probes++ === 0, // 杀前活着，杀后消失
+  });
+  eq(r.killed, 1, "进程确实消失 → 计为成功，即便 taskkill 非 0 退出");
+  eq(r.failed.length, 0, "不产生假失败");
+}
+
+{
+  // taskkill 失败且进程仍在 → failed，且错误文本按 OEM 代码页解码（非乱码）
+  const spawnFn = (exe, args, opts) => {
+    const listeners = {};
+    const child = {
+      stdout: { on: () => {} },
+      // 「拒绝访问」的 GBK(936) 字节：若按 UTF-8 解码会变成 U+FFFD 乱码
+      stderr: { on: (ev, fn) => { if (ev === "data") fn(Buffer.from([190, 220, 190, 248, 183, 195, 206, 202])); } },
+      on: (ev, fn) => { listeners[ev] = fn; return child; },
+      kill: () => {},
+    };
+    setTimeout(() => listeners.exit && listeners.exit(1), 0);
+    return child;
+  };
+  const r = await procMod.killProcess("x.exe", {
+    spawnFn,
+    listFn: async () => [{ pid: 42, name: "x.exe" }],
+    aliveFn: () => true, // 杀不掉，仍在
+  });
+  eq(r.killed, 0, "杀不掉时不计数为成功");
+  eq(r.failed.length, 1, "失败项进入 failed");
+  eq(r.failed[0].error, "拒绝访问", "GBK 输出解码为可读中文（非乱码）");
+}
+
+{
+  // 多行 taskkill 输出被压成一行（避免 toast 刷屏），且保留「原因」行
+  // 下面两组字节均为 GBK(936) 编码的真实 taskkill 文案，验证「解码 + 压缩」两步都对
+  const GBK_LINE1 = Buffer.from([206, 222, 183, 168, 214, 213, 214, 185, 32, 80, 73, 68, 32, 52, 50, 32, 40, 202, 244, 211, 218, 32, 80, 73, 68, 32, 52, 32, 215, 211, 189, 248, 179, 204, 41, 181, 196, 189, 248, 179, 204, 161, 163]); // 无法终止 PID 42 (属于 PID 4 子进程)的进程。
+  const GBK_LINE2 = Buffer.from([212, 173, 210, 242, 58, 32, 190, 220, 190, 248, 183, 195, 206, 202, 161, 163]); // 原因: 拒绝访问。
+  const spawnFn = (exe, args, opts) => {
+    const listeners = {};
+    const child = {
+      stdout: { on: () => {} },
+      stderr: {
+        on: (ev, fn) => {
+          if (ev !== "data") return;
+          // 模拟 taskkill 对子树逐条报错的多行输出（全 GBK）
+          fn(Buffer.concat([GBK_LINE1, Buffer.from("\r\n", "utf8"), GBK_LINE2, Buffer.from("\r\n", "utf8")]));
+        },
+      },
+      on: (ev, fn) => { listeners[ev] = fn; return child; },
+      kill: () => {},
+    };
+    setTimeout(() => listeners.exit && listeners.exit(128), 0);
+    return child;
+  };
+  const r = await procMod.killProcess("x.exe", {
+    spawnFn,
+    listFn: async () => [{ pid: 42, name: "x.exe" }],
+    aliveFn: () => true,
+  });
+  eq(r.failed.length, 1, "多行输出仍归为一次失败");
+  ok(!/[\r\n]/.test(r.failed[0].error), "错误文本已压成单行");
+  ok(/原因[:：]\s*拒绝访问/.test(r.failed[0].error), "保留可读的「原因: 拒绝访问」（GBK 解码正确）");
+  ok(!/[\uFFFD]/.test(r.failed[0].error), "没有解码乱码");
+}
+
+{
+  // protectedPids：监控自身相关进程（后台 / 采样 PowerShell）一律跳过，且不调 taskkill
+  const calls = [];
+  const alive = new Set([100, 200, 300]);
+  const r = await procMod.killProcess("powershell.exe", {
+    protectedPids: [100, 200],
+    spawnFn: fakeKillSpawn(calls, alive),
+    listFn: async () => [
+      { pid: 100, name: "powershell.exe" },
+      { pid: 200, name: "powershell.exe" },
+      { pid: 300, name: "powershell.exe" },
+    ],
+    aliveFn: (pid) => alive.has(pid),
+  });
+  eq(r.skipped.length, 2, "受保护的两个 pid 被跳过");
+  eq(r.killed, 1, "其余实例正常终止");
+  eq(calls.length, 1, "受保护 pid 不调 taskkill");
+  eq(calls[0].args.includes("100"), false, "绝不 taskkill 受保护 pid");
+  eq(calls[0].args.includes("200"), false, "绝不 taskkill 受保护 pid");
+}
+
+{
+  // 枚举自身必须被剔除：listProcesses 的返回值里不该含那次用来枚举的 PowerShell
+  const enumPid = 4321;
+  const spawnFn = (exe, args, opts) => {
+    const listeners = {};
+    const child = {
+      pid: enumPid,
+      stdout: { on: (ev, fn) => { if (ev === "data") fn(JSON.stringify([{ pid: enumPid, name: "powershell.exe", path: "", ws: 1, cpuTicks: 1 }, { pid: 9, name: "powershell.exe", path: "", ws: 1, cpuTicks: 1 }])); } },
+      stderr: { on: () => {} },
+      on: (ev, fn) => { listeners[ev] = fn; return child; },
+      kill: () => {},
+    };
+    setTimeout(() => listeners.exit && listeners.exit(0), 0);
+    return child;
+  };
+  const list = await procMod.listProcesses("powershell.exe", { spawnFn });
+  eq(list.length, 1, "枚举自身被排除，只剩真实实例");
+  eq(list[0].pid, 9, "保留的是真实实例");
+}
+
+{
+  // isAlive：本进程必活；不存在的 pid 必死
+  ok(procMod.isAlive(process.pid) === true, "isAlive 对本进程返回 true");
+  ok(procMod.isAlive(999999) === false, "isAlive 对不存在的 pid 返回 false");
+}
+
+{
   // 脚本注入防护：目标名必须走环境变量，不能出现在命令行里
   const src = readFileSync(path.join(backendDir, "processes.mjs"), "utf8");
   ok(/\$env:MS_RM_NAME/.test(src), "PowerShell 从 $env:MS_RM_NAME 读目标名");
   ok(/MS_RM_NAME:\s*target/.test(src), "目标名通过 env 传入（不进命令行）");
   ok(/ExecutablePath/.test(src), "列举时读取 ExecutablePath（用于打开文件位置）");
   ok(/windowsVerbatimArguments/.test(src), "explorer 参数用 windowsVerbatimArguments 原样传递");
+  ok(/MS_RM_NAME/.test(src) && /UTF8Encoding/.test(src), "列举脚本显式输出 UTF-8（中文程序名才不会对不上）");
+  ok(/protectedPids/.test(src), "支持保护监控自身相关进程（后台 / 采样）");
+  ok(/gb18030/.test(src), "taskkill 输出按 OEM 代码页解码，避免乱码");
+  ok(/isAlive/.test(src), "以探活而非 taskkill 退出码判定成败");
   // 采样脚本也顺带采集 ExecutablePath（供「位置」按钮即时打开，见 sample.ps1 头注释）
   const sampleSrc = readFileSync(path.join(backendDir, "sample.ps1"), "utf8");
   ok(/ExecutablePath/.test(sampleSrc), "sample.ps1 也采集 ExecutablePath（列表点击即可即时定位）");
@@ -783,7 +963,15 @@ console.log("\n--- 后端 JSON-RPC ---");
 
 function startBackend(extraEnv = {}) {
   const child = spawn(process.execPath, [path.join(backendDir, "index.mjs")], {
-    env: { ...process.env, MS_RM_INTERVAL_MS: "1000", ...extraEnv },
+    // 落盘目录指向本次测试专用的临时目录：后端默认写 `plugins/resource-monitor/.data/`
+    // 并在启动时把上次的 thresholds / 历史读回来，若复用默认目录，上一次「setThresholds
+    // 改成 topN=8」的用例会污染下一次运行（表现为 TopN=10 断言拿到 8）。
+    env: {
+      ...process.env,
+      MS_RM_INTERVAL_MS: "1000",
+      MS_PLUGIN_DATA_DIR: mkdtempSync(join(tmpdir(), "ms-rm-test-")),
+      ...extraEnv,
+    },
     stdio: ["pipe", "pipe", "pipe"],
   });
   const messages = [];

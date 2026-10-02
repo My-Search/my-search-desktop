@@ -5,7 +5,7 @@
  * 这里改为一个 reactive store，由 App.vue 创建并 provide 给各面板。
  */
 import { reactive } from "vue";
-import { editSubscribe, getSubscribe, parseSubscribeItems, subscribeItemsToRawText, type SubscribeRow } from "./configShared";
+import { editSubscribe, getSubscribe, normalizeSubscribeText, parseSubscribeItems, subscribeItemsToRawText, type SubscribeRow } from "./configShared";
 
 export interface SubscribeDraftState {
   /** 订阅原文（含未保存的编辑），是文本域的唯一数据源 */
@@ -37,6 +37,8 @@ export function useSubscribeDraft() {
    */
   function commit(value?: string): number {
     if (value != null) state.draft = value;
+    // 统一「每条之间空一行」：保证源码视图显示与持久化格式始终一致
+    state.draft = normalizeSubscribeText(state.draft);
     return editSubscribe(state.draft);
   }
 

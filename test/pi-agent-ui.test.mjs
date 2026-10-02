@@ -159,6 +159,17 @@ const backend = {
         // 必须模拟 idle，否则会话会永远留在 runningSessions 账本里，
         // 下一次点击发送会被「该会话正在运行」挡住（返回不发请求）。
         emit("chat:status", { sessionId: sid, status: "running" });
+        // 停止路径专用：挂起本轮不返回，等测试点「停止」→ abort 才以 aborted:true 收尾。
+        // 对齐真实后端：用户点停止后 chat 请求**不报错**，而是正常 resolve {aborted:true}。
+        if (window.__hangChat) {
+          window.__hangChat = false;
+          return await new Promise((resolve) => {
+            window.__resolveHungChat = () => {
+              emit("chat:aborted", { sessionId: sid, projectPath: params.projectPath || "" });
+              resolve({ aborted: true, content: "" });
+            };
+          });
+        }
         await sleep(20);
         const text = "本轮回答";
         const t = transcripts[sid] || (transcripts[sid] = []);
@@ -169,7 +180,16 @@ const backend = {
         emit("chat:status", { sessionId: sid, status: "idle" });
         return { content: text };
       }
-      case "abort": return { ok: true };
+      case "abort": {
+        // 停止：真实后端会 abort 本轮、广播 chat:aborted，并让挂起的 chat 以
+        // aborted:true（而不是报错）收尾——这正是「停止不该刷错误」的关键契约。
+        if (window.__resolveHungChat) {
+          const r = window.__resolveHungChat;
+          window.__resolveHungChat = null;
+          r();
+        }
+        return { ok: true };
+      }
       default: return null;
     }
   },
@@ -200,6 +220,7 @@ fn(window.ms, window.ms, { id: "com.mysearch.pi-agent", name: "Pi Agent", versio
 
 window.__emit = emit;
 window.__setDots = (id, patch) => { dotOverrides[id] = patch; };
+window.__hangChat = false;
 window.__ready = true;
 </script>
 </body>
@@ -878,7 +899,89 @@ check("未查看会话有蓝色状态点", fl.some((f) => f.dot.includes("unseen
 check("未查看会话文字标注「已完成未读」", fl.some((f) => f.sub.includes("已完成未读")),
   JSON.stringify(fl.map((f) => f.sub)));
 
-/* ============ 6. 无 JS 报错 ============ */
+/* ============ 7. 扩展通知：正常完成提示不弹、报错提示照弹 ============ */
+// 回归：全局扩展 pi-desktop-notify-bridge 会在 agent_end 发
+// "Agent finished its current task."（info）。会话跑完本就无需打扰，插件必须静默它；
+// 但出错提示（error）仍然要弹，不能被一并吞掉。
+const toastState = async () => JSON.parse(await evalJs(`JSON.stringify((() => {
+  const el = document.getElementById('pi-inline-toast');
+  return { exists: !!el, hidden: el ? el.hidden === true : true, text: el ? el.textContent : '' };
+})())`));
+
+// 先确保干净：隐藏上一节可能留下的 toast
+await evalJs(`(() => { const el = document.getElementById('pi-inline-toast'); if (el) { el.hidden = true; el.textContent = ''; } })(); 1`);
+
+await evalJs(`window.__emit('ext_ui:notify', { message: 'Agent finished its current task.', type: 'info' }); 1`);
+await sleep(200);
+const afterFinish = await toastState();
+check("正常完成提示（Agent finished its current task.）不弹 toast",
+  afterFinish.hidden === true || !String(afterFinish.text).includes("finished its current task"),
+  JSON.stringify(afterFinish));
+
+await evalJs(`window.__emit('ext_ui:notify', { message: 'Agent run ended with an error.', type: 'error' }); 1`);
+await sleep(200);
+const afterError = await toastState();
+check("出错提示仍然照常弹出（未被误吞）",
+  afterError.hidden === false && afterError.text.includes("ended with an error"),
+  JSON.stringify(afterError));
+
+/* ============ 8. 点「停止」不该刷错误横幅 ============ */
+// 回归（用户报告「运行时手动点击停止还有很多提示错误」）：后端 abort 会让挂起的
+// chat 以 {aborted:true} 正常收尾，前端必须按「已停止」处理——既不能显示
+// 「Pi 未返回有效响应」，也不能冒出「发送失败 / 请求失败」这类错误横幅。
+await evalJs(`(() => {
+  const el = document.getElementById('pi-input');
+  el.value = '这条会被中途停止';
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  window.__hangChat = true;            // 让本轮 chat 挂住，等待用户停止
+  document.getElementById('pi-send-btn').click();
+})(); 1`);
+await sleep(300);
+
+// 挂起期间推送一段思考流：思考行会创建「工作分组」，
+// 这样下面的断言才是在检验「停止后分组不再显示工作中」，而不是空集恒真。
+// 通知不带 sessionId 即视为当前会话（见 isCurrentSessionNotification）。
+await evalJs(`window.__emit('chat:thinking', { delta: '正在分析', content: '正在分析' }); 1`);
+await sleep(150);
+const workBefore = await evalJs(`document.querySelectorAll('#pi-chat-body .turn-work').length`);
+check("停止前已出现工作分组（思考流触发了分组）", workBefore >= 1, `分组数=${workBefore}`);
+
+// 挂起期间：按钮应为「停止」态
+const runningBtn = await evalJs(`document.getElementById('pi-send-btn').classList.contains('running')`);
+check("挂起期间发送按钮处于「停止」态", runningBtn === true);
+
+// 记录停止前的错误横幅数量，点停止后不得新增
+const errBefore = await evalJs(`document.querySelectorAll('#pi-chat-body .pi-error').length`);
+await evalJs(`document.getElementById('pi-send-btn').click(); 1`);  // 运行中点 = 停止
+await sleep(600);
+const errAfter = await evalJs(`document.querySelectorAll('#pi-chat-body .pi-error').length`);
+check("点「停止」不产生任何错误横幅（不含「未返回有效响应」等）",
+  errAfter === errBefore, `停止前 ${errBefore} 条，停止后 ${errAfter} 条`);
+const errTexts = JSON.parse(await evalJs(`JSON.stringify([...document.querySelectorAll('#pi-chat-body .pi-error')].map(e => e.textContent))`));
+check("聊天区没有出现「请求失败」/「发送失败」/「未返回有效响应」",
+  !errTexts.some((t) => /请求失败|发送失败|未返回有效响应/.test(t)),
+  JSON.stringify(errTexts));
+
+// 停止后按钮应回到「发送」态、可继续下一轮
+await sleep(300);
+const stoppedBtn = await evalJs(`document.getElementById('pi-send-btn').classList.contains('running')`);
+check("停止后发送按钮回到「发送」态", stoppedBtn === false);
+const stopState = JSON.parse(await evalJs(`JSON.stringify((() => {
+  const works = [...document.querySelectorAll('#pi-chat-body .turn-work')];
+  return {
+    total: works.length,
+    // 停止后不应该有任何分组仍停在「运行中」
+    stillRunning: works.filter((w) => w.dataset.state === 'running').length,
+    texts: works.map((w) => w.querySelector('.turn-work-status')?.textContent || ''),
+  };
+})())`));
+check("停止后没有工作分组卡在「运行中」",
+  stopState.stillRunning === 0, JSON.stringify(stopState));
+const stopTexts = JSON.parse(await evalJs(`JSON.stringify([...document.querySelectorAll('#pi-chat-body .turn-work-status')].map(e => e.textContent))`));
+check("已渲染的工作分组文案不是「工作中」",
+  !stopTexts.some((t) => /工作中/.test(String(t))), JSON.stringify(stopTexts));
+
+/* ============ 9. 无 JS 报错 ============ */
 check("页面无未捕获异常", pageErrors.length === 0, pageErrors.slice(0, 2).join(" | "));
 
 console.log(`\n通过 ${pass} / 失败 ${fail}`);

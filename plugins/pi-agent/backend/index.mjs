@@ -450,6 +450,29 @@ const sendResult = (id, result) => send({ jsonrpc: "2.0", id, result });
 const sendError = (id, message) => send({ jsonrpc: "2.0", id, error: { message } });
 
 /**
+ * 是否是「用户主动停止 / 调用了 abort」导致的错误。
+ *
+ * 为什么必须单独识别：用户点「停止」时，pi 内部会让正在 await 的 `prompt()`
+ * 以一个 abort 错误 settle（SDK 里是 `AbortError: Request aborted`，各类
+ * provider 也会抛 "Request aborted" / "The operation was aborted"）。这类错误
+ * **不是模型故障**——如果照常走 describeModelError + chat:error，用户每点一次
+ * 停止就会在聊天区刷出一条「发送失败：Request aborted」的错误横幅。
+ *
+ * 判定依据（任一命中即认为是主动中止）：
+ *   - error.name === "AbortError"；
+ *   - 消息里出现独立的 abort / aborted / cancel / cancelled 词。
+ *
+ * 注意必须用词边界（\b）：否则 "ECONNABORTED"（真实的网络/连接错误）会被误判成
+ * 用户中止而被静默吞掉，用户就看不到本该提示的网络故障了。
+ */
+function isAbortError(e) {
+  if (!e) return false;
+  if (typeof e === "object" && e.name === "AbortError") return true;
+  const raw = String((e && (e.message || e)) || "");
+  return /\babort(ed)?\b|\bcancel(l)?ed\b/i.test(raw);
+}
+
+/**
  * 把底层错误（模型不可用 / 鉴权 / 网络 / 配额 / 模型名错误）转成中文可读原因，
  * 让前端能直接展示「为什么失败」，而不是只甩一行原始报错。
  */
@@ -1165,15 +1188,22 @@ function maybeForwardAskTool(rec, toolName, toolCallId, args) {
  * 前端原生卡片提交后回传答案。
  * answers 形如 [{ id, question, value: string | string[] }]。
  * 返回 true 表示确实消费了一个待回答的 ask。
+ *
+ * 单问题：selectedOption 就是那个答案（与从前完全一致，不回归）。
+ * 多问题：合并成一段可读文本「问题1：答案1；问题2：答案2」，让 ask 工具拿到**全部**答案
+ *        ——早先只取 list[0]，多问题时其余答案都被丢掉了。
  */
 function resolvePendingAsk(rec, answers) {
   const pending = rec?.pendingAsk;
   if (!pending || pending.answered) return false;
   pending.answered = true;
-  const list = Array.isArray(answers) ? answers : [];
-  const first = list[0] || {};
-  const value = first.value;
-  const selectedOption = Array.isArray(value) ? value.join("、") : value == null ? "" : String(value);
+  const norm = (value) => Array.isArray(value) ? value.join("、") : value == null ? "" : String(value).trim();
+  const answered = (Array.isArray(answers) ? answers : [])
+    .map((a) => ({ question: String(a?.question ?? a?.id ?? ""), value: norm(a?.value) }))
+    .filter((a) => a.value);
+  const selectedOption = answered.length <= 1
+    ? (answered[0]?.value || "")
+    : answered.map((a) => `${a.question}：${a.value}`).join("；");
   pending.settle({ cancelled: false, selectedOption });
   return true;
 }
@@ -1268,6 +1298,9 @@ async function createSessionRuntime(projectPath, modelKey, { asDraft = false } =
     running: false,
     unsubscribe: null,
     turnGeneration: 0,  // 每轮递增，abort 后丢弃旧轮事件
+    // 用户主动停止标记：abort 时置 true，本轮收尾时消费一次。
+    // 用来把「用户点了停止」与「模型真的报错」区分开——前者不该报错。
+    aborted: false,
   };
   rec.unsubscribe = session.subscribe((event) => {
     try { handleAgentEvent(rec, event); } catch (e) { sendLog("warn", `事件处理异常: ${e.message}`); }
@@ -1304,6 +1337,7 @@ async function openSession(projectPath, sessionFile, modelKey) {
     sessionId: session.sessionId,
     running: false,
     unsubscribe: null,
+    aborted: false,
   };
   rec.unsubscribe = session.subscribe((event) => {
     try { handleAgentEvent(rec, event); } catch (e) { sendLog("warn", `事件处理异常: ${e.message}`); }
@@ -2074,11 +2108,25 @@ async function handleChat(id, params) {
   const session = rec.session;
   if (!session?.prompt) { sendError(id, "agent 会话不可用"); return; }
 
+  // 新一轮开始前清掉上一轮可能残留的停止标记：
+  // 若上一轮已正常跑完、之后才收到迟到的 abort 通知，标记会一直挂着，
+  // 若不清理，这一轮正常回答会被误判成「被用户停止」。
+  rec.aborted = false;
+
   try {
     nameSessionFromFirstMessage(rec, message);
     // 有图片时一并交给 pi；pi 内部会做模型维度的自动缩放（inputLimits.images.resize）。
     await session.prompt(message, { source: "interactive", ...(images.length ? { images } : {}) });
   } catch (e) {
+    // 用户主动点「停止」：pi 会让 await 中的 prompt() 以 abort 错误 settle。
+    // 这不是模型故障，绝不能当失败上报（否则每次停止都刷「发送失败: Request aborted」）。
+    // 停止时的清理与提示由 abort 分支 / chat:aborted 通知负责，这里只安静收尾。
+    if (rec.aborted || isAbortError(e)) {
+      rec.aborted = false;
+      rec.running = false;
+      sendResult(id, { content: "", sessionId: rec.sessionId, aborted: true });
+      return;
+    }
     const reason = describeModelError(e);
     // 本轮没真正跑起来就失败了（模型不可用 / 鉴权 / 网络等）：
     // 清掉「进行中」标记并通知前端，避免列表 / 视图卡在运行态（假死）。
@@ -2110,6 +2158,15 @@ async function handleChat(id, params) {
       if (typeof content === "string") fullContent = content;
       else if (Array.isArray(content)) {
         fullContent = content.filter((c) => c?.type === "text").map((c) => c.text || "").join("\n");
+      }
+      // 用户主动停止：pi 会把最后一条 assistant 标成 stopReason="aborted"（并可能带
+      // "Request aborted" 的 errorMessage）。这是正常中止，回 aborted:true 让前端
+      // 按「已停止」收尾，绝不发 chat:error（否则停止就成了报错）。
+      if (rec.aborted || m.stopReason === "aborted" || isAbortError({ message: m.errorMessage })) {
+        rec.aborted = false;
+        rec.running = false;
+        sendResult(id, { content: fullContent, sessionId: rec.sessionId, aborted: true });
+        return;
       }
       if (m.errorMessage) {
         const reason = describeModelError({ message: m.errorMessage });
@@ -2269,11 +2326,16 @@ async function handleEditUserMessage(id, params) {
     await session.prompt(newText, { source: "interactive", ...(originalImages.length ? { images: originalImages } : {}) });
     if (drafts.get(projectPath) === rec) drafts.delete(projectPath);
   } catch (e) {
+    // 重发期间用户又点了停止：同样是正常中止，不该报「发送失败」。
+    if (isAbortError(e)) {
+      sendLog("info", `重发被用户中止: ${rec.sessionId}`);
+      return;
+    }
     sendLog("warn", `重发失败: ${e.message}`);
     sendNotification("chat:error", {
       sessionId: rec.sessionId,
       projectPath,
-      error: String(e.message || e),
+      error: describeModelError(e),
     });
   }
 }
@@ -3186,6 +3248,9 @@ case "markViewed": await handleMarkViewed(id, params); break;
         if (targetSessionId && rec.sessionId !== targetSessionId) continue;
         try {
           rec.running = false;
+          // 标记「用户主动停止」：本轮 handleChat 收尾时会消费它，从而不把
+          // abort 造成的 prompt() 结束当成模型失败（否则每点一次停止刷一条错误）。
+          rec.aborted = true;
           clearPendingAsk(rec); // 停止时释放等待中的问答，避免卡片悬空
           await rec.session?.abort?.();
           abortedCount++;

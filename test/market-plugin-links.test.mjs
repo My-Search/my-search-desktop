@@ -1,9 +1,10 @@
 /**
- * 「插件市场：更新日志 + 官方地址」回归（纯源码契约，无需浏览器 / Rust）。
+ * 「插件市场：更新日志 + 首页」回归（纯源码契约，无需浏览器 / Rust）。
  *
  * 用户诉求：
  *   1. 已安装插件在插件市场里出现新版本时，卡片说明下方要显示**这一版**的更新日志；
- *   2. 每个插件卡片都要能看到它的**官方地址**（仓库优先，退回主页），点了用系统浏览器打开。
+ *   2. 每个插件卡片都要能看到它的**首页**（仓库优先，退回主页），点了用系统浏览器打开。
+ *      首页就是源码地址，文案不再按地址形态区分「源码 / 仓库 / 主页」。
  *
  * 钉死的契约（改动以下任一处都会让本测试失败，请先想清楚是否真的要改）：
  *
@@ -17,7 +18,7 @@
  *   UI 侧：
  *   5. market/ui/index.js 仅在 hasUpdate 且有 changelog 时渲染 `.plugin-changelog`，
  *      且读取的是 update 上的 changelog（不是只读 entry）；
- *   6. 卡片渲染 `.plugin-link`（data-link），点击委托走 ms.system.openExternal；
+ *   6. 卡片渲染 `.plugin-link`（data-link），文案统一「首页」，点击委托走 ms.system.openExternal；
  *   7. detail.css 存在 `.plugin-changelog` 与 `.plugin-link` 样式。
  *
  * 用法: node test/market-plugin-links.test.mjs
@@ -139,9 +140,9 @@ check(
   marketJs.indexOf("plugin-changelog") > marketJs.indexOf("plugin-desc")
 );
 
-/* ---------- 6. 市场 UI：官方地址链接 ---------- */
+/* ---------- 6. 市场 UI：首页链接 ---------- */
 check(
-  "market/ui/index.js：渲染 .plugin-link 官方地址链接",
+  "market/ui/index.js：渲染 .plugin-link 首页链接",
   /class="plugin-link" data-link=/.test(marketJs)
 );
 check(
@@ -182,31 +183,27 @@ for (const dir of IN_REPO_PLUGINS) {
     mf.repository || "(missing)"
   );
 }
-// 规则本身要成立：这些 repository 必须被链接文案识别为「源码」
-const repoLabelSrc = (() => {
-  const start = marketJs.indexOf("function linkLabel(url)");
-  const end = marketJs.indexOf("\n  }", start);
-  return start >= 0 && end > start ? marketJs.slice(start, end) : "";
-})();
+// 链接文案统一为「首页」：不再按地址形态区分「源码 / 仓库 / 主页」
+// （首页就是源码地址，同一份地址换个说法只会让用户困惑）。
 check(
-  "market/ui/index.js：linkLabel 把 /tree/ 地址识别为「源码」",
-  /\(tree\|blob\)/.test(repoLabelSrc) && /"源码"/.test(repoLabelSrc),
-  repoLabelSrc.slice(0, 80)
+  "market/ui/index.js：卡片链接文案统一为「首页」",
+  /LINK_ICON \+ "<span>首页<\/span>"/.test(marketJs),
+  marketJs.slice(0, 80)
 );
 check(
-  "market/ui/index.js：linkLabel 保留仓库根「仓库」与其余「主页」",
-  /"仓库"/.test(repoLabelSrc) && /"主页"/.test(repoLabelSrc)
+  "market/ui/index.js：不再按形态输出「源码 / 仓库 / 主页」标签",
+  !/"源码"/.test(marketJs) && !/"仓库"/.test(marketJs) && !/"主页"/.test(marketJs)
 );
-// 设置面板同样按形态标注（源码 / 仓库 / 主页）
+// 设置面板：repository 与 homepage 合并成一条「首页」，不再分形态标注
 check(
-  "PanelPlugins.vue：存在 repoLabel 并按形态标注",
-  /function repoLabel\(url: string\): string/.test(panelVue) &&
-    /"源码"/.test(panelVue) && /"仓库"/.test(panelVue) && /"主页"/.test(panelVue)
+  "PanelPlugins.vue：存在 homepageOf（repository 优先，退回 homepage）",
+  /function homepageOf\(/.test(panelVue) && /record\.repository \|\| record\.homepage/.test(panelVue)
 );
 check(
-  "PanelPlugins.vue：repository 行使用动态标签 repoLabel",
-  /:href="record\.repository"[^>]*>/.test(panelVue) &&
-    /\{\{\s*repoLabel\(record\.repository\)\s*\}\}/.test(panelVue)
+  "PanelPlugins.vue：首页行使用 homepageOf 且标签为「首页」",
+  /\{\{\s*homepageOf\(record\)\s*\}\}/.test(panelVue) &&
+    /class="plugin-info-label">首页</.test(panelVue) &&
+    !/repoLabel\(/.test(panelVue)
 );
 
 /* ---------- 7. CSS 契约 ---------- */

@@ -9,8 +9,8 @@
     {
       "plugin": "official-plugins/com.mysearch.pi-agent",
       "createTime": "2026-09-24T12:41:29.674Z",
-      "latestVersionUpdateTime": "2026-09-28T14:43:56.889Z",
-      "lastVersion": "2.7.0"
+      "latestVersionUpdateTime": "2026-10-02T03:43:12.449Z",
+      "lastVersion": "2.7.1"
     },
     {
       "plugin": "official-plugins/com.mysearch.file-search",
@@ -21,8 +21,8 @@
     {
       "plugin": "official-plugins/com.mysearch.market",
       "createTime": "2026-09-24T12:41:35.894Z",
-      "latestVersionUpdateTime": "2026-09-28T14:43:58.588Z",
-      "lastVersion": "1.1.0"
+      "latestVersionUpdateTime": "2026-10-02T03:43:12.460Z",
+      "lastVersion": "1.1.1"
     },
     {
       "plugin": "official-plugins/com.mysearch.baidu-translate",
@@ -69,8 +69,8 @@
       "plugin": "official-plugins/com.zhuangjie.resource-monitor",
       "official": false,
       "createTime": "2026-09-30T14:05:49.846Z",
-      "latestVersionUpdateTime": "2026-09-30T14:05:49.846Z",
-      "lastVersion": "1.0.0"
+      "latestVersionUpdateTime": "2026-10-02T03:43:12.504Z",
+      "lastVersion": "1.0.1"
     }
   ],
   "three-parties": [

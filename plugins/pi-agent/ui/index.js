@@ -3746,6 +3746,28 @@ function showError(msg) {
   scrollToBottom();
 }
 
+/**
+ * 是否是「本轮正常跑完」的提示——这类提示一律不弹。
+ *
+ * 会话跑完本来就无需打扰：聊天区已经用「已工作 N 秒」交代了状态，
+ * 再弹一个 toast 反而干扰（尤其它会在每个 agent_end 都出现）。
+ *
+ * 最常见的来源是全局扩展 pi-desktop-notify-bridge 在 agent_end 发的
+ * "Agent finished its current task."。该扩展位于 ~/.pi/agent/extensions，
+ * 被所有 pi 应用共用，插件侧不去改它，只在这里静默掉这条信息类提示；
+ * 出错提示（type === "error"）不受影响，仍会照常展示。
+ *
+ * 注意只按「整条消息等值」匹配，避免误伤正文里恰好提到这些词的正常通知。
+ */
+const TURN_COMPLETION_NOTICES = new Set([
+  "Agent finished its current task.",
+  "Agent finished its current task",
+]);
+
+function isTurnCompletionNotice(message) {
+  return TURN_COMPLETION_NOTICES.has(String(message || "").trim());
+}
+
 /** 轻量内联提示（用于图片相关提醒，不依赖宿主 toast） */
 function piToast(msg, kind = "warn") {
   let el = document.getElementById("pi-inline-toast");
@@ -4336,7 +4358,13 @@ function setupNotificationHandlers() {
     // 以前它落到没有专属样式的基础类上，而基础类是报错红——正常完成提示看起来像报错。
     const type = params?.type;
     const kind = type === "error" ? "error" : type === "warning" ? "warn" : "info";
-    piToast(String(params?.message || ""), kind);
+    const message = String(params?.message || "");
+    // 「本轮正常跑完」的提示直接忽略：会话跑完本就无需打扰，界面上「已工作 N 秒」
+    // 已足够说明状态。常见来源是全局扩展 pi-desktop-notify-bridge 在 agent_end 发的
+    // "Agent finished its current task."（所有 pi 应用共用该扩展，这里只在插件侧静默，
+    // 不动那个全局文件）。报错类提示仍然照常展示。
+    if (type !== "error" && isTurnCompletionNotice(message)) return;
+    piToast(message, kind);
   });
   ms.backend.onNotification("plugin:progress", (params) => {
     if (!isSettingsOpen() || settingsPane !== "plugins") return;
@@ -4385,6 +4413,11 @@ function setupNotificationHandlers() {
  *   - 有 options（单选）= 一排可点的选项（选完直接提交）
  *   - 有 options（multi 多选）= 可多选 + “确认”按钮
  *   - 无 options = 一个输入框
+ *
+ * 多个问题时改用**标签页**：顶部一排可点标签（header / 问题文本），同一时刻只渲染一题，
+ * 右侧带 N / M 计数；单问题时无标签条、与从前完全一致。当前题索引随卡片状态一起暂存，
+ * 切走再切回会停回原题。
+ *
  * 选完后拼成一段**人类可读的文字**，当作普通用户消息发回给 agent（sendMessage）。
  * 这样与扩展实现解耦：无论它内部怎么 callUI，答案都走正常对话通道。
  */
@@ -4408,9 +4441,17 @@ function showAskCard(params) {
   header.innerHTML = '<span class="pi-ask-icon">?</span><span>需要你的回答</span>';
   card.appendChild(header);
 
+  // 多问题时改用**标签页**：顶部一排可点标签（用 header / 问题文本命名），
+  // 同一时刻只显示一题 + 右侧 N / M 计数。单问题不生成标签条，渲染结果与从前一致。
+  const multiQuestion = questions.length > 1;
+
   /** 每个 question 的当前选择：qid -> string | string[] */
   const answers = new Map();
   const inputsByQid = new Map();
+  /** 每题的面板节点：切题只切 hidden，不重建 DOM（输入框内容 / 已选状态天然不丢） */
+  const panels = [];
+  /** 每题的标签按钮（仅多问题时非空） */
+  const tabs = [];
 
   // 回填用户上次的选择（切走再切回时保留，不丢已选项/已输入文本）
   const saved = askCardStates.get(sid);
@@ -4420,6 +4461,38 @@ function showAskCard(params) {
       answers.set(k, Array.isArray(v) ? v.slice() : v);
     }
   }
+  /** 当前题索引：切走暂存、切回停回原题（单问题恒为 0） */
+  let currentIndex = savedMatches ? Number(saved.currentIndex) || 0 : 0;
+  if (currentIndex < 0 || currentIndex >= questions.length) currentIndex = 0;
+
+  // 标签条（仅多问题）：每题一个可点标签 + 右侧 N / M 计数。
+  // setActive 是下面的函数声明（会提升），标签点它即可直接跳题。
+  let tabsBar = null;
+  let tabsCount = null;
+  if (multiQuestion) {
+    tabsBar = document.createElement("div");
+    tabsBar.className = "pi-ask-tabs";
+    questions.forEach((q, qi) => {
+      const tab = document.createElement("button");
+      tab.type = "button";
+      tab.className = "pi-ask-tab";
+      tab.dataset.index = String(qi);
+      tab.textContent = String(q?.header || q?.question || `问题 ${qi + 1}`);
+      tab.title = String(q?.question || q?.header || `问题 ${qi + 1}`);
+      tab.addEventListener("click", () => setActive(qi));
+      tabs.push(tab);
+      tabsBar.appendChild(tab);
+    });
+    tabsCount = document.createElement("span");
+    tabsCount.className = "pi-ask-tabs-count";
+    tabsBar.appendChild(tabsCount);
+    card.appendChild(tabsBar);
+  }
+
+  // 面板容器：所有题都在 DOM 里，只切 hidden
+  const body = document.createElement("div");
+  body.className = "pi-ask-body";
+  card.appendChild(body);
 
   questions.forEach((q, qi) => {
     const qid = String(q?.id || q?.question || `q${qi}`);
@@ -4481,6 +4554,8 @@ function showAskCard(params) {
             list.querySelectorAll(".pi-ask-option").forEach((n) => n.classList.remove("selected"));
             btn.classList.add("selected");
             updateAskSubmit(card);
+            // 单选：选完自动跳到下一题（多选须先勾满，不自动跳；最后一题也不跳，等提交）。
+            maybeAutoAdvance();
           }
         });
         list.appendChild(btn);
@@ -4512,10 +4587,18 @@ function showAskCard(params) {
         answers.set(qid, inp.value);
         updateAskSubmit(card);
       });
+      // 回车即「答完这题」：多问题时跳到下一题（末题则不动，等提交）
+      inp.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          maybeAutoAdvance();
+        }
+      });
       block.appendChild(inp);
       inputsByQid.set(qid, inp);
     }
-    card.appendChild(block);
+    panels.push(block);
+    body.appendChild(block);
   });
 
   const footer = document.createElement("div");
@@ -4567,6 +4650,26 @@ function showAskCard(params) {
       .call("askAnswer", { toolCallId: params?.toolCallId, answers: answerList })
       .catch(() => { /* 后端自己处理 */ });
   });
+  // 多问题：底部左侧加「上一项 / 下一项」翻页（与顶部标签等价，两条路都能切题）
+  let prevBtn = null;
+  let nextBtn = null;
+  if (multiQuestion) {
+    const nav = document.createElement("div");
+    nav.className = "pi-ask-nav";
+    prevBtn = document.createElement("button");
+    prevBtn.type = "button";
+    prevBtn.className = "pi-ask-btn ghost";
+    prevBtn.textContent = "← 上一项";
+    prevBtn.addEventListener("click", () => setActive(currentIndex - 1));
+    nextBtn = document.createElement("button");
+    nextBtn.type = "button";
+    nextBtn.className = "pi-ask-btn ghost";
+    nextBtn.textContent = "下一项 →";
+    nextBtn.addEventListener("click", () => setActive(currentIndex + 1));
+    nav.appendChild(prevBtn);
+    nav.appendChild(nextBtn);
+    footer.appendChild(nav);
+  }
   footer.appendChild(cancelBtn);
   footer.appendChild(submitBtn);
   card.appendChild(footer);
@@ -4574,13 +4677,58 @@ function showAskCard(params) {
   function updateAskSubmit(elm) {
     const btn = elm.querySelector(".pi-ask-btn.primary");
     if (!btn) return;
-    let ok = false;
-    questions.forEach((q, qi) => {
+    // 每题是否已作答（选项选中、或多选有项、或输入框有非空文本）
+    const done = questions.map((q, qi) => {
       const qid = String(q?.id || q?.question || `q${qi}`);
       const v = answers.get(qid);
-      if (Array.isArray(v) ? v.length : (v && String(v).trim())) ok = true;
+      return Array.isArray(v) ? v.length > 0 : Boolean(v && String(v).trim());
     });
-    btn.disabled = !ok;
+    // 多问题时未作答的题被折叠在别的标签里，容易漏答 → 要求全部答完才能提交；
+    // 单问题维持既有「任一（其实就是这一题）有值即可」。
+    if (btn) btn.disabled = multiQuestion ? !done.every(Boolean) : !done.some(Boolean);
+    // 标签上的「已作答」小标记
+    tabs.forEach((tab, i) => tab.classList.toggle("done", done[i] === true));
+  }
+
+  /**
+   * 切到第 i 题（仅多问题时有意义）：只切面板的 hidden，不动 DOM 结构，
+   * 因此已选项与输入框文本都不会丢。同步标签高亮、计数与横向滚动位置。
+   */
+  function setActive(i) {
+    if (!multiQuestion) return;
+    const n = questions.length;
+    currentIndex = Math.max(0, Math.min(n - 1, Number.isFinite(i) ? i : 0));
+    panels.forEach((p, pi) => { if (p) p.hidden = pi !== currentIndex; });
+    tabs.forEach((t, ti) => t.classList.toggle("selected", ti === currentIndex));
+    if (tabsCount) tabsCount.textContent = `${currentIndex + 1} / ${n}`;
+    // 翻页按钮到边界即禁用（首题无上一项、末题无下一项）
+    if (prevBtn) prevBtn.disabled = currentIndex <= 0;
+    if (nextBtn) nextBtn.disabled = currentIndex >= n - 1;
+    const tab = tabs[currentIndex];
+    if (tab) {
+      try { tab.scrollIntoView({ inline: "nearest", block: "nearest" }); } catch (e) { /* ignore */ }
+    }
+  }
+
+  /**
+   * 自动前进：当前题答完且不是最后一题时，自动切到下一题。
+   * 单选选中即调用；多选/输入框不自动跳（前者要勾多项、后者要打字，都可能不止一下）。
+   */
+  function maybeAutoAdvance() {
+    if (!multiQuestion) return;
+    if (currentIndex >= questions.length - 1) return;
+    setActive(currentIndex + 1);
+  }
+
+  // 键盘左右切换题目：只在焦点不落在输入框/文本域时生效，避免打断打字。
+  if (multiQuestion) {
+    card.addEventListener("keydown", (e) => {
+      const t = e.target;
+      const typing = t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
+      if (typing) return;
+      if (e.key === "ArrowLeft") { e.preventDefault(); setActive(currentIndex - 1); }
+      else if (e.key === "ArrowRight") { e.preventDefault(); setActive(currentIndex + 1); }
+    });
   }
 
   // 把「当前选择」挂到卡片上，供切走归档时读取（避免闭包外拿不到 answers/inputsByQid）
@@ -4589,9 +4737,10 @@ function showAskCard(params) {
     for (const [k, v] of answers.entries()) ans[k] = Array.isArray(v) ? v.slice() : v;
     const texts = {};
     for (const [k, el] of inputsByQid.entries()) texts[k] = el.value;
-    return { toolCallId: params?.toolCallId || "", answers: ans, texts };
+    return { toolCallId: params?.toolCallId || "", answers: ans, texts, currentIndex };
   };
 
+  setActive(currentIndex); // 多问题：回填后停到暂存的那一题
   updateAskSubmit(card); // 回填后同步「提交」可用态（如切回时已选过）
   chatBody.appendChild(card);
   card.scrollIntoView({ block: "nearest", behavior: "smooth" });
@@ -4931,6 +5080,15 @@ async function sendMessage(text) {
         attachEditButton(userNode);
       }
       removeTyping();
+      // 用户主动停止：后端以 aborted:true 收尾（不再抛「发送失败」错误）。
+      // 此时保留已流式输出的部分内容即可，绝不能当成「未返回有效响应」再报一次错
+      // ——停止是用户的正常操作，不该在聊天区留下任何错误横幅。
+      if (result?.aborted) {
+        if (turnAgentNode) turnAgentNode.dataset.sealed = "1";
+        settleTurnWork(undefined, { stopped: true });
+        stopRunningToolRows(chatBody);
+        return;
+      }
       const finalText = result?.content || "";
       if (!finalText) {
         showError("Pi 未返回有效响应");

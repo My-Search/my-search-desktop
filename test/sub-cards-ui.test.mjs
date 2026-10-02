@@ -198,7 +198,7 @@ check("计数显示共 2 条", snap.count === "共 2 条订阅", snap.count);
 check("条块数量为 2", snap.cards.length === 2, JSON.stringify(snap.cards.length));
 check("第一条显示名称 AA", snap.cards[0]?.name === "AA");
 check("第一条显示描述", snap.cards[0]?.describe === "描述A");
-check("第一条显示地址", snap.cards[0]?.url?.includes("a.example.com"));
+check("卡片不再展示地址（url 不进列表 UI）", snap.cards.every((c) => c.url === null), JSON.stringify(snap.cards.map((c) => c.url)));
 check("第二条无描述时不渲染描述行", snap.cards[1]?.describe === null);
 check("条块可拖拽且带手柄", snap.cards.every((c) => c.draggable && c.hasDragHandle));
 check(
@@ -340,6 +340,17 @@ await new Promise((r) => setTimeout(r, 80));
 check("进入源码模式", (await evalJs(`document.querySelector('.page.subscribes').classList.contains('src-mode')`)) === true);
 const taHasSubs = await evalJs(`document.getElementById('all_subscribe').value.includes('b2.example.com')`);
 check("源码文本域同步当前订阅", taHasSubs === true);
+// 源码视图：每条订阅之间应恰好空一行（便于逐条辨认），且不出现连续多个空行
+const srcText = await evalJs(`document.getElementById('all_subscribe').value`);
+const srcBlocks = srcText.split(/\n[ \t]*\n/);
+check(
+  "源码每条订阅之间空一行",
+  !/\n[ \t]*\n[ \t]*\n/.test(srcText) &&
+    !srcText.startsWith("\n") &&
+    srcBlocks.length >= 2 &&
+    srcBlocks.every((blk) => blk.trim().startsWith("<tis::")),
+  JSON.stringify(srcText)
+);
 await evalJs(`
   const ta = document.getElementById('all_subscribe');
   ta.value += '\\n\\n<tis::https://d.example.com/index.ms title="DD" />';
@@ -347,7 +358,7 @@ await evalJs(`
 `);
 await new Promise((r) => setTimeout(r, 80));
 snap = await readCards();
-check("切回条块后源码手工添加的订阅出现", snap.cards.some((c) => c.url?.includes("d.example.com")));
+check("切回条块后源码手工添加的订阅出现", snap.cards.some((c) => c.name === "DD"));
 check("切回后退出源码模式", (await evalJs(`!document.querySelector('.page.subscribes').classList.contains('src-mode')`)) === true);
 
 // ---- 7. 拖拽排序（页面内合成 DragEvent，带真实 DataTransfer） ----
@@ -357,8 +368,8 @@ check("切回后退出源码模式", (await evalJs(`!document.querySelector('.pa
 const orderBefore = (await readCards()).cards.map((c) => c.name);
 await evalJs(`(() => {
   const list = document.querySelector('.sub-list');
-  const src = [...list.querySelectorAll('.sub-item')].find((it) => it.querySelector('.sub-url')?.textContent.includes('d.example.com'));
-  const dst = [...list.querySelectorAll('.sub-item')].find((it) => it.querySelector('.sub-url')?.textContent.includes('b2.example.com'));
+  const src = [...list.querySelectorAll('.sub-item')].find((it) => it.querySelector('.sub-name')?.textContent === 'DD');
+  const dst = [...list.querySelectorAll('.sub-item')].find((it) => it.querySelector('.sub-name')?.textContent === 'BB2');
   const dt = new DataTransfer();
   src.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: dt }));
   dst.dispatchEvent(new DragEvent('dragover', { bubbles: true, dataTransfer: dt }));

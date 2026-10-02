@@ -25,19 +25,6 @@
     return d.innerHTML;
   }
 
-  /**
-   * 官方地址链接的显示文案，按链接形态给用户一个更准确的提示：
-   *   - GitHub 仓库里的**源码目录**（`github.com/<owner>/<repo>/tree/<ref>/...`）→「源码」；
-   *   - GitHub 仓库根（`github.com/<owner>/<repo>`）→「仓库」；
-   *   - 其余（作者主页、项目站点等）→「主页」。
-   * 官方插件（源码在本仓库 plugins/<目录>）会命中第一档，显示为「源码」。
-   */
-  function linkLabel(url) {
-    if (/^https?:\/\/github\.com\/[^/]+\/[^/]+\/(tree|blob)\//i.test(url)) return "源码";
-    if (/^https?:\/\/github\.com\/[^/]+\/[^/]+\/?$/i.test(url)) return "仓库";
-    return "主页";
-  }
-
   /** 外链图标（内联 SVG，随文字色 currentColor，不引外部资源） */
   const LINK_ICON =
     '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" ' +
@@ -176,12 +163,14 @@
         html += '<div class="plugin-changelog-body">' + escapeHtml(changelog) + "</div>";
         html += "</div>";
       }
-      // 官方地址：优先宿主算好的 repoUrl（仓库优先，退回主页），老目录没有该字段时
-      // 退回条目自带的 repository / homepage。放说明下方，每个插件都能点开官方地址。
+      // 首页地址：优先宿主算好的 repoUrl（仓库优先，退回主页），老目录没有该字段时
+      // 退回条目自带的 repository / homepage。放说明下方，每个插件都能点开首页。
+      // 链接文案统一为「首页」——首页就是源码地址，不再按形态区分
+      // 「源码」「仓库」「主页」（同一份地址换个说法只会让用户困惑）。
       const linkUrl = e.repoUrl || e.repository || e.homepage;
       if (linkUrl) {
         html += '<a class="plugin-link" data-link="' + escapeHtml(linkUrl) + '" href="' + escapeHtml(linkUrl) + '" target="_blank" rel="noopener noreferrer" title="在浏览器中打开：' + escapeHtml(linkUrl) + '">';
-        html += LINK_ICON + "<span>" + escapeHtml(linkLabel(linkUrl)) + "</span>";
+        html += LINK_ICON + "<span>首页</span>";
         html += "</a>";
       }
       html += '<div class="plugin-footer">';
@@ -480,7 +469,7 @@
    *
    * 优先走宿主 API（ms.system.openExternal，需 system.openExternal 权限）；
    * 未授权时返回 false，让调用方退回锚点自身的 target=_blank 行为
-   * （hero 仓库入口与卡片上的官方地址链接共用这一段逻辑）。
+   * （hero 首页入口与卡片上的首页链接共用这一段逻辑）。
    */
   async function openExternalUrl(url) {
     const canOpen = typeof ms !== "undefined" && ms.system && ms.system.openExternal;
@@ -499,7 +488,7 @@
     return true;
   }
 
-  // 仓库入口：点 GitHub 图标 → 系统浏览器打开市场仓库。
+  // 首页入口：点 GitHub 图标 → 系统浏览器打开插件市场首页。
   // 优先走宿主 API；未授权时退回锚点自身的 target=_blank 行为，保证始终能打开。
   const $repo = document.getElementById("market-repo-link");
   if ($repo) {
@@ -509,7 +498,7 @@
     });
   }
 
-  // 卡片上的「官方地址」链接：同样委托到列表容器（卡片 innerHTML 反复重建）。
+  // 卡片上的「首页」链接：同样委托到列表容器（卡片 innerHTML 反复重建）。
   // 由 openExternalUrl 决定是否 preventDefault（宿主不可用时交给原生跳转）。
   $list.addEventListener("click", async function (ev) {
     const link = ev.target.closest && ev.target.closest("[data-link]");

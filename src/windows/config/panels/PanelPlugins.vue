@@ -36,7 +36,7 @@ import { findPlugin, loadRegistry } from "../../../lib/plugins/registry";
 
 const props = defineProps<{
   notify: (text: string, type?: "ok" | "error") => void;
-  confirm: (text: string) => Promise<boolean>;
+  confirm: (text: string, opts?: { okText?: string; cancelText?: string }) => Promise<boolean>;
   /** 双击 .mspp 外部打开的待安装路径（App.vue 切到本面板后传入） */
   pendingPluginPath?: string | null;
   /** 本面板消费完待安装路径后回调（App.vue 据此置空，避免重复触发） */
@@ -55,15 +55,13 @@ function isBuiltin(id: string): boolean {
   return builtinEntries.value.some((e) => e.id === id);
 }
 /**
- * 「官方地址」行的标签文案，按链接形态区分：
- *   - GitHub 仓库里的**源码目录**（…/tree/<ref>/…）→「源码」（官方插件指本仓库 plugins/<目录>）；
- *   - GitHub 仓库根 →「仓库」；
- *   - 其余（作者主页、项目站点等）→「主页」。
+ * 取插件的「首页」地址：repository（官方仓库/源码目录）优先，缺失时退回 homepage。
+ *
+ * 两者合并成一条链接展示——它们本来就是同一个插件的首页地址，分成「源码」「仓库」
+ * 「主页」多行只会让用户困惑；统一叫「首页」。（市场卡片同口径。）
  */
-function repoLabel(url: string): string {
-  if (/^https?:\/\/github\.com\/[^/]+\/[^/]+\/(tree|blob)\//i.test(url)) return "源码";
-  if (/^https?:\/\/github\.com\/[^/]+\/[^/]+\/?$/i.test(url)) return "仓库";
-  return "主页";
+function homepageOf(record: { repository?: string; homepage?: string }): string | undefined {
+  return record.repository || record.homepage || undefined;
 }
 /** 取内置插件条目（可能为空=非内置/未读取） */
 function builtinOf(id: string) {
@@ -108,6 +106,10 @@ async function restoreBuiltin(id: string): Promise<void> {
       grants: allPerms,
     });
     await refreshBuiltins();
+    // 卸载时忘掉了该插件的图标缓存；恢复后必须重新预读，否则 logo 不回来，
+    // 只显示 🧩 占位图。
+    forgetIconCache(prepared.manifest.id);
+    await preloadIcons();
     props.notify(`已恢复内置插件「${prepared.manifest.name}」`, "ok");
   } catch (e) {
     props.notify(`恢复失败: ${String((e as Error)?.message ?? e)}`, "error");
@@ -185,6 +187,19 @@ function onIconError(rec: any): void {
   iconFailed.value[rec.id] = true;
 }
 
+/**
+ * 忘掉某插件的图标缓存与失败标记。
+ *
+ * 卸载时调用：不这么做的话，重装 / 从「已丢弃」恢复后 `iconOf` 会命中残留的
+ * 「加载失败」标记或缺失的缓存键，插件明明有 logo 却仍显示 🧩 占位图。
+ */
+function forgetIconCache(id: string): void {
+  for (const k of Object.keys(iconMap.value)) {
+    if (k.startsWith(`${id}/`)) delete iconMap.value[k];
+  }
+  delete iconFailed.value[id];
+}
+
 /** 预读全部插件的相对路径图标（失败只记日志，不影响面板可用） */
 async function preloadIcons(): Promise<void> {
   for (const rec of plugins.value) {
@@ -216,6 +231,8 @@ function toggleExpand(id: string): void {
  *
  * 共同规则（与 autostart 既有设计一致）：
  *   - 清单里写的只是**建议**，面板显示「插件建议：…」；
+ *   - 「开机自启」的缺省建议值是**开机自启**（作者未声明 autostart 时安装后即常驻），
+ *     作者显式声明 on-demand / prompt / never 则按声明走；
  *   - 用户改过之后以用户值为准，插件升级（upsertPlugin）不会覆盖；
  *   - 「恢复默认」把值写回插件建议值。
  */
@@ -455,15 +472,13 @@ async function uninstallPlugin(rec: any): Promise<void> {
   if (uninstallingId.value) return;
   if (isBuiltin(rec.id)) {
     if (!(await props.confirm(uninstallConfirmText(rec, `「${rec.name}」是内置插件，卸载后将不再随版本升级自动安装。确定卸载？`)))) return;
-    const deleteData = await props.confirm("是否同时删除插件保存的数据？");
+    const deleteData = await props.confirm("是否同时删除插件保存的数据？", { cancelText: "保留" });
     uninstallingId.value = rec.id;
     try {
       await rt.uninstall(rec.id, deleteData);
       await builtinMarkRemoved(rec.id);
       await refreshBuiltins();
-      for (const k of Object.keys(iconMap.value)) {
-        if (k.startsWith(`${rec.id}/`)) delete iconMap.value[k];
-      }
+      forgetIconCache(rec.id);
       props.notify(`已卸载内置插件 ${rec.name}（升级不再自动安装）`, "ok");
     } catch (e) {
       props.notify(`卸载失败: ${String((e as Error)?.message ?? e)}`, "error");
@@ -473,14 +488,12 @@ async function uninstallPlugin(rec: any): Promise<void> {
     return;
   }
   if (!(await props.confirm(uninstallConfirmText(rec, `确定卸载「${rec.name}」v${rec.version}？`)))) return;
-  const deleteData = await props.confirm("是否同时删除插件保存的数据？");
+  const deleteData = await props.confirm("是否同时删除插件保存的数据？", { cancelText: "保留" });
   uninstallingId.value = rec.id;
   try {
     await rt.uninstall(rec.id, deleteData);
     // 清掉图标缓存里的残留键（重新安装时会再读一次）
-    for (const k of Object.keys(iconMap.value)) {
-      if (k.startsWith(`${rec.id}/`)) delete iconMap.value[k];
-    }
+    forgetIconCache(rec.id);
     props.notify(`已卸载 ${rec.name}`, "ok");
   } catch (e) {
     props.notify(`卸载失败: ${String((e as Error)?.message ?? e)}`, "error");
@@ -570,6 +583,9 @@ async function onInstallConfirm(): Promise<void> {
     const cmp = prevRec ? compareVersion(mf.version, prevRec.version) : null;
     const verb = cmp === null ? "已安装" : cmp === 0 ? "已重新安装" : "已升级";
     props.notify(`${verb}「${mf.name}」v${mf.version}`, "ok");
+    // 覆盖安装（升级 / 重装）可能换了 logo：先忘掉旧缓存与「加载失败」标记再预读，
+    // 否则改过图标的插件会一直显示旧图或占位图。
+    forgetIconCache(mf.id);
     await preloadIcons();
   } catch (e) {
     props.notify(`安装失败: ${String((e as Error)?.message ?? e)}`, "error");
@@ -611,6 +627,7 @@ async function installDevDir(): Promise<void> {
     const manifestText: string = await readDevManifest(dir);
     const record = await rt.installDevDir(manifestText, dir);
     props.notify(`已挂载「${record.name}」v${record.version}（开发模式）`, "ok");
+    forgetIconCache(record.id);
     await preloadIcons();
   } catch (e) {
     props.notify(`挂载失败: ${String((e as Error)?.message ?? e)}`, "error");
@@ -855,8 +872,7 @@ function durFrom(ts: number | null): string {
             <span>{{ record.enabled ? '已启用' : '已禁用' }}</span>
           </div>
           <div class="plugin-info-row"><span class="plugin-info-label">ID</span><code>{{ record.id }}</code></div>
-          <div class="plugin-info-row" v-if="record.repository"><span class="plugin-info-label">{{ repoLabel(record.repository) }}</span><a :href="record.repository" target="_blank">{{ record.repository }}</a></div>
-          <div class="plugin-info-row" v-if="record.homepage && record.homepage !== record.repository"><span class="plugin-info-label">主页</span><a :href="record.homepage" target="_blank">{{ record.homepage }}</a></div>
+          <div class="plugin-info-row" v-if="homepageOf(record)"><span class="plugin-info-label">首页</span><a :href="homepageOf(record)" target="_blank">{{ homepageOf(record) }}</a></div>
 
           <!-- 关闭界面时的行为（插件可声明建议，用户可改）
                有界面 → 决定界面是否保活；有后台进程 → 决定进程是否停止。

@@ -381,7 +381,7 @@ function buildEntry({ manifest, bytes, digest, downloadUrl, iconUrl, categories,
   };
   if (manifest.minAppVersion) entry.minAppVersion = manifest.minAppVersion;
   if (manifest.homepage) entry.homepage = manifest.homepage;
-  // 官方地址：优先显式传入（三方 = 源码仓地址），否则取清单声明的 repository。
+  // 首页地址：优先显式传入（三方 = 源码仓地址），否则取清单声明的 repository。
   // 客户端 `pluginRepoUrl` 还会在两者都缺时从 downloadUrl 反解，这里能写就写。
   const repoUrl = repository || manifest.repository;
   if (repoUrl) entry.repository = repoUrl;
@@ -588,7 +588,7 @@ async function resolveThreeParty(src) {
         digest: sha256(bytes),
         downloadUrl,
         iconUrl,
-        // 三方插件「一个仓库一个插件」：源码仓就是官方地址，显式写进索引，
+        // 三方插件「一个仓库一个插件」：源码仓就是首页地址，显式写进索引，
         // 不依赖客户端从 downloadUrl 反解（反解只是兼容旧目录的兜底）。
         repository: `https://github.com/${repo}`,
         official: false,

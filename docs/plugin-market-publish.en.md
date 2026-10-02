@@ -55,7 +55,7 @@ my-plugin/
   "author": "Your Name",             // required
   "description": "One-line summary", // required
   "homepage": "https://github.com/you/my-plugin",  // optional: homepage (clickable in the market)
-  "repository": "https://github.com/you/my-plugin", // optional: repo, preferred as the "official link"
+  "repository": "https://github.com/you/my-plugin", // optional: repo, preferred as the "Homepage" link
   "changelog": "Added: export to Markdown\nFixed: slow scan on large folders", // optional: THIS version's release notes
   "icon": "icon.svg",                // relative path / data: URI / http(s) URL
   "permissions": ["ui.inlay"],       // required: declare needed permissions
@@ -76,15 +76,15 @@ my-plugin/
 }
 ```
 
-**About the "official link" and "release notes"**:
+**About the "Homepage" link and "release notes"**:
 
 - `repository` (optional): your plugin's repository. The market card shows a **clickable
-  official link** below the description (opens in the system browser). If both `repository`
-  and `homepage` are set, `repository` wins; `homepage` is still shown separately as
-  "Homepage" in the settings panel. If neither is set, the client derives the repo from your
-  download URL (`github.com/<owner>/<repo>/releases/download/...`); third-party plugins
-  (one repo per plugin) also get it automatically — so the link works either way, but
-  declaring it is more precise.
+  Homepage** link below the description (opens in the system browser). If both `repository`
+  and `homepage` are set, `repository` wins; only that one is shown (the settings panel
+  likewise shows a single "Homepage" row). If neither is set, the client derives the repo
+  from your download URL (`github.com/<owner>/<repo>/releases/download/...`); third-party
+  plugins (one repo per plugin) also get it automatically — so the link works either way,
+  but declaring it is more precise.
 - `changelog` (optional): **this version's** release notes. When a user has your plugin
   installed and a newer version is available, the market card shows this text below the
   description so they can see what changed. Write just this version's changes (not a
@@ -93,8 +93,9 @@ my-plugin/
 
 > Official plugins (source lives in this repo under `plugins/<dir>/`) point `repository`
 > at the **source directory**, e.g.
-> `https://github.com/My-Search/my-search-desktop/tree/master/plugins/<dir>`; such links are
-> labelled **"Source"** in the UI (repo root → "Repo", anything else → "Homepage").
+> `https://github.com/My-Search/my-search-desktop/tree/master/plugins/<dir>`; the card's
+> **Homepage** link points straight at it — the homepage *is* the source address, so the
+> label no longer varies by URL shape.
 
 **id rules** (the most common pitfall):
 

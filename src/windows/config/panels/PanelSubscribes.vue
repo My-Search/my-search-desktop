@@ -461,7 +461,6 @@ function onDrop(e: DragEvent, row: SubscribeRow): void {
               <span v-if="row.describe" class="sub-describe" :title="row.describe">{{
                 row.describe
               }}</span>
-              <span class="sub-url" :title="row.url">{{ row.url }}</span>
             </div>
             <div class="sub-ops">
               <button class="sub-op" data-act="open" title="打开订阅地址" @click="openRow(row.url)">

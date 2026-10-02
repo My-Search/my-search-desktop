@@ -179,11 +179,19 @@ const withBackend = (backend = {}, view = {}) => ({
       false,
     "开机自启不改变「界面卸载」这个承诺"
   );
-  // 与进程判定互补（同一开关的两种取值）
-  const exitRec = mk(parse(withBackend({ closeBehavior: "exit" })).manifest);
+  // 与进程判定互补（同一开关的两种取值）。
+  // 显式声明 on-demand：`exit` 才有「关闭即停进程」的效果——未声明 autostart
+  // 时缺省为 always（常驻），会覆盖 exit 的停止语义，故此处不能省。
+  const exitRec = mk(parse(withBackend({ autostart: "on-demand", closeBehavior: "exit" })).manifest);
   ok(
     shouldStopBackendOnClose(exitRec) === true && shouldKeepFrontendOnClose(exitRec) === false,
     "exit：停进程 + 卸载界面（互补）"
+  );
+  // 未声明 autostart → 缺省 always：即使 closeBehavior=exit，进程也常驻（开机自启优先）
+  const defaultExitRec = mk(parse(withBackend({ closeBehavior: "exit" })).manifest);
+  ok(
+    shouldStopBackendOnClose(defaultExitRec) === false && shouldKeepFrontendOnClose(defaultExitRec) === false,
+    "未声明 autostart（缺省 always）+ exit：进程常驻，界面仍卸载"
   );
   const minRec = mk(parse(withBackend({ closeBehavior: "minimize" })).manifest);
   ok(

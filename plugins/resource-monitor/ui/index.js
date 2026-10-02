@@ -661,10 +661,27 @@
     ms.ui.confirm(warn).then(function (ok) {
       if (!ok) return;
       return ms.backend.call("killProcess", { name: name, force: true }).then(function (r) {
-        var msg = "已结束 " + (r && r.killed != null ? r.killed : 0) + "/" + (r && r.matched != null ? r.matched : "?") + " 个进程";
-        if (r && r.skipped && r.skipped.length) msg += "；跳过 " + r.skipped.length + " 个（" + r.skipped[0].reason + "）";
-        if (r && r.failed && r.failed.length) msg += "；失败 " + r.failed.length + " 个";
-        ms.ui.toast(msg);
+        var matched = (r && r.matched != null) ? r.matched : 0;
+        var killed = (r && r.killed != null) ? r.killed : 0;
+        var skipped = (r && r.skipped) || [];
+        var failed = (r && r.failed) || [];
+
+        // 一个都没匹配到：多半是它已经退出了，不必显示 "0/0"
+        if (matched === 0) {
+          ms.ui.toast("「" + name + "」当前没有正在运行的进程");
+          return;
+        }
+
+        // 一个没杀成、也没跳过 → 用错误样式，别用「成功」口吻误导
+        if (killed === 0 && failed.length > 0 && skipped.length === 0) {
+          ms.ui.toast("结束「" + name + "」失败：" + failed[0].error, "error");
+          return;
+        }
+
+        var msg = "已结束 " + killed + "/" + matched + " 个进程";
+        if (skipped.length) msg += "；跳过 " + skipped.length + " 个（" + skipped[0].reason + "）";
+        if (failed.length) msg += "；失败 " + failed.length + " 个（" + failed[0].error + "）";
+        ms.ui.toast(msg, failed.length ? "error" : "ok");
       });
     }).catch(function (e) {
       ms.ui.toast("终止失败：" + (e && e.message ? e.message : e), "error");

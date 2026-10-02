@@ -53,8 +53,8 @@ my-plugin/
   "minAppVersion": "7.9.15",         // 可选：低于此版本的应用会隐藏本插件
   "author": "你的名字",               // 必需
   "description": "一句话说明",        // 必需
-  "homepage": "https://github.com/you/my-plugin",  // 可选：主页（市场卡片展示为可点链接）
-  "repository": "https://github.com/you/my-plugin", // 可选：插件仓库（优先于 homepage 展示为「官方地址」）
+  "homepage": "https://github.com/you/my-plugin",  // 可选：首页（市场卡片展示为可点链接）
+  "repository": "https://github.com/you/my-plugin", // 可选：插件仓库（优先于 homepage 展示为「首页」）
   "changelog": "新增：导出为 Markdown\n修复：大目录扫描卡顿", // 可选：**本版本**的更新日志（多行文本）
   "icon": "icon.svg",                // 相对路径 / data: URI / http(s) 直链
   "permissions": ["ui.inlay"],       // 必需：声明所需权限
@@ -75,13 +75,13 @@ my-plugin/
 }
 ```
 
-**关于「官方地址」与「更新日志」**：
+**关于「首页」与「更新日志」**：
 
-- `repository`（可选）：插件仓库地址。市场卡片会在说明下方展示一个**可点击的官方地址**
-  链接（点开用系统浏览器）。若同时写了 `homepage`，优先展示 `repository`，`homepage`
-  作为「主页」在设置面板另行展示。两者都不写时，客户端会从你的下载地址
-  （`github.com/<owner>/<repo>/releases/download/...`）自动反解出仓库地址；三方插件
-  （一个仓库一个插件）也会自动带上仓库地址——所以填不填都不影响能点开，填了更精确。
+- `repository`（可选）：插件仓库地址。市场卡片会在说明下方展示一个**可点击的首页**
+  链接（点开用系统浏览器）。若同时写了 `homepage`，优先展示 `repository`；两者都写
+  时只展示 `repository`（设置面板同样只展示一条「首页」）。两者都不写时，客户端会从
+  你的下载地址（`github.com/<owner>/<repo>/releases/download/...`）自动反解出仓库地址；
+  三方插件（一个仓库一个插件）也会自动带上仓库地址——所以填不填都不影响能点开，填了更精确。
 - `changelog`（可选）：**本版本**的更新日志。用户在插件市场里发现已安装插件有新版时，
   会在卡片说明下方看到这段文字，了解这一版改了什么。请写「本版本」相对上一版的变更
   （不要写累计日志）；支持多行（用 `\n` 换行），列表里最多展示 8 行，超出部分省略。
@@ -89,7 +89,7 @@ my-plugin/
 
 > 官方插件（源码放在本仓库 `plugins/<目录>/`）的 `repository` 直接指向**源码目录**，
 > 形如 `https://github.com/My-Search/my-search-desktop/tree/master/plugins/<目录>`；
-> 这类地址在界面上的标签会显示为**「源码」**（指向仓库根显示「仓库」，其余显示「主页」）。
+> 卡片上的**首页**链接就指向它——首页即源码地址，不再按地址形态区分文案。
 
 **id 命名规范**（最容易踩坑）：
 

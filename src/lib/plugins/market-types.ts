@@ -60,7 +60,8 @@ export interface MarketPluginEntry {
   /**
    * 插件官方仓库地址（如 `https://github.com/you/my-plugin`）。
    *
-   * 优先于 homepage 展示为「官方地址」链接：homepage 往往是作者主页而非仓库。
+   * 与 homepage 一起构成插件的**首页**地址（UI 统一显示为「首页」）：优先取它，
+   * 缺失时退回 homepage（homepage 往往是作者主页而非仓库）。
    * 由构建脚本从清单写入；缺失时由 `pluginRepoUrl` 从 downloadUrl 反解。
    */
   repository?: string;
@@ -236,7 +237,7 @@ export function isAllowedDownloadUrl(v: unknown): boolean {
 }
 
 /* ============================================================
- * 官方地址（仓库 / 主页）
+ * 首页地址（repository / homepage）
  * ============================================================ */
 
 /** http(s) 地址原样返回，否则 undefined（用于过滤脏字段，不抛错） */
@@ -246,9 +247,10 @@ function webUrlOrUndefined(v: unknown): string | undefined {
 }
 
 /**
- * 取插件的「官方地址」（用于市场卡片与设置面板的可点击链接）。
+ * 取插件的「首页」地址（用于市场卡片与设置面板的可点击链接）。
  *
- * 回退顺序（前一个为空/非法就看下一个）：
+ * 首页就是插件的官网/源码地址，UI 统一显示为「首页」（不再按形态区分
+ * 「源码 / 仓库 / 主页」）。回退顺序（前一个为空/非法就看下一个）：
  *   1. `repository` —— 清单里最准确的插件仓库地址；
  *   2. 从 `downloadUrl` 反解 —— GitHub Release 资产地址里含着 `owner/repo`
  *      （`https://github.com/<owner>/<repo>/releases/download/...` → 仓库页），

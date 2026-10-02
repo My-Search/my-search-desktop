@@ -229,7 +229,7 @@ const catalogOf = (plugins, over = {}) => ({
 }
 {
   // repository / changelog：可选字段，解析后必须原样保留（市场 UI 据此展示
-  // 「官方地址」链接与「新版本更新日志」）。
+  // 「首页」链接与「新版本更新日志」）。
   const r = parseCatalog(
     catalogOf([
       entryOf({ repository: "https://github.com/you/my-plugin", changelog: "修复：A\n新增：B" }),

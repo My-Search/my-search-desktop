@@ -2485,12 +2485,76 @@ body.pi-sidebar-resizing * {
   font-weight: 700;
 }
 
-.pi-agent-container .pi-ask-q {
-  padding: 12px 14px;
-  border-top: 1px solid var(--border-color);
+/* 多问题的标签条：一排可点标签 + 右侧 N / M 计数（单问题时不生成此节点） */
+.pi-agent-container .pi-ask-tabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-color);
+  overflow-x: auto;
+  scrollbar-width: none; /* Firefox：隐藏横向滚动条 */
 }
 
-.pi-agent-container .pi-ask-q:first-of-type { border-top: none; }
+.pi-agent-container .pi-ask-tabs::-webkit-scrollbar { display: none; }
+
+.pi-agent-container .pi-ask-tab {
+  flex: 0 0 auto;
+  max-width: 180px;
+  padding: 4px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  background: var(--bg-main);
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s, color 0.12s;
+}
+
+.pi-agent-container .pi-ask-tab:hover {
+  background: var(--bg-hover);
+  border-color: var(--text-muted);
+}
+
+.pi-agent-container .pi-ask-tab.selected {
+  border-color: var(--accent-blue);
+  background: rgba(59, 130, 246, 0.12);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+/* 已作答的题：标签内右侧点一个小圆点，方便一眼看出还剩哪题没答 */
+.pi-agent-container .pi-ask-tab.done::after {
+  content: "";
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: var(--accent-green);
+  vertical-align: middle;
+}
+
+.pi-agent-container .pi-ask-tabs-count {
+  position: sticky;
+  right: 0;
+  margin-left: auto;
+  padding-left: 8px;
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
+/* 面板容器：同时只显示一题（切题靠 hidden，不重建 DOM） */
+.pi-agent-container .pi-ask-q[hidden] { display: none; }
+
+.pi-agent-container .pi-ask-q {
+  padding: 12px 14px;
+}
 
 .pi-agent-container .pi-ask-q-title {
   font-size: 13.5px;
@@ -2602,6 +2666,19 @@ body.pi-sidebar-resizing * {
 }
 
 .pi-agent-container .pi-ask-btn.ghost:hover { background: var(--bg-hover); }
+
+/* 多问题的「上一项 / 下一项」翻页：靠左，与右侧的取消/提交分开 */
+.pi-agent-container .pi-ask-nav {
+  display: flex;
+  gap: 8px;
+  margin-right: auto;
+}
+
+.pi-agent-container .pi-ask-nav .pi-ask-btn.ghost:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  background: transparent;
+}
 
 /* 通用扩展弹框 */
 .pi-extui-overlay {

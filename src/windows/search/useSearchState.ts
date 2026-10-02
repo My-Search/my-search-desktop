@@ -335,7 +335,7 @@ export function useSearchState() {
         engine.onProgress = (count) => {
           // 关键：加载中即使搜索框被清空（呼出复位），也要继续显示进度
           if (state.loading) showLoadProgress(count);
-          if (currentInputValue() && currentInputValue().trim()) {
+          if (state.mode !== MODE.SHOW_ITEM_DETAIL && currentInputValue() && currentInputValue().trim()) {
             void doSearch(currentInputValue());
           }
         };
@@ -360,9 +360,11 @@ export function useSearchState() {
       // 非静默模式才更新界面占位提示
       updatePlaceholder();
     }
-    // 若已有输入，重新搜索一次（还原原版数据更新后的 triggerSearchHandle）
+    // 若已有输入，重新搜索一次（还原原版数据更新后的 triggerSearchHandle）。
+    // 但**详情视图打开时不重搜**：doSearch 会把 mode 设回 SHOW_RESULT，破坏
+    // 「隐藏前是详情视图 → 呼出原样还原 / Esc 返回」的契约（同 attachPluginItems）。
     const value = currentInputValue();
-    if (value && value.trim()) void doSearch(value);
+    if (state.mode !== MODE.SHOW_ITEM_DETAIL && value && value.trim()) void doSearch(value);
 
     // 每次数据加载完成后调度后台缓存自动刷新（仅非静默模式，
     // 静默模式自身在 finally 中调度，避免重复）

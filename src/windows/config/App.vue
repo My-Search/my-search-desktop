@@ -289,7 +289,7 @@ const commonProps = computed(() => ({
   tisHub,
   installed,
   notify: toast.showToast,
-  confirm: (text: string) => message.confirmMessage(text),
+  confirm: (text: string, opts?: { okText?: string; cancelText?: string }) => message.confirmMessage(text, opts),
   alert: (text: string) => message.alertMessage(text),
   /** 订阅市场返回订阅总览 */
   goSubscribes: () => switchPane("subscribes"),
@@ -370,12 +370,6 @@ const commonProps = computed(() => ({
           </svg>
           <span>数据缓存</span>
         </button>
-        <button class="nav-item" :class="{ on: navPane === 'shortcut' }" data-pane="shortcut" @click="switchPane('shortcut')">
-          <svg viewBox="0 0 20 20" fill="currentColor" width="17" height="17">
-            <path d="M2 5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5zm3 2v2h2V7H5zm4 0v2h2V7H9zm4 0v2h2V7h-2zM5 11v2h8v-2H5z" />
-          </svg>
-          <span>快捷键</span>
-        </button>
         <button class="nav-item" :class="{ on: navPane === 'plugins' }" data-pane="plugins" @click="switchPane('plugins')">
           <svg viewBox="0 0 24 24" fill="currentColor" width="17" height="17">
             <path d="M4 11a9 9 0 0 1 9 9H4v-9zm0 11h18v2H4v-2zm0-4h12v2H4v-2zm0-4h6v2H4v-2z"/>
@@ -391,6 +385,12 @@ const commonProps = computed(() => ({
             <path d="M10.2 12.2h3.8" />
           </svg>
           <span>环境变量</span>
+        </button>
+        <button class="nav-item" :class="{ on: navPane === 'shortcut' }" data-pane="shortcut" @click="switchPane('shortcut')">
+          <svg viewBox="0 0 20 20" fill="currentColor" width="17" height="17">
+            <path d="M2 5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5zm3 2v2h2V7H5zm4 0v2h2V7H9zm4 0v2h2V7h-2zM5 11v2h8v-2H5z" />
+          </svg>
+          <span>快捷键</span>
         </button>
         <button class="nav-item" :class="{ on: navPane === 'general' }" data-pane="general" @click="switchPane('general')">
           <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" width="17" height="17">

@@ -25,16 +25,37 @@ export const DEFAULT_UNFOLLOW = ["成人内容", "Adults only"];
 export const TISHUB_LOGO = "https://cdn.jsdelivr.net/gh/My-Search/TisHub/favicon.ico";
 export const TISHUB_REPO = "https://github.com/My-Search/TisHub";
 
+/**
+ * 规范化订阅原文：每条 tis 之间恰好空一行。
+ *
+ * 内置默认订阅（Rust `get_default_subscribe_text`）用单个 `\n` 分隔多条，
+ * 旧数据也可能残留连续空行；直接显示到「源码」视图里就会挤在一起或忽宽忽窄。
+ * 这里统一成「非空行之间夹一个空行」，既让源码视图每条一眼可分，
+ * 也与保存时 editSubscribe 产出的 `\n\n` 分隔格式一致。
+ */
+export function normalizeSubscribeText(text: string): string {
+  return String(text ?? "")
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .reduce<string[]>((acc, line) => {
+      if (line.trim() === "") return acc;
+      if (acc.length > 0) acc.push("");
+      acc.push(line);
+      return acc;
+    }, [])
+    .join("\n");
+}
+
 /** 读取订阅原文（兼容旧版结构化数组） */
 export function getSubscribe(): string {
   const saved = storageGet<string | SubscribeItem[] | null>(SUBSCRIBES_KEY, null);
   // 兼容旧版结构化数组
   if (Array.isArray(saved)) {
-    const text = subscribeItemsToText(saved);
+    const text = normalizeSubscribeText(subscribeItemsToText(saved));
     storageSet(SUBSCRIBES_KEY, text);
     return text;
   }
-  if (typeof saved === "string" && saved.trim() !== "") return saved;
+  if (typeof saved === "string" && saved.trim() !== "") return normalizeSubscribeText(saved);
   return "";
 }
 

@@ -279,14 +279,22 @@ async function handleRequest(id, method, params) {
     /**
      * 终止进程（界面「终止」按钮）。
      * 名称对应程序名下**所有**进程实例；返回每个实例的处置结果。
-     * 终止自身后台进程会被拒绝（会切断采样）。
+     * 插件后台进程与长驻采样 PowerShell 都属于「监控自身」，一律跳过：
+     * 前者被终止会切断整个后台，后者被终止会让采样中断（尤其目标名就是 powershell.exe 时）。
      */
     case "killProcess": {
       const name = String(params?.name ?? "").trim();
       if (!name) throw new Error("缺少程序名");
       const force = params?.force === true;
-      const result = await killProcess(name, { force, selfPid: process.pid });
-      sendLog("info", `终止 ${name}: ${result.killed}/${result.matched} 个进程成功`);
+      const protectedPids = [process.pid];
+      if (sampler && sampler.pid != null) protectedPids.push(sampler.pid);
+      const result = await killProcess(name, { force, protectedPids });
+      sendLog(
+        "info",
+        `终止 ${name}: ${result.killed}/${result.matched} 个进程成功` +
+          (result.skipped.length ? `，跳过 ${result.skipped.length} 个` : "") +
+          (result.failed.length ? `，失败 ${result.failed.length} 个` : "")
+      );
       sendResult(id, result);
       return;
     }

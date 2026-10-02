@@ -1,7 +1,7 @@
 {
   "id": "com.zhuangjie.resource-monitor",
   "name": "资源监控",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "apiVersion": 1,
   "minAppVersion": "7.9.15",
   "author": "zhuangjie",

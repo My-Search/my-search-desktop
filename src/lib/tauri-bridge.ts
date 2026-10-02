@@ -737,6 +737,37 @@ export async function getDefaultWindowWidth(): Promise<number> {
 }
 
 /**
+ * 登记 / 清除「插件视图自定义窗口尺寸」到 Rust（逻辑像素；传 null 清除）。
+ *
+ * ## 为什么需要它（消除呼出时「窗口先放大、内容再放大」）
+ *
+ * 隐藏时 Rust 会把窗口物理收回到 48px。旧实现再呼出时是「先显示成 48px/分档宽，
+ * 前端再发一次 90ms 尺寸动画补回记忆尺寸」——窗口（原生 set_size）先长满，内容
+ * （`height:100%` 的 WebView 视口）滞后到最后一帧才跟上，用户看到两次放大。
+ *
+ * 现在前端在**进入插件视图 / 拖拽结束**时把尺寸登记到 Rust，`show_main_window`
+ * 会在 `show()` **之前**按该尺寸建好窗口并完全居中。呼出时窗口已是最终尺寸，
+ * 前端不再产生任何 resize，不存在两条时间线。
+ *
+ * 退出插件视图（切走 / 关闭 / 双击还原 / 复位）时必须传 null 清除，否则下次
+ * 呼出（哪怕不在插件页）会以插件尺寸建窗。
+ */
+export async function setMainWindowViewSize(
+  size: { width: number; height: number } | null
+): Promise<void> {
+  if (!isTauri) return;
+  const width = size && Number.isFinite(size.width) && size.width > 0 ? size.width : null;
+  const height = size && Number.isFinite(size.height) && size.height > 0 ? size.height : null;
+  try {
+    await invoke("set_main_window_view_size", { width, height });
+  } catch (e) {
+    // 命令缺失（旧版本 Rust）/ 调用失败：只影响呼出观感，退回「动画补尺寸」路径，
+    // 不阻断插件视图本身
+    console.warn("登记插件视图窗口尺寸失败:", e);
+  }
+}
+
+/**
  * 把窗口移动到指定逻辑坐标（左上角）。用于插件视图的自定义尺寸居中。
  * 使用已授权的 `core:window:allow-set-position`。
  */

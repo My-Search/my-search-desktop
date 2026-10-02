@@ -12,12 +12,14 @@
  */
 import {
   DEFAULT_CLOSE_BEHAVIOR,
+  DEFAULT_PLUGIN_AUTOSTART,
   parsePluginManifest,
   describeManifestErrors,
 } from "../src/lib/plugins/manifest.ts";
 import {
   behaviorSuggestionOf,
   createPluginRecord,
+  defaultAutoStartFrom,
   defaultCloseBehaviorFrom,
   loadRegistry,
   resolveAutoStartOnUpgrade,
@@ -56,6 +58,24 @@ const parse = (raw) => parsePluginManifest(raw, () => true);
   ok(r.ok === true, "不写 closeBehavior 的清单合法");
   ok(r.ok && r.manifest.backend.closeBehavior === "minimize", "缺省落默认值 minimize", r.ok ? r.manifest.backend.closeBehavior : "-");
   ok(DEFAULT_CLOSE_BEHAVIOR === "minimize", "默认常量就是 minimize（老插件行为不变）");
+  // 后台自启：作者未声明时缺省为 always（安装后默认开机自启）
+  ok(
+    r.ok && r.manifest.backend.autostart === "always",
+    "未声明 autostart → 缺省物化为 always（安装后默认开机自启）",
+    r.ok ? r.manifest.backend.autostart : "-"
+  );
+  ok(DEFAULT_PLUGIN_AUTOSTART === "always", "默认常量就是 always");
+}
+{
+  // 显式声明 on-demand / prompt / never 一律保留（只有缺省才落 always）
+  for (const v of ["always", "on-demand", "prompt", "never"]) {
+    const r = parse(manifestOf({ autostart: v }));
+    ok(r.ok && r.manifest.backend.autostart === v, `显式声明 autostart=${v} 被保留`, r.ok ? r.manifest.backend.autostart : "-");
+  }
+}
+{
+  const r = parse(manifestOf({ autostart: "bogus" }));
+  ok(r.ok === false, "非法 autostart 被拒绝", JSON.stringify(r.ok ? r.manifest.backend.autostart : r.errors));
 }
 {
   const r = parse(manifestOf({ closeBehavior: "exit" }));
@@ -109,6 +129,13 @@ ok(defaultCloseBehaviorFrom(null) === "minimize", "null → minimize");
 ok(defaultCloseBehaviorFrom("exit") === "exit", "exit → exit");
 ok(defaultCloseBehaviorFrom("minimize") === "minimize", "minimize → minimize");
 ok(defaultCloseBehaviorFrom("bogus") === "minimize", "非法值兜底 minimize（防御手改注册表）");
+// 自启策略：显式声明原样尊重；缺省/非法落 always
+ok(defaultAutoStartFrom("always") === "always", "always → always");
+ok(defaultAutoStartFrom("on-demand") === "on-demand", "显式 on-demand → on-demand（尊重作者）");
+ok(defaultAutoStartFrom("never") === "never", "never → never（尊重作者）");
+ok(defaultAutoStartFrom("prompt") === "on-demand", "prompt → on-demand（由用户决定，保守不常驻）");
+ok(defaultAutoStartFrom(undefined) === "always", "缺省 → always（安装后默认开机自启）");
+ok(defaultAutoStartFrom("bogus") === "always", "非法值兜底 always（防御手改注册表）");
 
 /* ============ 4. 插件建议 ============ */
 {
@@ -125,7 +152,13 @@ ok(defaultCloseBehaviorFrom("bogus") === "minimize", "非法值兜底 minimize�
 {
   const bare = parse({ id: "com.example.plain", name: "纯前端", version: "1.0.0", apiVersion: 1 }).manifest;
   const s = behaviorSuggestionOf(bare);
-  ok(s.autoStart === "on-demand" && s.closeBehavior === "minimize" && s.fromPrompt === false, "无 backend 也有建议（全部默认值）", JSON.stringify(s));
+  ok(s.autoStart === "always" && s.closeBehavior === "minimize" && s.fromPrompt === false, "无 backend 也有建议（自启缺省值 now=always）", JSON.stringify(s));
+}
+{
+  // 未声明 autostart 的带后端插件：建议值即 always
+  const m = parse(manifestOf()).manifest;
+  const s = behaviorSuggestionOf(m);
+  ok(s.autoStart === "always" && s.fromPrompt === false, "未声明 autostart 的建议值为 always", JSON.stringify(s));
 }
 ok(behaviorSuggestionOf(null).closeBehavior === "minimize", "manifest 为空 → 建议 minimize");
 
@@ -142,7 +175,12 @@ const recOf = (backend = {}, now = 1000) =>
 {
   const rec = recOf();
   ok(rec.closeBehavior === "minimize", "安装时按建议落 minimize");
-  ok(rec.autoStart === "on-demand", "开机自启按建议落 on-demand");
+  ok(rec.autoStart === "always", "未声明 autostart → 安装时默认落 always（开机自启）");
+  ok(rec.requestedAutoStart === "always", "requestedAutoStart 同步为 always");
+}
+{
+  const rec = recOf({ autostart: "on-demand" });
+  ok(rec.autoStart === "on-demand", "显式 on-demand → 记录落 on-demand（尊重作者）");
 }
 {
   const rec = recOf({ closeBehavior: "exit" });

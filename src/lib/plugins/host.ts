@@ -1912,7 +1912,7 @@ function createMarketApi(
    * 组装市场视图（list / refreshCatalog 共用）。
    *
    * 除目录条目与更新集合外，这里还补两样 UI 直接要用的东西：
-   *   - 每条 entry 的 `repoUrl`：官方地址（仓库优先，退回 homepage），卡片据此渲染可点链接；
+   *   - 每条 entry 的 `repoUrl`：首页地址（仓库优先，退回 homepage），卡片据此渲染「首页」链接；
    *   - 每条 update 的 `changelog` / `repoUrl`：**新版本**的更新日志，让用户在
    *     点「更新」前先看清这一版改了什么（changelog 为空时 UI 不渲染该块）。
    */
