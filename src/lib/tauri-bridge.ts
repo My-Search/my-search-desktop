@@ -13,6 +13,9 @@ import {
 } from "./shortcut-bindings.ts";
 import type {
   HttpRequestOptions,
+  ProxyInfo,
+  ProxyRuleUpdateResult,
+  ProxySettings,
   RawGithubUrl,
   UpdateCompletePayload,
   UpdateInfo,
@@ -529,6 +532,107 @@ export async function takePendingPluginOpen(): Promise<string | null> {
     console.warn("读取待打开插件包失败:", e);
     return null;
   }
+}
+
+/**
+ * 拉取结果列表 favicon（按候选源顺序回退）。
+ *
+ * 走 Rust 而非前端 `<img>` 的原因见后端 `fetch_favicon`：WebView2 会无条件
+ * 跟随操作系统代理，不受应用内规则代理约束，开着代理软件时图标会被拦掉。
+ * 改由 Rust 拉取后与其它后端请求共用同一套规则代理。
+ *
+ * @returns `data:<mime>;base64,…`；全部候选失败时返回 null。
+ */
+export async function fetchFavicon(candidates: string[]): Promise<string | null> {
+  if (candidates.length === 0) return null;
+  if (isTauri) {
+    try {
+      const data = await invoke<string | null>("fetch_favicon", { candidates });
+      return typeof data === "string" && data !== "" ? data : null;
+    } catch (e) {
+      console.warn("拉取 favicon 失败:", e);
+      return null;
+    }
+  }
+  // 浏览器调试环境：直接加载首个候选（受 CORS / 网络限制，仅便于开发）
+  return candidates[0] ?? null;
+}
+
+/* ============================================================
+ * 规则驱动的 HTTP 代理（设置 → 高级设置）
+ * ============================================================ */
+
+/** 默认规则清单（与 Rust 端 DEFAULT_RULES 一致，浏览器调试环境用） */
+export const DEFAULT_PROXY_RULES = ["github.com", "githubusercontent.com"];
+
+/** 默认规则库地址（与 Rust 端 DEFAULT_GFWLIST_URL 一致，浏览器调试环境用） */
+export const DEFAULT_GFWLIST_URL =
+  "https://raw.githubusercontent.com/gfwlist/gfwlist/master/gfwlist.txt";
+
+/** 浏览器调试环境下的默认代理配置（与 Rust 端 ProxySettings::default 一致） */
+export const DEFAULT_PROXY_SETTINGS: ProxySettings = {
+  enabled: true,
+  rules: [...DEFAULT_PROXY_RULES],
+  ruleSources: [{ url: DEFAULT_GFWLIST_URL, enabled: true }],
+  updateIntervalHours: 24,
+  lastUpdatedMs: 0,
+  libraryRuleCount: 0,
+  schemaVersion: 1,
+};
+
+/**
+ * 获取代理配置与总览（默认规则 + 当前系统代理状态）。
+ *
+ * 返回 `{ settings, info }`：settings 供面板编辑，info 用于展示「系统是否
+ * 配了代理」——未配代理时即便命中规则也只能直连，面板据此给出提示。
+ */
+export async function getProxySettings(): Promise<{
+  settings: ProxySettings;
+  info: ProxyInfo;
+}> {
+  if (isTauri) {
+    try {
+      const raw = await invoke<{ settings: ProxySettings; info: ProxyInfo }>(
+        "get_proxy_settings"
+      );
+      return {
+        settings: { ...DEFAULT_PROXY_SETTINGS, ...raw.settings },
+        info: raw.info,
+      };
+    } catch (e) {
+      console.warn("读取代理设置失败:", e);
+    }
+  }
+  return {
+    settings: { ...DEFAULT_PROXY_SETTINGS },
+    info: {
+      defaultRules: [...DEFAULT_PROXY_RULES],
+      systemProxyConfigured: false,
+      systemHttp: null,
+      systemHttps: null,
+    },
+  };
+}
+
+/**
+ * 保存代理配置并立即生效（总开关关闭时任何请求都直连，即使命中规则）。
+ */
+export async function setProxySettings(settings: ProxySettings): Promise<void> {
+  if (isTauri) {
+    await invoke("set_proxy_settings", { settings });
+  }
+}
+
+/**
+ * 立即拉取所有启用的规则库并刷新（「高级设置 → 代理 → 立即更新」）。
+ *
+ * 只要有一个来源成功即视为更新成功；部分失败通过 `errors` 上报。
+ */
+export async function updateProxyRulesNow(): Promise<ProxyRuleUpdateResult> {
+  if (isTauri) {
+    return await invoke<ProxyRuleUpdateResult>("update_proxy_rules_now");
+  }
+  return { updated: false, ruleCount: 0, errors: ["浏览器调试环境不支持规则库更新"] };
 }
 
 /**

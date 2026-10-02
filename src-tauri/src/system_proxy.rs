@@ -1,16 +1,18 @@
-//! 跟随系统代理（跨平台，全部手写 + 原生 API）
+//! 读取系统代理（跨平台，全部手写 + 原生 API）
 //!
-//! 目标：软件/插件与浏览器行为一致——系统开了代理就走代理，系统关了代理就
-//! 自动回到直连；三平台（Windows / macOS / Linux）一致；**每次构建 Client 时
-//! 现场重新读取**，所以代理开关（如 Clash 的「系统代理」）切换后无需重启应用。
+//! 本模块只负责**读**：从系统设置（与环境变量补空位）读出「当前配置的代理地址」。
+//! 「哪些请求才使用该代理」由 `proxy_rules` 模块按规则决定——本模块不再提供
+//! 任何「注入 builder」的入口，从结构上避免再出现「代理全局生效」的用法。
+//!
+//! 三平台（Windows / macOS / Linux）一致；**每次调用都现场重新读取**，所以
+//! 代理开关（如 Clash 的「系统代理」）切换后无需重启应用。
 //!
 //! 为什么手写而不用 reqwest 的 `system-proxy` 特性：
 //! 1. reqwest 的自动逻辑是「环境变量优先、系统设置补空位」，与本项目要求的
 //!    「**系统代理优先**」相反；
 //! 2. reqwest 在 Linux 上只读环境变量，不读 GNOME 图形化系统代理。
-//! 因此三平台读取逻辑由本模块自己实现（`#[cfg]` 分平台），再手动注入
-//! `reqwest::Proxy`。注意：一旦显式调用 `.proxy(...)`，reqwest 会自动关闭它
-//! 自己的系统代理探测，这正合我们意（避免两套逻辑叠加）。
+//! 因此三平台读取逻辑由本模块自己实现（`#[cfg]` 分平台），再由 `proxy_rules`
+//! 按规则选择性注入。
 //!
 //! 各平台来源：
 //! - Windows：注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings`
@@ -22,8 +24,6 @@
 //! `AutoConfigURL` / gsettings `mode=auto`）需要 JS 引擎，本模块不支持；
 //! Clash 的 TUN 模式不写系统代理（由虚拟网卡接管），不受影响。
 
-use reqwest::ClientBuilder;
-
 /// 从系统（+ 环境变量补空位）读到的代理配置。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct ProxyConfig {
@@ -31,7 +31,7 @@ pub(crate) struct ProxyConfig {
     pub http: Option<String>,
     /// HTTPS 代理地址
     pub https: Option<String>,
-    /// 绕过名单，已归一化为逗号分隔（reqwest `NoProxy::from_string` 的格式）
+    /// 绕过名单，已归一化为逗号分隔（`NoProxy::from_string` 的格式）
     pub no_proxy: Option<String>,
 }
 
@@ -40,38 +40,6 @@ pub(crate) struct ProxyConfig {
 /// 每次调用都现场读系统设置，不做缓存——这是「代理开关即时生效」的前提。
 pub(crate) fn read_system_proxy() -> Option<ProxyConfig> {
     merge_proxy(platform_proxy(), &read_env_proxy())
-}
-
-/// 把系统代理注入 reqwest builder。无代理则原样返回（走直连）。
-///
-/// 任何一步失败（地址非法等）都静默跳过，绝不因代理配置让请求报错。
-pub(crate) fn apply_system_proxy(builder: ClientBuilder) -> ClientBuilder {
-    let Some(cfg) = read_system_proxy() else {
-        return builder;
-    };
-
-    let mut builder = builder;
-    let no_proxy = cfg.no_proxy.as_deref().and_then(reqwest::NoProxy::from_string);
-
-    if let Some(url) = cfg.http.as_deref() {
-        if let Ok(p) = reqwest::Proxy::http(url) {
-            builder = builder.proxy(with_no_proxy(p, no_proxy.clone()));
-        }
-    }
-    if let Some(url) = cfg.https.as_deref() {
-        if let Ok(p) = reqwest::Proxy::https(url) {
-            builder = builder.proxy(with_no_proxy(p, no_proxy.clone()));
-        }
-    }
-
-    builder
-}
-
-fn with_no_proxy(p: reqwest::Proxy, no_proxy: Option<reqwest::NoProxy>) -> reqwest::Proxy {
-    match no_proxy {
-        Some(n) => p.no_proxy(Some(n)),
-        None => p,
-    }
 }
 
 // ===================== 环境变量（补空位） =====================

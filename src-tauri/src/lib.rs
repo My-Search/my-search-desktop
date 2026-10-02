@@ -41,10 +41,12 @@ mod backup;
 mod builtin;
 mod clipboard_history;
 mod cloud;
+mod favicon;
 mod file_assoc;
 mod market;
 mod plugin_host;
 mod plugin_watch;
+mod proxy_rules;
 mod screenshot;
 mod system_proxy;
 
@@ -789,7 +791,7 @@ struct ActiveShortcutState(Mutex<Vec<ShortcutBinding>>);
 
 /// 获取 settings store（tauri-plugin-store），已加载则复用。
 /// 失败（文件锁 / 路径问题）时降级为禁用自定义快捷键——不会让应用启动失败。
-fn settings_store(app: &tauri::AppHandle) -> Option<std::sync::Arc<tauri_plugin_store::Store<tauri::Wry>>> {
+pub(crate) fn settings_store(app: &tauri::AppHandle) -> Option<std::sync::Arc<tauri_plugin_store::Store<tauri::Wry>>> {
     match app.store(SETTINGS_STORE_FILE) {
         Ok(store) => Some(store),
         Err(e) => {
@@ -1544,13 +1546,14 @@ fn register_shortcut_bindings(app: &tauri::AppHandle, bindings: &[ShortcutBindin
 }
 
 // ===================== HTTP 代理（多级回退） =====================
-/// 构建 HTTP 客户端。**跟随系统代理**（见 `system_proxy` 模块）：每次构建时
-/// 现场读系统代理，系统开代理则走代理、关代理则直连，无需重启应用。
+/// 构建 HTTP 客户端。**按规则走代理**（见 `proxy_rules` 模块）：每次构建时现场
+/// 读规则与系统代理，只有目标主机命中规则（默认 github.com 等）且总开关开启时
+/// 才走系统代理，其余一律直连；开关 / 规则 / 系统代理的改动都无需重启应用。
 pub(crate) fn build_client(timeout_secs: u64, ua: &str) -> Result<reqwest::Client, String> {
     let builder = reqwest::Client::builder()
         .user_agent(ua)
         .timeout(std::time::Duration::from_secs(timeout_secs));
-    crate::system_proxy::apply_system_proxy(builder)
+    crate::proxy_rules::apply_proxy(builder)
         .build()
         .map_err(|e| e.to_string())
 }
@@ -1745,6 +1748,18 @@ async fn http_request(
     }
 }
 
+/// 拉取结果列表 favicon（按候选源顺序回退）。
+///
+/// 为什么走 Rust 而不是前端 `<img>`：WebView2 会**无条件跟随操作系统代理**，
+/// 不受应用内规则代理约束——开着代理软件时图标会被代理拦掉，且用户关掉
+/// 「代理总开关」也无济于事。改由 Rust 拉取后，图标请求与其它后端请求共用
+/// 同一套规则代理（命中规则才走系统代理，否则直连），返回 `data:` URL 供
+/// 前端 `<img>` 直接显示。前端随后不再发任何网络请求。
+#[tauri::command]
+async fn fetch_favicon(candidates: Vec<String>) -> Option<String> {
+    favicon::fetch(&candidates).await
+}
+
 /// 解析 raw.githubusercontent.com URL 为 (owner, repo, ref, path)。
 ///
 /// 支持两种常见写法：
@@ -1775,7 +1790,7 @@ fn parse_raw_github_url(url: &str) -> Option<(&str, &str, &str, String)> {
 }
 
 /// 将 raw.githubusercontent.com URL 转换为 jsDelivr CDN URL
-fn convert_raw_to_jsdelivr(url: &str) -> Option<String> {
+pub(crate) fn convert_raw_to_jsdelivr(url: &str) -> Option<String> {
     let (owner, repo, branch, path) = parse_raw_github_url(url)?;
     Some(format!("https://cdn.jsdelivr.net/gh/{owner}/{repo}@{branch}/{path}"))
 }
@@ -2673,6 +2688,44 @@ fn set_file_assoc_enabled_cmd(app: tauri::AppHandle, enabled: bool) -> Result<bo
     set_file_assoc_enabled_inner(&app, enabled)
 }
 
+// ===================== 规则驱动的代理（设置 → 高级设置） =====================
+
+/// 获取代理配置 + 内置规则 + 当前系统代理状态（供「设置 → 高级设置」展示）。
+#[tauri::command]
+fn get_proxy_settings(app: tauri::AppHandle) -> serde_json::Value {
+    let settings = crate::proxy_rules::read_settings(&app);
+    let info = crate::proxy_rules::proxy_info();
+    serde_json::json!({ "settings": settings, "info": info })
+}
+
+/// 保存代理配置并立即生效（总开关关闭时任何请求都直连，即使命中规则）。
+///
+/// `last_updated_ms` / `library_rule_count` 由后端维护（规则库更新时写入），
+/// 面板不管理它们——保存时一律沿用存储里的旧值，避免把这台机器上刚更新的
+/// 时间戳/条数用前端的陈旧副本覆盖掉。`schema_version` 同理固定为当前版本，
+/// 防止前端旧副本把它写回 0 触发无谓迁移。
+#[tauri::command]
+fn set_proxy_settings(
+    app: tauri::AppHandle,
+    mut settings: crate::proxy_rules::ProxySettings,
+) -> Result<(), String> {
+    let existing = crate::proxy_rules::read_settings(&app);
+    settings.last_updated_ms = existing.last_updated_ms;
+    settings.library_rule_count = existing.library_rule_count;
+    settings.schema_version = crate::proxy_rules::PROXY_SCHEMA_VERSION;
+    crate::proxy_rules::write_settings(&app, &settings);
+    crate::proxy_rules::refresh(&app);
+    Ok(())
+}
+
+/// 立即拉取所有启用的规则库并刷新（「高级设置 → 代理 → 立即更新」）。
+#[tauri::command]
+async fn update_proxy_rules_now(
+    app: tauri::AppHandle,
+) -> Result<crate::proxy_rules::RuleUpdateResult, String> {
+    Ok(crate::proxy_rules::update_rules_now(&app).await)
+}
+
 /// 取出并清空「待打开的插件包路径」（双击 .mspp / 命令行传入）。
 ///
 /// 幂等：取出即清空，重复调用返回 None。前端在**收到叫醒事件**与**自身挂载时**
@@ -2916,6 +2969,7 @@ const BACKUP_SETTINGS_KEYS: &[&str] = &[
     SETTINGS_KEY_SHORTCUT_BINDINGS,
     SETTINGS_KEY_AUTOSTART_ENABLED,
     SETTINGS_KEY_ALT_CLICK,
+    crate::proxy_rules::SETTINGS_KEY_PROXY,
 ];
 
 /// 读取可备份的设置项（返回一个 JSON 对象）
@@ -2972,6 +3026,10 @@ pub(crate) fn write_backup_settings(
         .and_then(|v| v.as_bool())
     {
         alt_click::set_enabled(enabled);
+    }
+    // 代理配置：重新编译生效规则（落盘已在上面的循环里完成）
+    if values.contains_key(crate::proxy_rules::SETTINGS_KEY_PROXY) {
+        crate::proxy_rules::refresh(app);
     }
     Ok(())
 }
@@ -3262,6 +3320,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             http_get,
             http_request,
+            fetch_favicon,
             set_window_height,
             get_default_window_width,
             set_main_window_view_size,
@@ -3284,6 +3343,9 @@ pub fn run() {
             set_alt_click_enabled_cmd,
             get_file_assoc_enabled,
             set_file_assoc_enabled_cmd,
+            get_proxy_settings,
+            set_proxy_settings,
+            update_proxy_rules_now,
             take_pending_plugin_open,
             // 设置窗口「从插件市场安装」：收起设置窗 + 呼出主窗 + 打开插件界面
             open_plugin_view,
@@ -3442,6 +3504,10 @@ pub fn run() {
             ) {
                 eprintln!("应用 .mspp 文件关联设置失败（不影响启动）: {e}");
             }
+            // 代理规则：先把落盘配置 + 规则库缓存编译进内存（决定哪些请求走代理），
+            // 再启动定时更新线程（间隔到期时自动拉取规则库）。两者都不阻塞启动。
+            proxy_rules::refresh(app.handle());
+            proxy_rules::start_auto_refresh(app.handle().clone());
             // 本次启动是否由「双击插件包」触发：把路径放进待处理槽，并延迟打开配置窗口。
             //
             // 为什么要延迟：setup 阶段 WebView 还没加载完，前端监听尚未注册，
@@ -3508,6 +3574,8 @@ pub fn run() {
             if let tauri::RunEvent::Exit = event {
                 plugin_watch::stop_dispatch();
                 plugin_watch::unwatch_all();
+                // 关闭规则库定时更新线程
+                proxy_rules::stop_auto_refresh();
                 // 卸掉剪贴板监听并销毁监听窗口
                 clipboard_history::uninstall();
                 // 停止所有插件后台进程：Windows 有 Job Object 兜底，Unix 没有——

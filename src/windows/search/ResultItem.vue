@@ -7,11 +7,12 @@
  * - favicon 多源回退懒加载：请求时按 data-favicons 顺序依次尝试
  * - 快捷链接(links) / 附加内容(vassal) 图标与事件
  */
-import { ref, computed, watch, onMounted } from "vue";
+import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
 import { renderTitleTags, titleContentHandler, clearHideTagForTitle } from "../../lib/tags";
 import { isUrl } from "../../lib/util";
-import { VASSAL_SVG, LOAD_ERROR_ICON, PLUGIN_BADGE_SVG } from "../../lib/assets";
+import { VASSAL_SVG, LOAD_ERROR_ICON, ICON_LOADING_PLACEHOLDER, PLUGIN_BADGE_SVG } from "../../lib/assets";
 import { resolveFavicon, faviconsAttr } from "./favicon";
+import { fetchFavicon } from "../../lib/tauri-bridge.ts";
 import { pluginIdOf } from "../../lib/plugins/plugin-items";
 import type { SearchItem } from "../../types/index";
 
@@ -49,10 +50,24 @@ const faviconsData = computed(() => faviconsAttr(favicon.value.favicons));
  */
 const isPluginItem = computed(() => pluginIdOf(props.item) != null);
 
-// ---------- favicon 懒加载（按 faviconSources 顺序依次尝试，全部失败显示错误图标） ----------
+// ---------- favicon 加载 ----------
+//
+// 图标**不再由 WebView 直接请求**，而是交给 Rust 的 `fetch_favicon`：
+// WebView2 会无条件跟随操作系统代理（不受应用内规则代理约束），开着代理软件时
+// 图标会被代理拦掉，且关掉应用里的「代理总开关」也管不到它。改由 Rust 拉取后，
+// 图标与其它后端请求走同一套规则代理（命中规则才走系统代理，其余直连），
+// 并且能在多源之间做与后端一致的「跟随规则」回退。
+//
+// 回退顺序不变（faviconSources）：主源→备选1→备选2→站点自身 favicon.ico，
+// 只是现在由 Rust 依次尝试、成功即返回 data URL，前端 `<img>` 直接显示。
 const imgEl = ref<HTMLImageElement | null>(null);
 
-function loadIcon(): void {
+/** 当前加载代次：结果项复用时旧请求返回要丢弃（防止图标错位）。 */
+let loadToken = 0;
+/** 组件是否已卸载（避免卸载后写 ref / 触发告警） */
+let disposed = false;
+
+async function loadIcon(): Promise<void> {
   const img = imgEl.value;
   if (!img || !favicon.value.lazy) return;
   const urls = favicon.value.favicons;
@@ -60,26 +75,23 @@ function loadIcon(): void {
     img.src = LOAD_ERROR_ICON;
     return;
   }
-  let index = 0;
-  const tryNext = () => {
-    if (index >= urls.length) {
-      img.src = LOAD_ERROR_ICON;
-      return;
-    }
-    const url = urls[index++];
-    const test = new Image();
-    test.onload = () => {
-      img.src = url;
-    };
-    test.onerror = tryNext;
-    test.src = url;
-  };
-  tryNext();
+  const token = ++loadToken;
+  img.src = ICON_LOADING_PLACEHOLDER;
+  const dataUrl = await fetchFavicon(urls);
+  // 期间结果项被复用 / 组件已卸载 / 又发起了新一轮 → 丢弃本次结果
+  if (disposed || token !== loadToken || !imgEl.value) return;
+  imgEl.value.src = dataUrl ?? LOAD_ERROR_ICON;
 }
 
-onMounted(loadIcon);
+onMounted(() => {
+  void loadIcon();
+});
 // 结果项被复用时（key 相同的极端情形）重新加载图标
-watch(() => favicon.value, loadIcon, { flush: "post" });
+watch(() => favicon.value, () => void loadIcon(), { flush: "post" });
+onBeforeUnmount(() => {
+  disposed = true;
+  loadToken++; // 让在途请求的返回失效
+});
 
 /**
  * 图标加载失败时的兜底。

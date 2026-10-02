@@ -33,6 +33,7 @@ import PanelTags from "./panels/PanelTags.vue";
 import PanelCache from "./panels/PanelCache.vue";
 import PanelShortcut from "./panels/PanelShortcut.vue";
 import PanelGeneral from "./panels/PanelGeneral.vue";
+import PanelAdvanced from "./panels/PanelAdvanced.vue";
 import PanelAbout from "./panels/PanelAbout.vue";
 import PanelTisHub from "./panels/PanelTisHub.vue";
 import PanelSync from "./panels/PanelSync.vue";
@@ -60,6 +61,7 @@ type PaneName =
   | "cache"
   | "shortcut"
   | "general"
+  | "advanced"
   | "about"
   | "tis-hub"
   | "plugins"
@@ -128,6 +130,7 @@ const PANES = {
   cache: PanelCache,
   shortcut: PanelShortcut,
   general: PanelGeneral,
+  advanced: PanelAdvanced,
   about: PanelAbout,
   "tis-hub": PanelTisHub,
   plugins: PanelPlugins,
@@ -398,6 +401,15 @@ const commonProps = computed(() => ({
             <path d="M10 2.2v2M10 15.8v2M2.2 10h2M15.8 10h2M4.5 4.5l1.4 1.4M14.1 14.1l1.4 1.4M15.5 4.5l-1.4 1.4M5.9 14.1l-1.4 1.4" />
           </svg>
           <span>基础配置</span>
+        </button>
+        <button class="nav-item" :class="{ on: navPane === 'advanced' }" data-pane="advanced" @click="switchPane('advanced')">
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="17" height="17">
+            <path d="M3 5h14M3 10h14M3 15h14" />
+            <circle cx="7" cy="5" r="1.9" fill="var(--card)" />
+            <circle cx="13" cy="10" r="1.9" fill="var(--card)" />
+            <circle cx="9" cy="15" r="1.9" fill="var(--card)" />
+          </svg>
+          <span>高级设置</span>
         </button>
         <button class="nav-item" :class="{ on: navPane === 'sync' }" data-pane="sync" @click="switchPane('sync')">
           <svg viewBox="0 0 1024 1024" fill="currentColor" width="17" height="17">

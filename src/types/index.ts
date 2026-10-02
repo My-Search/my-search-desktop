@@ -153,6 +153,58 @@ export interface RawGithubUrl {
 }
 
 /* ============================================================
+ * 代理（规则驱动）
+ * ============================================================ */
+
+/** 单个规则库来源 */
+export interface ProxyRuleSource {
+  /** 规则库地址（纯文本域名单，或 gfwlist 的 base64 文本） */
+  url: string;
+  /** 是否启用（禁用后不参与拉取，但保留配置） */
+  enabled: boolean;
+}
+
+/** 代理配置（对应 Rust `proxy_rules::ProxySettings`） */
+export interface ProxySettings {
+  /** 代理功能总开关；关闭时即使命中规则也不走代理 */
+  enabled: boolean;
+  /** 规则列表（一行一条，命中走代理）；首次运行预置 github 等，可直接编辑 */
+  rules: string[];
+  /** 规则库来源列表（默认含 gfwlist） */
+  ruleSources: ProxyRuleSource[];
+  /** 规则库自动更新间隔（小时） */
+  updateIntervalHours: number;
+  /** 上次成功更新规则的 Unix 毫秒时间戳（0 = 从未更新） */
+  lastUpdatedMs: number;
+  /** 上次成功更新后规则库贡献的规则条数 */
+  libraryRuleCount: number;
+  /** 配置结构版本号（后端维护，前端透传） */
+  schemaVersion?: number;
+}
+
+/** 代理总览（默认规则 + 当前系统代理状态） */
+export interface ProxyInfo {
+  /** 默认规则清单（「恢复默认」用） */
+  defaultRules: string[];
+  /** 系统/环境变量里当前是否读到代理 */
+  systemProxyConfigured: boolean;
+  /** 系统 HTTP 代理地址（若有） */
+  systemHttp: string | null;
+  /** 系统 HTTPS 代理地址（若有） */
+  systemHttps: string | null;
+}
+
+/** 「立即更新规则库」的返回结果 */
+export interface ProxyRuleUpdateResult {
+  /** 是否至少有一个来源成功并刷新了缓存 */
+  updated: boolean;
+  /** 刷新后规则库贡献的规则条数 */
+  ruleCount: number;
+  /** 各来源的错误信息（部分失败仍可能整体成功） */
+  errors: string[];
+}
+
+/* ============================================================
  * TisHub / GitHub
  * ============================================================ */
 
