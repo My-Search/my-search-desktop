@@ -1896,7 +1896,7 @@ html.theme-dark {
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 4px;
   padding-right: 2px;
 }
 
@@ -1908,7 +1908,7 @@ html.theme-dark {
   border: 1px solid var(--line);
   background: var(--field);
   border-radius: 8px;
-  padding: 18px 12px;
+  padding: 12px 12px;
 }
 
 /* 拖拽手柄（条块左侧的握把图标） */
@@ -2599,6 +2599,18 @@ html.theme-dark #ms-config-view .sub-item .sub-op.danger:hover {
   display: inline-flex;
   align-items: center;
   cursor: pointer;
+}
+
+/* 开关读取中的占位：与开关同宽同高，避免布局跳动，也不会先画出错误的开关态 */
+#ms-config-view .switch-loading {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 40px;
+  height: 22px;
+  font-size: 12px;
+  color: var(--muted);
 }
 
 #ms-config-view .switch.disabled {

@@ -230,12 +230,11 @@ function fmt(ts: number): string {
   <div class="cfg-card">
     <div class="cfg-card-head">
       <h3>WebDAV 云端同步</h3>
-      <span class="cfg-hint" :class="{ ok: syncState.status === 'idle', errorColor: syncState.status === 'error' }">
+      <span class="cfg-hint" :class="{ ok: syncState.status === 'idle' && config.enabled, errorColor: syncState.status === 'error' }">
         <template v-if="syncState.status === 'idle' && config.enabled">上次同步：{{ fmt(syncState.lastSyncAt) }}</template>
         <template v-else-if="syncState.status === 'syncing' || syncState.status === 'uploading'">上传中…</template>
         <template v-else-if="syncState.status === 'downloading'">下载中…</template>
         <template v-else-if="syncState.status === 'error'">{{ syncState.lastError }}</template>
-        <template v-else>—</template>
       </span>
     </div>
 

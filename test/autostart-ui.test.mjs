@@ -148,7 +148,12 @@ await S(
     window.__TAURI_INTERNALS__ = {
       invoke(cmd, args) {
         window.__invoked.push({ cmd, args });
-        if (cmd === 'get_autostart_enabled') return Promise.resolve(window.__autostartState);
+        if (cmd === 'get_autostart_enabled') {
+          // 支持人为延迟，用于验证「读取期间不渲染错误开关态」（见下方步骤 0）
+          const d = Number(localStorage.getItem('__test_autostart_delay') || 0);
+          const v = window.__autostartState;
+          return d > 0 ? new Promise(r => setTimeout(() => r(v), d)) : Promise.resolve(v);
+        }
         if (cmd === 'set_autostart_enabled_cmd') {
           if (window.__failSet) return Promise.reject('写入启动项失败：拒绝访问');
           window.__autostartState = args.enabled;
@@ -184,6 +189,26 @@ await sleep(1200);
 const navExists = await evalJs(
   `!!document.querySelector('.cfg-nav .nav-item[data-pane="general"]')`
 );
+
+// 0. 读取期间（IPC 慢）不得先画出「关」的错误开关态：此时应显示占位，
+//    而不是一个 checked=false 的开关（旧实现会先渲染 false 再跳成 true）。
+await evalJs(`localStorage.setItem('__test_autostart_delay', '600'); 1`);
+await evalJs(`document.querySelector('.cfg-nav .nav-item[data-pane="general"]').click()`);
+await sleep(200); // 早于 IPC 返回，处于读取中
+const midFlight = await evalJs(`({
+  sw: !!document.querySelector('.switch input[data-act="autostart"]'),
+  ph: !!document.querySelector('#ms-config-view .page.general .switch-loading'),
+})`);
+check(
+  "读取期间不渲染错误开关态（显示占位，无未勾选的开关）",
+  midFlight.sw === false && midFlight.ph === true,
+  `switch=${midFlight.sw} placeholder=${midFlight.ph}`
+);
+await evalJs(`localStorage.removeItem('__test_autostart_delay'); 1`);
+await sleep(700);
+const settled = await evalJs(`document.querySelector('.switch input[data-act="autostart"]').checked`);
+check("读取完成后直接显示真实状态（开启）", settled === true, `checked=${settled}`);
+
 await evalJs(`document.querySelector('.cfg-nav .nav-item[data-pane="general"]').click()`);
 await sleep(400);
 const panelRendered = await evalJs(`!!document.querySelector('#ms-config-view .page.general')`);

@@ -293,9 +293,12 @@ onBeforeUnmount(() => {
             关闭后所有请求直连（即使命中规则也不走代理）；开启后仅命中规则的请求走系统代理
           </span>
         </div>
+        <!-- 读取中不渲染开关：避免用错误初值先画成「开」、读回后再跳到真实值的闪动 -->
+        <span v-if="loading" class="switch-loading">读取中…</span>
         <label
+          v-else
           class="switch"
-          :class="{ on: enabled, disabled: loading || saving }"
+          :class="{ on: enabled, disabled: saving }"
           title="启用规则代理（默认开启）"
         >
           <input

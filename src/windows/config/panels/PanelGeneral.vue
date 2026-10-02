@@ -228,9 +228,12 @@ onMounted(async () => {
             登录系统后自动启动我的搜索并常驻托盘，按下呼出快捷键即可使用
           </span>
         </div>
+        <!-- 读取中不渲染开关：避免用错误初值先画成「关」、读回后再跳到真实值的闪动 -->
+        <span v-if="loading" class="switch-loading">读取中…</span>
         <label
+          v-else
           class="switch"
-          :class="{ on: enabled, disabled: loading || saving }"
+          :class="{ on: enabled, disabled: saving }"
           title="开机自启动（默认开启，可随时关闭）"
         >
           <input
@@ -254,9 +257,11 @@ onMounted(async () => {
             在资源管理器或桌面按住 Alt 点击文件/文件夹，呼出搜索框并自动附加该文件
           </span>
         </div>
+        <span v-if="altLoading" class="switch-loading">读取中…</span>
         <label
+          v-else
           class="switch"
-          :class="{ on: altClick, disabled: altLoading || altSaving }"
+          :class="{ on: altClick, disabled: altSaving }"
           title="Alt+点击资源管理器文件快速带入（默认开启，可随时关闭）"
         >
           <input
@@ -280,9 +285,11 @@ onMounted(async () => {
             在资源管理器中给 .mspp 插件包注册图标与双击处理；开启后双击插件包会唤出安装确认（写入当前用户注册表，卸载时可在此关闭）
           </span>
         </div>
+        <span v-if="faLoading" class="switch-loading">读取中…</span>
         <label
+          v-else
           class="switch"
-          :class="{ on: fileAssoc, disabled: faLoading || faSaving }"
+          :class="{ on: fileAssoc, disabled: faSaving }"
           title="关联 .mspp 插件包（默认开启，可随时关闭）"
         >
           <input
