@@ -1818,16 +1818,7 @@ function onKeydown(e: KeyboardEvent): void {
     });
   } else if (e.key === "Escape") {
     e.preventDefault();
-    // 安装确认弹窗开着时 Esc = 取消安装（不关详情视图、不藏窗口）
-    if (installDialogVisible.value) {
-      onInstallCancel();
-      return;
-    }
-    if (state.mode === MODE.SHOW_ITEM_DETAIL) {
-      hideTextView();
-    } else {
-      void hideWindow();
-    }
+    handleEscape();
   } else if (e.key === "Tab") {
     e.preventDefault();
     if (!e.shiftKey) {
@@ -1962,27 +1953,46 @@ function onGlobalAltKeyup(e: KeyboardEvent): void {
   e.preventDefault();
 }
 
-/** 全局 ESC：输入框无焦点时，与输入框按 ESC 行为完全等价 */
-function onGlobalEsc(e: KeyboardEvent): void {
-  if (e.key !== "Escape") return;
-  e.preventDefault();
-  // 捕获阶段拦截并阻止冒泡，避免输入框聚焦时重复触发
-  e.stopPropagation();
+/**
+ * Esc 的统一处理（输入框聚焦 / 失焦两条路径共用，保证行为完全等价）。
+ *
+ * 分层顺序（重要）：
+ *   1. 安装确认弹窗开着 → Esc = 取消安装（不关详情、不藏窗口）；
+ *   2. 详情视图（简述/附加/脚本/插件）打开 → **先返回**（等价原版 ensureViewHide
+ *      里「SHOW_ITEM_DETAIL 就先退简讯」）：关详情回结果列表，**并顺手收起下方
+ *      「最近添加」条带**——这样两次 Esc 正好是「文本项 → 结果列表 → 隐藏窗口」，
+ *      与输入框聚焦时的直觉一致。条带必须在详情判定**之后**才处理：详情态下
+ *      子搜索模式（`关键词 : `）会自动展开条带，若先收条带就会吃掉本次 Esc、
+      详情反而回不去（用户报的 bug）；
+ *   3. 无详情但条带开着 → 先收条带（一次 Esc 只做一件事，不顺手藏窗口）；
+ *   4. 其余 → 隐藏窗口。
+ */
+function handleEscape(): void {
   // 安装确认弹窗开着时 Esc = 取消安装（优先于条带 / 详情 / 藏窗口）
   if (installDialogVisible.value) {
     onInstallCancel();
     return;
   }
-  // 分层：条带开着时 Esc 先收条带（否则一并把窗口也藏了）
+  // 详情视图优先于条带：先返回结果列表（并收条带），再按一次才藏窗口
+  if (state.mode === MODE.SHOW_ITEM_DETAIL) {
+    hideRecentStrip();
+    hideTextView();
+    return;
+  }
   if (recentVisible.value) {
     hideRecentStrip();
     return;
   }
-  if (state.mode === MODE.SHOW_ITEM_DETAIL) {
-    hideTextView();
-  } else {
-    void hideWindow();
-  }
+  void hideWindow();
+}
+
+/** 全局 ESC：输入框无焦点时，与输入框按 ESC 行为完全等价（见 handleEscape） */
+function onGlobalEsc(e: KeyboardEvent): void {
+  if (e.key !== "Escape") return;
+  e.preventDefault();
+  // 捕获阶段拦截并阻止冒泡，避免输入框聚焦时重复触发
+  e.stopPropagation();
+  handleEscape();
 }
 
 onMounted(async () => {

@@ -181,6 +181,10 @@ const SEED = `(() => {
       vassal: '# 附加内容标题\\n\\n这里是附加内容正文，关键词是 微信。',
     },
     { title: '普通项', desc: '普通 URL 项', resource: 'https://example.com/plain/[[{keyword}]]' },
+    {
+      title: '可搜索文本项', desc: '子搜索文本项 [可搜索]',
+      resource: '# 可搜索标题\\n\\n这里是文本项正文，关键词是 微信。',
+    },
   ];
   items.forEach((it, i) => { it.index = i; });
   const subs = '<tis::https://example.com/test.ms title="测试订阅" />';
@@ -190,6 +194,10 @@ const SEED = `(() => {
   localStorage.setItem('my-search-desktop:subscribes', JSON.stringify(subs));
   localStorage.setItem('my-search-desktop:SUBSCRIBE_FINGERPRINT_CACHE_KEY',
     JSON.stringify('https://example.com/test.ms|测试订阅||'));
+  // 「最近添加」历史：非空 → 子搜索模式下条带才会自动展开（回归前置）
+  localStorage.setItem('my-search-desktop:RECENT_ATTACH_KEY', JSON.stringify([
+    { kind: 'file', name: 'notes.txt', path: 'C:/tmp/notes.txt' },
+  ]));
   return items.length;
 })()`;
 
@@ -246,13 +254,84 @@ check(
   `windowHide前=${hideCountBefore} 后=${hideCountAfter}`
 );
 
-// ---- 3. 无详情视图时 Esc = 隐藏窗口 ----
+// ---- 3. 「最近添加」条带可见时，文本项里 Esc 仍先返回（回归：条带曾吃掉 Esc）----
+// 背景（用户反馈）：查看文本项（简述/附加）时输入框会失焦；若此时「最近添加」
+// 条带正展开（子搜索模式 `关键词 : ` 会自动展开），旧实现的全局 Esc 先收条带并
+// return，详情回不去。期望：详情返回优先于条带 → 两次 Esc 完成「文本项→结果→隐藏」。
+const stripShown = () =>
+  evalJs(
+    `(() => { const el = document.getElementById('recentStrip'); return !!el && getComputedStyle(el).display !== 'none' && el.offsetHeight > 0; })()`
+  );
+const openTextItem = async () => {
+  await evalJs(
+    `(() => { const a = document.querySelector('#matchItems .resultItem a.enter_main_link'); if (a) a.click(); })()`
+  );
+  await sleep(350);
+};
+
+// 子搜索模式（含 " : "）→ 条带自动展开；文本项用 [可搜索] 标签命中 PRO 检索
+await typeKeyword("可搜索文本项 : ");
+check("子搜索模式下「最近添加」条带自动展开", (await stripShown()) === true);
+const textRowCount = await evalJs(`document.querySelectorAll('#matchItems li').length`);
+check("PRO 模式列出可搜索文本项", textRowCount >= 1, `rows=${textRowCount}`);
+
+await openTextItem();
+check("文本项详情已打开", (await detailDisplay()) === "block");
+check("详情打开时条带仍在（详情不收起条带）", (await stripShown()) === true);
+
+// 真实点击正文让输入框失焦（模拟用户点内容区；仅 blur() 不足以覆盖真实路径）
 await evalJs(`document.getElementById('my_search_input').blur()`);
+const activeEl3 = await evalJs(
+  `document.activeElement && (document.activeElement.id || document.activeElement.tagName)`
+);
+check("输入框已失焦（文本项场景）", activeEl3 !== "my_search_input", `activeElement=${activeEl3}`);
+
 const hideBefore3 = await evalJs(`window.__windowHideCount`);
 await pressEsc();
+check(
+  "条带可见 + 失焦：Esc 第一次从文本项返回（详情关闭）",
+  (await detailDisplay()) === "none",
+  `display=${await detailDisplay()}`
+);
+check("返回后结果列表恢复显示", (await listDisplay()) === "block");
+check("返回时一并收起「最近添加」条带", (await stripShown()) === false);
+check(
+  "返回这一次不隐藏窗口（详情优先于条带）",
+  (await evalJs(`window.__windowHideCount`)) === hideBefore3,
+  `windowHide前=${hideBefore3} 后=${await evalJs(`window.__windowHideCount`)}`
+);
+
+await pressEsc();
 await sleep(300);
-const hideAfter3 = await evalJs(`window.__windowHideCount`);
-check("无详情视图时 Esc 隐藏窗口", hideAfter3 === hideBefore3 + 1, `hide次数 ${hideBefore3} → ${hideAfter3}`);
+check(
+  "条带已收起后：Esc 第二次才隐藏窗口",
+  (await evalJs(`window.__windowHideCount`)) === hideBefore3 + 1,
+  `hide次数 ${hideBefore3} → ${await evalJs(`window.__windowHideCount`)}`
+);
+
+// ---- 4. 结果列表上 Alt 展开的条带：Esc 仍只收条带、不藏窗口（保留原分层）----
+await typeKeyword("普通");
+await evalJs(`document.getElementById('my_search_input').focus(); 1`);
+await sleep(100);
+await pressKey("Alt", "AltLeft", 18); // 输入框聚焦时纯 Alt = 开/关条带
+check("结果列表上 Alt 展开「最近添加」条带", (await stripShown()) === true);
+const hideBefore4 = await evalJs(`window.__windowHideCount`);
+await evalJs(`document.getElementById('my_search_input').blur()`);
+await pressEsc();
+check("无详情时 Esc 第一次只收条带（不藏窗口）", (await stripShown()) === false);
+check(
+  "收条带这一次不隐藏窗口",
+  (await evalJs(`window.__windowHideCount`)) === hideBefore4,
+  `windowHide前=${hideBefore4} 后=${await evalJs(`window.__windowHideCount`)}`
+);
+
+// ---- 5. 无详情视图时 Esc = 隐藏窗口 ----
+await evalJs(`document.getElementById('my_search_input').blur()`);
+const hideBefore5 = await evalJs(`window.__windowHideCount`);
+await pressEsc();
+await sleep(300);
+const hideAfter5 = await evalJs(`window.__windowHideCount`);
+check("无详情视图时 Esc 隐藏窗口", hideAfter5 === hideBefore5 + 1, `hide次数 ${hideBefore5} → ${hideAfter5}`);
 
 check("无未捕获页面异常", pageErrors.length === 0, pageErrors.slice(0, 2).join(" | "));
 
