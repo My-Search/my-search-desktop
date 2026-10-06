@@ -1420,24 +1420,89 @@ fn shortcut_to_caps(shortcut: &str) -> String {
         .join("+")
 }
 
-/// 尝试把一组绑定注册到系统（全部成功才算成功，否则回滚已注册的部分）。
+/// 注册策略：决定「某一条键注册失败（被占用 / 无法解析）」时的行为。
 ///
-/// 每个键的 handler 按「作用类型」分发：呼出/隐藏窗口、直接打开某个插件、
-/// 呼出并填入常用头进入快速过滤，或按文本精确匹配并打开某项（快捷打开项）。
-fn register_binding_handlers(app: &tauri::AppHandle, bindings: &[ShortcutBinding]) -> Result<(), String> {
+/// - [`RegisterMode::Atomic`]：用户在设置 / 插件面板里主动改动时用——任一条
+///   失败即整体回滚并报错，保证「改动失败 = 一切保持原样」，错误原样回给 UI。
+/// - [`RegisterMode::BestEffort`]：冷启动、还原备份这类「无人盯着」的场景用——
+///   失败的键只记日志、跳过，继续注册其余的键。若这些场景也走严格模式，一个被
+///   其它程序**临时**占用的键就会让整套快捷键（含呼出键）全军覆没，且错误只进
+///   看不见的 stderr，表现为「按 Ctrl+Alt+S 完全没反应」（真实踩到过的故障）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RegisterMode {
+    Atomic,
+    BestEffort,
+}
+
+/// 按 action 把一次「快捷键按下」分发到对应落地函数：呼出/隐藏窗口、直接打开
+/// 某个插件、呼出并填入常用头进入快速过滤、按文本精确匹配打开、截图、剪贴板
+/// 历史、插件自定义动作。注册闭包与「默认呼出键兜底」（[`ensure_toggle_registered`]）
+/// 共用这一处，避免两份分发逻辑漂移。
+fn dispatch_shortcut_action(app: &tauri::AppHandle, action: &str, target: Option<&str>) {
+    if action == SHORTCUT_ACTION_OPEN_PLUGIN {
+        if let Some(plugin_id) = target {
+            open_plugin_by_shortcut(app, plugin_id);
+        }
+    } else if action == SHORTCUT_ACTION_QUICK_FILTER {
+        if let Some(filter) = target {
+            quick_filter_by_shortcut(app, filter);
+        }
+    } else if action == SHORTCUT_ACTION_QUICK_OPEN {
+        if let Some(text) = target {
+            quick_open_by_shortcut(app, text);
+        }
+    } else if action == SHORTCUT_ACTION_SCREENSHOT {
+        // 截图是唯一在 Rust 里就地完成的动作：遮罩必须是独立全屏窗口，
+        // 而插件详情视图（inlay）开不了窗口。内部自己 spawn，不阻塞事件循环。
+        screenshot::start_overlay_from_shortcut(app);
+    } else if action == SHORTCUT_ACTION_CLIPBOARD {
+        // 剪贴板历史**走前端**（inlay 详情视图能开在主 WebView 里）：
+        // 这里只把主窗口带到前台并广播事件，由前端打开内置插件详情视图。
+        clipboard_by_shortcut(app);
+    } else if is_plugin_defined_action(action) {
+        // 插件自定义动作（`plugin:<id>:<name>`）：执行逻辑在插件自己，
+        // 宿主把窗口带到前台 + 广播事件，由前端打开该插件视图并把动作派发给它。
+        if let Some(plugin_id) = plugin_defined_action_owner(action) {
+            plugin_action_by_shortcut(app, plugin_id, action);
+        }
+    } else {
+        toggle_window(app);
+    }
+}
+
+/// 尝试把一组绑定注册到系统，返回**实际注册成功**的绑定列表。
+///
+/// 失败行为由 [`RegisterMode`] 决定：Atomic 全部回滚并报错；BestEffort 跳过
+/// 失败的键继续（收尾还会用 [`ensure_toggle_registered`] 尽量保住呼出键）。
+fn register_binding_handlers(
+    app: &tauri::AppHandle,
+    bindings: &[ShortcutBinding],
+    mode: RegisterMode,
+) -> Result<Vec<ShortcutBinding>, String> {
     let gs = app.global_shortcut();
     let mut registered: Vec<ShortcutBinding> = Vec::new();
 
     for binding in bindings {
         let shortcut = binding.shortcut.as_str();
-        // 插件 API 只接受 &str（TryFrom<&str>），先在这里校验字符串可解析
-        if let Err(e) = tauri_plugin_global_shortcut::Shortcut::try_from(shortcut) {
-            rollback_registered(app, &registered);
-            return Err(format!("无法识别的快捷键「{shortcut}」: {e}"));
-        }
         // 同一条快捷键重复出现（理论上调用方已去重）：跳过，避免注册冲突
         if registered.iter().any(|b| b.shortcut == binding.shortcut) {
             continue;
+        }
+        // 插件 API 只接受 &str（TryFrom<&str>），先校验字符串可解析。
+        // 解析失败与「被占用」走同一套失败语义——否则一条存坏的脏数据在启动时
+        // 同样会拖垮整套快捷键。
+        if let Err(e) = tauri_plugin_global_shortcut::Shortcut::try_from(shortcut) {
+            let msg = format!("无法识别的快捷键「{shortcut}」: {e}");
+            match mode {
+                RegisterMode::Atomic => {
+                    rollback_registered(app, &registered);
+                    return Err(msg);
+                }
+                RegisterMode::BestEffort => {
+                    eprintln!("{}（已跳过，其余快捷键继续注册）", msg);
+                    continue;
+                }
+            }
         }
 
         let action = binding.action.clone();
@@ -1446,48 +1511,82 @@ fn register_binding_handlers(app: &tauri::AppHandle, bindings: &[ShortcutBinding
             if event.state() != ShortcutState::Pressed {
                 return;
             }
-            if action == SHORTCUT_ACTION_OPEN_PLUGIN {
-                if let Some(plugin_id) = target.as_deref() {
-                    open_plugin_by_shortcut(app, plugin_id);
-                }
-            } else if action == SHORTCUT_ACTION_QUICK_FILTER {
-                if let Some(filter) = target.as_deref() {
-                    quick_filter_by_shortcut(app, filter);
-                }
-            } else if action == SHORTCUT_ACTION_QUICK_OPEN {
-                if let Some(text) = target.as_deref() {
-                    quick_open_by_shortcut(app, text);
-                }
-            } else if action == SHORTCUT_ACTION_SCREENSHOT {
-                // 截图是唯一在 Rust 里就地完成的动作：遮罩必须是独立全屏窗口，
-                // 而插件详情视图（inlay）开不了窗口。内部自己 spawn，不阻塞事件循环。
-                screenshot::start_overlay_from_shortcut(app);
-            } else if action == SHORTCUT_ACTION_CLIPBOARD {
-                // 剪贴板历史**走前端**（inlay 详情视图能开在主 WebView 里）：
-                // 这里只把主窗口带到前台并广播事件，由前端打开内置插件详情视图。
-                clipboard_by_shortcut(app);
-            } else if is_plugin_defined_action(&action) {
-                // 插件自定义动作（`plugin:<id>:<name>`）：执行逻辑在插件自己，
-                // 宿主把窗口带到前台 + 广播事件，由前端打开该插件视图并把动作派发给它。
-                if let Some(plugin_id) = plugin_defined_action_owner(&action) {
-                    plugin_action_by_shortcut(app, plugin_id, &action);
-                }
-            } else {
-                toggle_window(app);
-            }
+            dispatch_shortcut_action(app, &action, target.as_deref());
         });
         match result {
             Ok(()) => registered.push(binding.clone()),
             Err(e) => {
-                rollback_registered(app, &registered);
-                return Err(format!(
+                let msg = format!(
                     "快捷键「{}」注册失败（可能已被其它程序占用）: {e}",
                     binding.shortcut
-                ));
+                );
+                match mode {
+                    RegisterMode::Atomic => {
+                        rollback_registered(app, &registered);
+                        return Err(msg);
+                    }
+                    RegisterMode::BestEffort => {
+                        eprintln!("{}（已跳过，其余快捷键继续注册）", msg);
+                    }
+                }
             }
         }
     }
-    Ok(())
+    if mode == RegisterMode::BestEffort {
+        ensure_toggle_registered(app, bindings, &mut registered);
+    }
+    Ok(registered)
+}
+
+/// [`RegisterMode::BestEffort`] 的收尾兜底：尽量保证「呼出/隐藏」键可用。
+///
+/// 触发条件：绑定列表里**有** toggle-window、但它没注册成功（自定义呼出键被
+/// 临时占用）。此时改试默认呼出键（`ctrl+alt+s`）——仅当默认键没在本轮尝试过
+/// 时才试（同一个键刚失败，立刻重试也不会成功）。仍失败只记日志：此时多半是
+/// 默认键也被占用，托盘唤出仍可用。
+///
+/// 不越过用户意愿：列表里本就没有 toggle-window（用户主动删掉）时不注入。
+fn ensure_toggle_registered(
+    app: &tauri::AppHandle,
+    bindings: &[ShortcutBinding],
+    registered: &mut Vec<ShortcutBinding>,
+) {
+    let wants_toggle = bindings
+        .iter()
+        .any(|b| b.action == SHORTCUT_ACTION_TOGGLE_WINDOW);
+    let toggle_shortcut = bindings
+        .iter()
+        .find(|b| b.action == SHORTCUT_ACTION_TOGGLE_WINDOW)
+        .map(|b| b.shortcut.as_str());
+    if !wants_toggle
+        || registered
+            .iter()
+            .any(|b| b.action == SHORTCUT_ACTION_TOGGLE_WINDOW)
+        || bindings.iter().any(|b| b.shortcut == DEFAULT_TOGGLE_SHORTCUT)
+    {
+        return;
+    }
+    let result = app
+        .global_shortcut()
+        .on_shortcut(DEFAULT_TOGGLE_SHORTCUT, |app, _s, event| {
+            if event.state() == ShortcutState::Pressed {
+                dispatch_shortcut_action(app, SHORTCUT_ACTION_TOGGLE_WINDOW, None);
+            }
+        });
+    match result {
+        Ok(()) => {
+            eprintln!(
+                "自定义呼出键「{}」被占用，已兜底注册默认呼出键 {DEFAULT_TOGGLE_SHORTCUT}",
+                toggle_shortcut.unwrap_or("")
+            );
+            registered.push(ShortcutBinding {
+                shortcut: DEFAULT_TOGGLE_SHORTCUT.to_string(),
+                action: SHORTCUT_ACTION_TOGGLE_WINDOW.to_string(),
+                target: None,
+            });
+        }
+        Err(e) => eprintln!("默认呼出键 {DEFAULT_TOGGLE_SHORTCUT} 兜底注册失败: {e}"),
+    }
 }
 
 /// 撤销一组已注册的快捷键（注册失败回滚用；失败只记日志，不中断后续清理）。
@@ -1503,11 +1602,17 @@ fn rollback_registered(app: &tauri::AppHandle, bindings: &[ShortcutBinding]) {
 /// 注册（或重新注册）整套快捷键绑定。
 ///
 /// - 先 unregister 当前已注册的全部键；
-/// - 再逐条注册新键（呼出/隐藏、打开插件……）；
-/// - 任一条注册失败时**回滚**：优先整体恢复旧绑定
-///   （保证「改动失败 = 一切保持原样」），旧绑定也恢复不了时兜底只注册默认呼出键，
-///   保证呼出功能始终可用。
-fn register_shortcut_bindings(app: &tauri::AppHandle, bindings: &[ShortcutBinding]) -> Result<(), String> {
+/// - 再逐条注册新键（呼出/隐藏、打开插件……），失败行为由 [`RegisterMode`] 决定
+///   （Atomic 全部回滚报错；BestEffort 跳过失败项，见该枚举注释）；
+/// - Atomic 模式任一条注册失败时**回滚**：优先整体恢复旧绑定
+///   （保证「改动失败 = 一切保持原样」）；旧绑定恢复不了**或旧绑定本来就是空的**
+///   （冷启动首装即失败——此时「恢复空列表」会恒成功、绕过兜底，曾经导致一个键
+///   冲突就让整套热键全灭）时，兜底只注册默认呼出键，保证呼出功能始终可用。
+fn register_shortcut_bindings(
+    app: &tauri::AppHandle,
+    bindings: &[ShortcutBinding],
+    mode: RegisterMode,
+) -> Result<(), String> {
     let state = app.state::<ActiveShortcutState>();
 
     // 先 unregister 旧键（记录下来，注册失败时用于回滚）
@@ -1517,25 +1622,34 @@ fn register_shortcut_bindings(app: &tauri::AppHandle, bindings: &[ShortcutBindin
     };
     rollback_registered(app, &old);
 
-    match register_binding_handlers(app, bindings) {
-        Ok(()) => {
+    match register_binding_handlers(app, bindings, mode) {
+        Ok(registered) => {
             if let Ok(mut guard) = state.0.lock() {
-                *guard = bindings.to_vec();
+                *guard = registered;
             }
             Ok(())
         }
         Err(e) => {
-            // 回滚：优先恢复旧绑定；旧绑定恢复不了再兜底只注册默认呼出键
-            let mut restored = register_binding_handlers(app, &old).is_ok();
-            let mut applied = old.clone();
+            // 回滚：优先恢复旧绑定；旧绑定为空或恢复失败 → 兜底注册默认呼出键。
+            // 不能把「恢复空列表成功」当成恢复成功：那正是导致「一个键冲突 ⇒
+            // 整套热键全灭、兜底分支永远不执行」的空洞。
+            let mut applied: Vec<ShortcutBinding> = Vec::new();
+            let mut restored = false;
+            if !old.is_empty() {
+                if let Ok(reg) = register_binding_handlers(app, &old, RegisterMode::Atomic) {
+                    restored = true;
+                    applied = reg;
+                }
+            }
             if !restored {
                 let fallback = vec![ShortcutBinding {
                     shortcut: DEFAULT_TOGGLE_SHORTCUT.to_string(),
                     action: SHORTCUT_ACTION_TOGGLE_WINDOW.to_string(),
                     target: None,
                 }];
-                restored = register_binding_handlers(app, &fallback).is_ok();
-                applied = if restored { fallback } else { Vec::new() };
+                if let Ok(reg) = register_binding_handlers(app, &fallback, RegisterMode::Atomic) {
+                    applied = reg;
+                }
             }
             if let Ok(mut guard) = state.0.lock() {
                 *guard = applied;
@@ -2419,6 +2533,10 @@ fn extract_href(s: &str) -> Option<String> {
 }
 
 /// 当前平台安装包后缀。
+///
+/// Windows 保持 `.msi`：应用内升级走 `msiexec` 的免交互参数（见
+/// `installer_args`），与既有安装（历史上一直下发 `.msi`）同族，属原地升级，
+/// 不会产生「MSI 装到 NSIS 安装之上」的双份卸载项。
 fn platform_ext() -> &'static str {
     if cfg!(target_os = "windows") {
         ".msi"
@@ -2602,8 +2720,150 @@ async fn start_update_download(
     Ok(())
 }
 
+/// 安装包种类（决定用哪种「免交互原地升级」方式启动）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(windows), allow(dead_code))]
+enum InstallerKind {
+    /// Windows MSI（perMachine；历史版本一直下发它）
+    Msi,
+    /// Windows NSIS 安装器（currentUser）
+    Nsis,
+    /// 其它平台（.dmg / .AppImage）：没有免交互开关，交给系统默认处理器
+    Other,
+}
+
+/// 由文件路径判断安装包种类（纯函数，便于单测）
+#[cfg_attr(not(windows), allow(dead_code))]
+fn installer_kind(path: &str) -> InstallerKind {
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".msi") {
+        InstallerKind::Msi
+    } else if lower.ends_with(".exe") {
+        InstallerKind::Nsis
+    } else {
+        InstallerKind::Other
+    }
+}
+
+/// 含空格的参数加双引号（msiexec / NSIS 都按 Windows 命令行规则拆分参数）
+#[cfg_attr(not(windows), allow(dead_code))]
+fn quote_arg(arg: &str) -> String {
+    if arg.contains(' ') {
+        format!("\"{arg}\"")
+    } else {
+        arg.to_string()
+    }
+}
+
+/// 免交互原地升级的启动参数（纯函数，便于单测）。
+///
+/// 目标：升级时**不再让用户选安装路径、也不再翻向导页**，直接装回原目录。
+///
+/// - MSI：`/i <msi> /passive /promptrestart AUTOLAUNCHAPP=True`
+///   `/passive` 把 UI 级别降为 basic —— WiX 整段向导（含 InstallDirDlg 选目录页）
+///   被跳过，只剩进度条；安装目录由模板的 AppSearch 从
+///   `HKCU\Software\mysearch\MySearch\InstallDir` 读回，于是原地覆盖升级；
+///   `AUTOLAUNCHAPP=True` 让装完自动把应用拉起来。参数与 Tauri 官方 updater 的
+///   Windows MSI 分支一致（tauri-plugin-updater 的 `updater_parameters`）。
+/// - NSIS：`/P`（passive）+ `/UPDATE`（更新分支：不卸载旧的、不重建快捷方式）
+///   + `/R`（装完重启应用）。模板的 `RestorePreviousInstallLocation` 会从注册表
+///   读回原目录；且 `/P` 下 `CheckIfAppIsRunning` 会**静默结束**旧进程，
+///   不弹「请先关闭应用」。
+#[cfg_attr(not(windows), allow(dead_code))]
+fn installer_args(kind: InstallerKind, path: &str) -> Vec<String> {
+    match kind {
+        InstallerKind::Msi => vec![
+            "/i".to_string(),
+            quote_arg(path),
+            "/passive".to_string(),
+            "/promptrestart".to_string(),
+            "AUTOLAUNCHAPP=True".to_string(),
+        ],
+        InstallerKind::Nsis => vec!["/P".to_string(), "/UPDATE".to_string(), "/R".to_string()],
+        InstallerKind::Other => Vec::new(),
+    }
+}
+
+/// Windows：按「免交互原地升级」参数用 ShellExecuteW 启动安装程序。
+///
+/// 必须走 ShellExecuteW 而不是 `Command::new`：perMachine 的 MSI 需要提权，
+/// 只有经过 shell 才会弹 UAC 并拿到管理员令牌（直接 CreateProcess 会以
+/// ERROR_ELEVATION_REQUIRED(740) 失败）。这也是 Tauri 官方 updater 的做法。
+/// 另外**不等待**安装结束：`/passive` 的进度条属于安装程序自己，
+/// 本进程马上退出，才不会让 MSI 因文件占用转而走 Restart Manager。
+#[cfg(windows)]
+fn spawn_installer_windows(path: &str) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOW;
+
+    let kind = installer_kind(path);
+    // MSI 交给 msiexec（用绝对路径，避免被同名程序抢先）；NSIS 直接跑安装器自身
+    let file = match kind {
+        InstallerKind::Msi => {
+            let root = std::env::var("SYSTEMROOT").unwrap_or_else(|_| "C:\\Windows".to_string());
+            format!("{root}\\System32\\msiexec.exe")
+        }
+        _ => path.to_string(),
+    };
+    let params = installer_args(kind, path).join(" ");
+
+    let wide = |s: &str| -> Vec<u16> {
+        std::ffi::OsStr::new(s)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    };
+    let verb = wide("open");
+    let file_w = wide(&file);
+    let params_w = wide(&params);
+
+    let ret = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            file_w.as_ptr(),
+            params_w.as_ptr(),
+            std::ptr::null(),
+            SW_SHOW,
+        )
+    };
+    // ShellExecuteW 约定：返回值 > 32 才算成功，<= 32 是错误码
+    let code = ret as isize;
+    if code <= 32 {
+        return Err(format!("启动安装程序失败（ShellExecuteW 返回 {code}）"));
+    }
+    Ok(())
+}
+
+/// 启动安装程序；Windows 上会在启动成功后**结束本进程**（不返回）。
+///
+/// 事件语义：Windows 上安装包要覆盖正在运行的 exe/dll，本进程不退会让 MSI 转而
+/// 走 Restart Manager（弹「应关闭以下程序」）或改成重启后替换——那正是本次要消除
+/// 的交互。插件子进程由 Job Object（KILL_ON_JOB_CLOSE）内核级兜底，硬退出不留孤儿。
+#[cfg(windows)]
+fn launch_installer(_app: &tauri::AppHandle, path: &str) -> Result<(), String> {
+    spawn_installer_windows(path)?;
+    // exit 永不返回：既表达「到这里就结束」，也满足返回类型
+    std::process::exit(0)
+}
+
+/// 非 Windows（.dmg / .AppImage）与安装器之间没有等价的免交互开关：
+/// 保持原行为（交给系统默认处理器），也**不**退出进程——例如 .dmg 只是挂载镜像，
+/// 退出应用反而让用户手里什么都没有。
+#[cfg(not(windows))]
+fn launch_installer(app: &tauri::AppHandle, path: &str) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_path(path, None::<&str>)
+        .map_err(|e| format!("打开安装文件失败: {e}"))
+}
+
 /// 打开已下载好的安装文件（由用户在界面点击「安装更新」时调用）。
 /// 会先校验文件是否存在，若不存在则返回错误信息。
+///
+/// Windows 上升级是**免交互**的：不选安装路径、不翻向导页，直接装回原目录并自动
+/// 重启应用（见 `installer_args` / `launch_installer`）。
 #[tauri::command]
 fn open_installer(app: tauri::AppHandle) -> Result<(), String> {
     let path = {
@@ -2620,12 +2880,7 @@ fn open_installer(app: tauri::AppHandle) -> Result<(), String> {
         return Err("安装文件已丢失，请重新下载".to_string());
     }
 
-    use tauri_plugin_opener::OpenerExt;
-    app.opener()
-        .open_path(path, None::<&str>)
-        .map_err(|e| format!("打开安装文件失败: {e}"))?;
-
-    Ok(())
+    launch_installer(&app, &path)
 }
 
 /// 获取「开机自启动」当前状态（供「设置 → 常规设置」展示）
@@ -2788,7 +3043,7 @@ fn set_toggle_shortcut(app: tauri::AppHandle, shortcut: String) -> Result<(), St
     if parsed == read_shortcut_bindings(&app) {
         return Ok(());
     }
-    apply_shortcut_bindings(&app, &parsed)
+    apply_shortcut_bindings(&app, &parsed, RegisterMode::Atomic)
 }
 
 /// 设置整套快捷键绑定并立即生效（**设置 → 快捷键** 面板的主入口）。
@@ -2821,7 +3076,7 @@ fn set_shortcut_bindings(
     // 插件未安装时用户随手保存一次设置，就会把所有插件动作标记成「已解绑」，
     // 日后装了插件也不再自动注入默认热键。
     let touched = update_unbound_flags(&app, &current, &parsed);
-    if let Err(e) = apply_shortcut_bindings(&app, &parsed) {
+    if let Err(e) = apply_shortcut_bindings(&app, &parsed, RegisterMode::Atomic) {
         // 注册/落盘失败：把刚改过的解绑标记回滚，避免「改动没生效却记成已解绑」
         for (action, was) in touched {
             set_plugin_action_unbound(&app, &action, was);
@@ -2911,12 +3166,21 @@ fn sync_plugin_shortcut_actions(
     if reconciled == current {
         return Ok(());
     }
-    apply_shortcut_bindings(&app, &reconciled)
+    // 后台自愈场景（无人盯着）：用 BestEffort——某个插件动作的默认键被临时占用时
+    // 只跳过那一条，其余绑定照常落地；否则整批调和失败，自愈永远完不成。
+    apply_shortcut_bindings(&app, &reconciled, RegisterMode::BestEffort)
 }
 
 /// 注册整套绑定并持久化（注册失败时回滚且不落盘）。
-fn apply_shortcut_bindings(app: &tauri::AppHandle, bindings: &[ShortcutBinding]) -> Result<(), String> {
-    register_shortcut_bindings(app, bindings)?;
+///
+/// `mode`：用户主动改动传 [`RegisterMode::Atomic`]（失败报错、保持原样）；
+/// 后台自愈（`sync_plugin_shortcut_actions` 调和）传 [`RegisterMode::BestEffort`]。
+fn apply_shortcut_bindings(
+    app: &tauri::AppHandle,
+    bindings: &[ShortcutBinding],
+    mode: RegisterMode,
+) -> Result<(), String> {
+    register_shortcut_bindings(app, bindings, mode)?;
     write_shortcut_bindings(app, bindings);
     Ok(())
 }
@@ -2951,7 +3215,7 @@ pub(crate) fn apply_shortcut_bindings_for_plugin(
     if parsed == read_shortcut_bindings(app) {
         return Ok(());
     }
-    apply_shortcut_bindings(app, &parsed)
+    apply_shortcut_bindings(app, &parsed, RegisterMode::Atomic)
 }
 
 // ===================== 备份 / 导入 / 还原 =====================
@@ -3004,10 +3268,11 @@ pub(crate) fn write_backup_settings(
     }
     store.save().map_err(|e| format!("保存设置失败: {e}"))?;
 
-    // 快捷键：重新注册（失败不阻断——设置已落盘，重启后仍会生效）
+    // 快捷键：重新注册（BestEffort：被占用的键跳过、其余照常落地；失败不阻断——
+    // 设置已落盘，重启后仍会再试）
     if values.contains_key(SETTINGS_KEY_SHORTCUT_BINDINGS) {
         let bindings = read_shortcut_bindings(app);
-        if let Err(e) = register_shortcut_bindings(app, &bindings) {
+        if let Err(e) = register_shortcut_bindings(app, &bindings, RegisterMode::BestEffort) {
             eprintln!("还原后重新注册快捷键失败（重启应用生效）: {e}");
         }
     }
@@ -3478,9 +3743,14 @@ pub fn run() {
             // 此刻前端还没上报，取落盘偏好 / 系统兜底；前端挂载后会立即以
             // 真实偏好 + `prefers-color-scheme` 解析值覆盖（两者同源，通常一致）。
             apply_theme_to_windows(app.handle(), boot_pref, boot_dark);
-            // 读取自定义快捷键绑定（无自定义则用默认呼出键），逐条注册
+            // 读取自定义快捷键绑定（无自定义则用默认呼出键），逐条注册。
+            // 用 BestEffort：某条键（如 alt+f）被其它程序临时占用时只跳过它，
+            // 其余键——尤其呼出键——照常注册；严格模式下一次冲突会回滚全部，
+            // 表现为「按快捷键完全没反应」且错误只进看不见的 stderr。
             let bindings = read_shortcut_bindings(app.handle());
-            if let Err(e) = register_shortcut_bindings(app.handle(), &bindings) {
+            if let Err(e) =
+                register_shortcut_bindings(app.handle(), &bindings, RegisterMode::BestEffort)
+            {
                 eprintln!("注册全局快捷键失败: {e}");
             }
             // Alt+点击资源管理器文件快速带入：先读偏好再装全局鼠标钩子
@@ -3587,8 +3857,57 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{convert_raw_to_api, convert_raw_to_jsdelivr, parse_raw_github_url};
+    use super::{
+        convert_raw_to_api, convert_raw_to_jsdelivr, installer_args, installer_kind,
+        parse_raw_github_url, InstallerKind,
+    };
     use tauri_plugin_global_shortcut::Shortcut;
+
+    #[test]
+    fn installer_kind_by_extension() {
+        // 大小写不敏感：下载落盘的文件名后缀可能来自 URL，大小写不定
+        assert_eq!(installer_kind("C:\\tmp\\MySearch.msi"), InstallerKind::Msi);
+        assert_eq!(installer_kind("C:\\tmp\\MySearch.MSI"), InstallerKind::Msi);
+        assert_eq!(
+            installer_kind("C:\\tmp\\MySearch Setup.exe"),
+            InstallerKind::Nsis
+        );
+        assert_eq!(installer_kind("/tmp/MySearch.dmg"), InstallerKind::Other);
+        assert_eq!(installer_kind(""), InstallerKind::Other);
+    }
+
+    #[test]
+    fn msi_passive_args_quote_path_with_spaces() {
+        // 含空格路径必须加引号，否则 msiexec 拆参会把 /passive 当路径的一部分
+        let args = installer_args(
+            InstallerKind::Msi,
+            "C:\\Users\\zhuang jie\\AppData\\Local\\Temp\\MySearch.msi",
+        );
+        assert_eq!(
+            args,
+            vec![
+                "/i",
+                "\"C:\\Users\\zhuang jie\\AppData\\Local\\Temp\\MySearch.msi\"",
+                "/passive",
+                "/promptrestart",
+                "AUTOLAUNCHAPP=True",
+            ]
+        );
+        // 无空格路径不加引号（msiexec 同样接受，保持参数干净）
+        let plain = installer_args(InstallerKind::Msi, "C:\\tmp\\MySearch.msi");
+        assert_eq!(plain[1], "C:\\tmp\\MySearch.msi");
+    }
+
+    #[test]
+    fn nsis_passive_update_restart_args() {
+        // /P 免交互 + /UPDATE 不卸载旧版 + /R 装完重启应用；NSIS 自身就是目标文件
+        assert_eq!(
+            installer_args(InstallerKind::Nsis, "C:\\tmp\\setup.exe"),
+            vec!["/P", "/UPDATE", "/R"]
+        );
+        // 其它平台没有免交互开关，交给系统默认处理器
+        assert!(installer_args(InstallerKind::Other, "/tmp/a.dmg").is_empty());
+    }
 
     #[test]
     fn shortcut_strings_parse_like_global_hotkey() {

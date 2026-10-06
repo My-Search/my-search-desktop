@@ -87,6 +87,9 @@ sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file \
 
 > 检测到新版本会在后台静默下载；**下载完成后**叶子 logo 右下角出现一个纯红向上箭头，
 > 此时左键点叶子（或箭头）即打开安装程序。没有就绪更新时叶子行为不变。
+> Windows 上升级是**免交互**的：不选安装路径、不翻向导页，直接装回原目录并在装完后
+> 自动重新拉起应用（MSI 走 `/passive` + `AUTOLAUNCHAPP=True`，NSIS 走 `/P /UPDATE /R`）；
+> macOS / Linux 仍是交给系统打开安装包（`.dmg` 只是挂载镜像，不会自动重启应用）。
 
 > 「最近添加」条带：进入子搜索模式（输入框出现 `" : "`，如按 `Tab` 或输入 `::`）
 > 时自动展开，无需按 `Alt`；离开子搜索模式自动收起。条目多于一行时，溢出的一侧
@@ -174,7 +177,7 @@ my-search-desktop/
 
 ## 🔧 技术说明
 
-- **全局快捷键**：`tauri-plugin-global-shortcut` 注册。支持多条绑定，每条 = **快捷键 / 作用类型 / 作用对象**（`settings.json` 的 `shortcut_bindings` 数组）：`toggle-window` = 呼出 / 隐藏搜索窗（默认 `Ctrl+Alt+S`，只能一条）；`open-plugin` = 直接打开指定插件（Rust 端广播 `my-search://shortcut-open-plugin` 事件 + 插件 id，前端把窗口带到前台后由插件视图宿主打开，因此「插件是否存在 / 已启用 / 权限是否足够」的判断仍在前端注册表侧）；`quick-filter` = 快速过滤（Rust 端广播 `my-search://shortcut-quick-filter` 事件 + 常用头，前端把「常用头 + 二次搜索分隔符 ` : `」填入搜索框并立即搜索、光标置末尾）；`quick-open` = 快捷打开项（Rust 端广播 `my-search://shortcut-quick-open` 事件 + 匹配文本，前端用精确搜索匹配数据项：唯一则与点击项同路径直接打开、多项则列出结果、无匹配则提示）。设置时**整体重新注册**，任一条被占用则回滚到改动前的整套绑定（不会出现「改了一半」）；旧版单键 `toggle_shortcut` 自动迁移为一条 toggle-window 绑定
+- **全局快捷键**：`tauri-plugin-global-shortcut` 注册。支持多条绑定，每条 = **快捷键 / 作用类型 / 作用对象**（`settings.json` 的 `shortcut_bindings` 数组）：`toggle-window` = 呼出 / 隐藏搜索窗（默认 `Ctrl+Alt+S`，只能一条）；`open-plugin` = 直接打开指定插件（Rust 端广播 `my-search://shortcut-open-plugin` 事件 + 插件 id，前端把窗口带到前台后由插件视图宿主打开，因此「插件是否存在 / 已启用 / 权限是否足够」的判断仍在前端注册表侧）；`quick-filter` = 快速过滤（Rust 端广播 `my-search://shortcut-quick-filter` 事件 + 常用头，前端把「常用头 + 二次搜索分隔符 ` : `」填入搜索框并立即搜索、光标置末尾）；`quick-open` = 快捷打开项（Rust 端广播 `my-search://shortcut-quick-open` 事件 + 匹配文本，前端用精确搜索匹配数据项：唯一则与点击项同路径直接打开、多项则列出结果、无匹配则提示）。设置时**整体重新注册**，分两种失败策略：**用户在设置 / 插件面板里主动改动**走严格模式——任一条被占用则回滚到改动前的整套绑定（不会出现「改了一半」）；**冷启动 / 还原备份 / 插件动作后台自愈**走尽力而为模式——某条键被其它程序临时占用时只跳过那一条、其余（尤其呼出键）照常注册，并在自定义呼出键失败时**兜底补注册默认呼出键** `Ctrl+Alt+S`（用户主动删掉「呼出 / 隐藏」绑定时不注入）。严格模式下若旧绑定无法恢复（含旧绑定本来为空这种情况），同样兜底只注册默认呼出键，保证呼出能力始终可用。旧版单键 `toggle_shortcut` 自动迁移为一条 toggle-window 绑定
 - **插件快捷键动作（截图 / 剪贴板历史 / 录屏等）动态化**：这类作用类型由插件清单 `contributes.shortcut` 声明，**不写死在宿主里**。前端按「已安装插件」算出可用动作（`src/lib/plugins/shortcut-actions.ts`），经 `sync_plugin_shortcut_actions` 下发给 Rust：装了插件就注入其默认热键、卸载即移除绑定并注销热键（幂等、无变化不重注册）。动作分两类：**宿主原生**（`screenshot` 就地开遮罩、`clipboard` 广播事件由前端打开插件视图，执行器在宿主）；**插件自定义**（清单写本地动作名，宿主注册为 `plugin:<插件id>:<动作名>`，按下后 Rust 广播 `my-search://shortcut-plugin-action`，前端打开/恢复该插件视图并把动作名派发给插件脚本——插件用 `ms.shortcuts.onAction(本地名, fn)` 接收，执行逻辑完全在插件自己里）。用户主动「解绑」过的动作会被记住，重装不再强行加回
 - **开机自启动**：`tauri-plugin-autostart` 注册（**默认开启**，首次运行即写入系统启动项；用户偏好存于同一份 `settings.json` 的 `autostart_enabled`）。Windows 上写 `HKCU\...\CurrentVersion\Run`，读取时同时识别「任务管理器 → 启动」的启用/禁用覆盖，因此开关始终反映系统真实状态
 - **自启动静默（不弹任何窗口）**：exe 在 Windows 上**无条件**使用 GUI 子系统（`main.rs` 的 `#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]`，debug 构建也一样）。登录时进程由 explorer.exe 拉起、没有父控制台，若 exe 是 console 子系统，Windows 会为它新建一个控制台黑窗口并一直挂着（本应用常驻托盘不退出）；主窗口本身是 `visible: false`，启动阶段不会 `show()`，所以修掉控制台后登录完全静默。dev 日志不受影响：从终端/`npm run tauri dev` 启动时 stdout/stderr 句柄被继承，`eprintln!` 照常显示（已实测）
