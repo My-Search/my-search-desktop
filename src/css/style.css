@@ -221,7 +221,7 @@ html, body {
   object-fit: contain;
 }
 
-/* 「最近添加」条带（按 Alt 切换）：搜索框**正下方**的普通流内一行，盒子内
+/* 「最近添加」条带（进入子搜索模式且有文件/文件夹处理插件时显示）：搜索框**正下方**的普通流内一行，盒子内
    正常布局（有底色、与上下的分界靠一条淡分割线），窗口随之向下长高。
    必须参与 VIEW_PART_IDS 高度实测（漏了就会被窗口裁掉）；隐藏时 display:none →
    offsetHeight=0 天然不计入，收起逻辑不用改。 */
@@ -5013,9 +5013,15 @@ html.theme-dark body {
   background: #17191d;
 }
 
+/* 呼出框外框：深色下用 #4a4f58（与深色 --hover-border 同值）。
+   旧值 #33363d 与填充色 #17191d 的对比度仅 1.46:1，深色边框压在深色底上几乎
+   融为一片——尤其窗口下沿贴着白色页面时，视觉上就是「深色块直接切到白」，边框
+   仿佛不存在。提到 #4a4f58 后对比度 2.14:1（浅色主题 #cecece/#ffffff 为 1.57:1，
+   深色需更高才等观感），四条边都清晰可辨，且贴白底时仍是明确的深色描边。
+   回归测试：test/dark-theme-ui.test.mjs（锁死对比度 ≥ 2.0）。 */
 html.theme-dark #my_search_box {
   background: #17191d;
-  border-color: #33363d;
+  border-color: #4a4f58;
 }
 
 html.theme-dark #searchBox {

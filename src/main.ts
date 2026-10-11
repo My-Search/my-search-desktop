@@ -52,7 +52,7 @@ setThemeOverrideReporter((theme, resolved) => {
     const borderBox = skeleton.firstElementChild as HTMLElement | null;
     if (borderBox) {
       borderBox.style.background = "#17191d";
-      borderBox.style.borderColor = "#33363d";
+      borderBox.style.borderColor = "#4a4f58";
       // 叶子占位圆：深色时也改暗，避免浅灰圆在深色背景上白闪
       const flexRow = borderBox.firstElementChild as HTMLElement | null;
       if (flexRow) {

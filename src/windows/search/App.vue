@@ -8,7 +8,7 @@
  *     > #my_search_view
  *         > SearchBox (#searchBox)
  *         > #recentStrip     ← 「最近添加」条带：搜索框正下方的流内一行
- *                              （进入子搜索模式自动展开 / 纯 Alt 手动切换）
+ *                              （进入子搜索模式且结果里有文件/文件夹插件时自动展开）
  *         > #matchResult > ResultList (#matchItems)
  *         > DetailView (#text_show)
  *
@@ -81,6 +81,7 @@ import { SEARCH_BOUNDARY, SPECIAL_KEYWORD, scoreSelect, historySelect } from "..
 import { normalizeQuickFilterHeader, pluginDefinedActionName } from "../../lib/shortcut-bindings";
 import {
   attachmentKey,
+  anyHandlerCapability,
   buildAttachmentFilter,
   mergeAttachments,
   mergeRecentAttachments,
@@ -241,11 +242,11 @@ const attachments = ref<AttachedEntry[]>([]);
 const draggingFiles = ref(false);
 
 /**
- * 「最近添加」历史（Alt 条带的数据源）。与 attachments 分开存：复位会清
+ * 「最近添加」历史（「最近添加」条带的数据源）。与 attachments 分开存：复位会清
  * 附件（下次呼出干净搜索框），但历史必须留下——它就是条带存在的意义。
  */
 const recentFiles = ref<AttachedEntry[]>([]);
-/** Alt 条带是否展开（显示在搜索框下方；用普通流内布局，窗口随之长高） */
+/** 「最近添加」条带是否展开（显示在搜索框下方；用普通流内布局，窗口随之长高） */
 const recentVisible = ref(false);
 
 /** 条带 DOM（用于测量横向溢出、监听滚动；见下方 stripEdges） */
@@ -258,23 +259,6 @@ const recentStripRef = ref<HTMLElement | null>(null);
  * 几何计算，抽在 lib/strip-overflow.ts 里便于单测。
  */
 const stripEdges = reactive({ left: false, right: false });
-
-/**
- * 最近一次「窗口被呼出」的时刻（performance.now()，0=本次会话尚未呼出过）。
- *
- * 用途：Alt+点击带入时 Alt 是**按住的**（在资源管理器里按下，keydown 发生
- * 在资源管理器、不在本窗口）。窗口获得焦点后若用户仍按着 Alt 再补一次
- * 按下，理论上会在本窗口产生 keydown 而弹出条带——这不是我们要的。
- * 呼出后的极短时间内屏蔽条带展开，把「点击带入」与「输入框里按 Alt」彻底分开。
- */
-let summonedAt = 0;
-/** 呼出后屏蔽条带展开的时长（覆盖焦点落定 + 按键抖动） */
-const SUMMON_STRIP_GUARD_MS = 400;
-
-/** 标记刚被呼出（在 onMainWindowShown 里调用） */
-function markSummoned(): void {
-  summonedAt = performance.now();
-}
 
 /**
  * 附件变更统一入口：改状态 → 登记到 Rust（读取/列举的第二道校验依据）
@@ -672,7 +656,7 @@ onBeforeUnmount(() => syncBridge.dispose());
  * 真的漏过一次：搜索窗的 #cfgToast 没有 fixed 规则），它们就会被当成普通块
  * 撑高盒子——而下发的高度是白名单值（48 / 内容高度），多出来的部分只会溢出
  * 窗口，表现为**搜索框下边框消失**。按视图子节点求和可以让这层错误无法生效。
- * #recentStrip（Alt 最近条带）是盒子内的正经流内视图节点（搜索框下方），
+ * #recentStrip（「最近添加」条带）是盒子内的正经流内视图节点（搜索框下方），
  * 一并入列参与实测；收起时 display:none → offsetHeight 0 天然不计入。
  */
 const VIEW_PART_IDS = ["searchBox", "recentStrip", "matchResult", "text_show"] as const;
@@ -1296,8 +1280,31 @@ watch(stripFiles, (list) => {
 });
 
 /**
- * 进入子搜索模式（关键词含 `" : "` / SEARCH_BOUNDARY）→ **自动展开**「最近添加」
- * 条带，等价于用户按一次 Alt。
+ * 条带**主动显示**的条件：当前是否存在「**既声明了文件/文件夹处理能力、又会出现在
+ * 搜索结果里**」的启用插件（如内置的「文件搜索」：`contributes.handlers.folders`
+ * + `contributes.searchItem`）。
+ *
+ * 为什么以「是否存在这类插件」为准：条带里全是文件/文件夹，只有把它们再拖回来
+ * 有去处（有插件能处理）时，主动露出才有意义；纯 URL / 纯文本型搜索（只剩搜索
+ * 框 + 结果列表）若还占着这一行，纯属浪费窗口高度。
+ *
+ * 为什么盯插件**能力声明**而不是「当前结果里出现了哪个插件」：进入子搜索模式
+ * 那一刻 `state.results` 尚在异步计算中，若等结果落地才决定，条带会先收着、过一拍
+ * 才冒出来（观感跳动）。而「有没有能处理文件的插件」由注册表同步决定，与检索结果
+ * 无关——没有这种插件的用户从头到尾都不会看到条带，有的用户则按原先的节奏（进入
+ * 子搜索模式）自然展开，不会闪烁。
+ *
+ * 每次调用都现读 `activePlugins()`（不做 computed 缓存）：注册表可能在会话中途
+ * 变化（用户在设置窗口新装 / 启用了「文件搜索」），而调用点（进入子搜索模式的跃变）
+ * 本就不频繁，现读能保证「刚装好插件、切回来进子搜索模式」立刻生效。
+ */
+function hasFileFolderAbility(): boolean {
+  return pluginHost.loaded.value && anyHandlerCapability(pluginHost.activePlugins());
+}
+
+/**
+ * 进入子搜索模式（关键词含 `" : "` / SEARCH_BOUNDARY）→ 在「有文件/文件夹处理
+ * 插件」时**主动展开**「最近添加」条带。
  *
  * 为什么盯 `inputValue` 而不是某个 Tab 处理器：`inputValue` 是所有进入路径的
  * **唯一汇聚点**——手动敲 ` : `、Tab 进 PRO 模式、`::` / `：：` 自动补分隔符、
@@ -1305,9 +1312,9 @@ watch(stripFiles, (list) => {
  * 全部入口，不用在每个入口各打一次补丁（那样迟早漏掉新入口）。
  *
  * 只在**进入 / 离开的跃变**上动作：模式内继续打字（子关键词）不该反复触发；
- * 离开子搜索模式则对称收回（模式驱动语义）。手动按 Alt 的临时开合与模式无关，
- * 不受影响。这里**不套呼出保护期**（`SUMMON_STRIP_GUARD_MS`）——那条只挡
- * 「Alt+点击带入」的按键抖动，而这里是用户明确的输入行为。
+ * 离开子搜索模式则对称收回（模式驱动语义）。**不再提供「按 Alt 手动开合」**：
+ * 显示与否完全由「结果里有没有能处理文件/文件夹的插件」驱动（见 hasFileFolderAbility），
+ * 用户不再需要、也无法用 Alt 手动唤起它。
  */
 const inSubSearchMode = computed(() => inputValue.value.includes(SEARCH_BOUNDARY));
 watch(inSubSearchMode, (now, was) => {
@@ -1327,9 +1334,17 @@ function refreshHeightAfterStripToggle(): void {
 }
 
 /** 展开条带：渲染 → 按内容重下发窗口高度（条带在盒子内，向下生长）。
-    **没有可选项就不展开**（历史为空、或历史里的条目全都已经在输入框里了）：
-   与其显示一条「暂无…」的空行，不如不占位——所以这里直接返回，保持收起态。 */
+    两道前置门槛，缺一不可（任一不满足都直接返回、保持收起态）：
+      1. **没有可选项就不展开**（历史为空、或历史里的条目全都已经在输入框里了）：
+         与其显示一条「暂无…」的空行，不如不占位；
+      2. **没有文件/文件夹处理插件就不展开**（`hasFileFolderAbility` 为假）：
+         条带只在结果里有能接手文件/文件夹的插件（如「文件搜索」）时才主动露出，
+         纯 URL / 纯文本型搜索不该被这行占掉窗口高度。 */
 async function showRecentStrip(): Promise<void> {
+  if (!hasFileFolderAbility()) {
+    hideRecentStrip();
+    return;
+  }
   if (stripFiles.value.length === 0) {
     hideRecentStrip();
     return;
@@ -1916,43 +1931,6 @@ let unlistenBuiltin: (() => void) | null = null;
 /** 系统文件拖放（Tauri 原生拖拽事件）监听器 */
 let unlistenDragDrop: (() => void) | null = null;
 
-/** 输入框当前是否持有焦点（条带只在「聚焦输入框」时才响应 Alt）。 */
-function isSearchInputFocused(): boolean {
-  const el = searchBoxRef.value?.element ?? null;
-  return !!el && document.activeElement === el;
-}
-
-/** 纯 Alt 按下 → 展开「最近添加」条带（**仅在输入框聚焦时**）。
-    - Alt+组合键（Alt+Tab/F4…）的主键 keydown 拿到的是主键名而非 "Alt"，天然不触发；
-    - e.repeat 挡住按住 Alt 的自动重复；
-    - 「无 Ctrl/Shift/Win」与 Rust 侧 Alt+点击钩子的纯 Alt 判定保持一致；
-    - **只在输入框聚焦时响应**：资源管理器「Alt+点击带入」会让窗口获得焦点并
-      弹入文件，但那是鼠标手势（Alt 早已按下、不会在窗口内产生 keydown），
-      且此刻输入框未必聚焦；此门禁确保两条路径互不干扰——点击带入永远不展开
-      条带，只有用户**在输入框里**主动按 Alt 才展开。
-    - 是「展开」而非「切换」：Alt 松开不收回（开关语义），再按一次才收起。 */
-function onGlobalAltKeydown(e: KeyboardEvent): void {
-  if (e.key !== "Alt" || e.ctrlKey || e.shiftKey || e.metaKey || e.repeat) return;
-  if (!isSearchInputFocused()) return;
-  // 呼出后的极短保护期内不展开：挡住 Alt+点击带入时「Alt 还按着」的抖动
-  if (performance.now() - summonedAt < SUMMON_STRIP_GUARD_MS) return;
-  // 压制 WebView2 的 Alt 菜单激活 / 焦点环（keyup 侧同样压制）
-  e.preventDefault();
-  if (recentVisible.value) {
-    hideRecentStrip();
-  } else {
-    void showRecentStrip();
-  }
-}
-
-/** Alt 松开：只压制默认行为（输入框聚焦时），显示状态由 keydown 切换、
-    不在此收回（开关语义）。未聚焦时不干预，避免影响其它 Alt 交互。 */
-function onGlobalAltKeyup(e: KeyboardEvent): void {
-  if (e.key !== "Alt") return;
-  if (!isSearchInputFocused()) return;
-  e.preventDefault();
-}
-
 /**
  * Esc 的统一处理（输入框聚焦 / 失焦两条路径共用，保证行为完全等价）。
  *
@@ -1999,7 +1977,7 @@ onMounted(async () => {
   // 启动时把窗口收起到搜索框高度（WebView 重载后窗口可能保持上次展开的高度）
   collapseToBoxHeight();
 
-  // 「最近添加」历史：localStorage 同步读，赶在任何 Alt 按键之前
+  // 「最近添加」历史：localStorage 同步读，赶在首次展开判断之前
   loadRecentAttachments();
 
   // 键盘监听必须在任何 await 之前注册：
@@ -2008,9 +1986,6 @@ onMounted(async () => {
   document.addEventListener("keydown", onGlobalKeydown);
   // 全局 ESC：详情视图 / 结果列表显示时，输入框无焦点也与输入框 ESC 行为一致
   document.addEventListener("keydown", onGlobalEsc, true);
-  // 纯 Alt 切换「最近添加」条带（capture：先于输入框链路；keyup 同步压制焦点环）
-  document.addEventListener("keydown", onGlobalAltKeydown, true);
-  document.addEventListener("keyup", onGlobalAltKeyup, true);
   // 视口变化后把拉伸态容器高度同步到真实视口：窗口 setSize 是异步的，拖拽
   // 期间视口会滞后于窗口，靠 height:100% 会解析到旧值、把内容压在顶部。
   // resize 事件在视口真正更新后才触发，这里读到的 innerHeight 已是最新值。
@@ -2042,8 +2017,6 @@ onMounted(async () => {
     // 复位到 48 高。直清标记即可——下面的复位/恢复路径都经 nextTick 或 50ms
     // 防抖测量，Vue 会先完成本次 DOM 收起再轮到它们。
     recentVisible.value = false;
-    // 记录呼出时刻：保护期内不响应 Alt 展开（把 Alt+点击带入与「输入框里按 Alt」分开）
-    markSummoned();
     // 插件可能在设置窗口里被装/卸/启停：呼出时对一次注册表指纹，变了才重载。
     // 重载后顺手清掉「注册表里已经不该存在」的保活会话（禁用/卸载的插件不该
     // 还能被恢复出来）——设置窗口与搜索窗是两个 WebView，只能在这一刻对齐。
@@ -2150,9 +2123,9 @@ onMounted(async () => {
 
   // 资源管理器「Alt+点击文件」（Rust 端已先 show 窗口并广播复位事件，
   // 本事件按发送顺序晚于复位到达）：把路径并入附件，与粘贴/拖入同管线。
-  // 同时**显式收起「最近添加」条带**：点击带入不该顺带展示历史（用户明确规则：
-  // 条带只在输入框聚焦时按 Alt 才出现）。onMainWindowShown 已清过一次，这里
-  // 再兜一次，防止复位与附件注入之间的时序抖动让它冒出来。
+  // 同时**显式收起「最近添加」条带**：点击带入只是往输入框里塞附件，不该顺带
+  // 展示历史。onMainWindowShown 已清过一次，这里再兜一次，防止复位与附件注入
+  // 之间的时序抖动让它冒出来。
   //
   // **附加完成后再兜底聚焦输入框**：呼出时 onMainWindowShown 已聚焦过一次，但
   // attachByPaths 是异步的（要先经 Rust 解析路径），落定后 DOM/焦点可能已被
@@ -2315,8 +2288,6 @@ function onVisibilityChange(): void {
 onBeforeUnmount(() => {
   document.removeEventListener("keydown", onGlobalKeydown);
   document.removeEventListener("keydown", onGlobalEsc, true);
-  document.removeEventListener("keydown", onGlobalAltKeydown, true);
-  document.removeEventListener("keyup", onGlobalAltKeyup, true);
   window.removeEventListener("resize", syncPluginBoxHeight);
   // 条带尺寸观察器与待执行的 rAF 一并收掉（避免卸载后回调仍触碰已销毁的 DOM）
   stripResizeObserver?.disconnect();
@@ -2377,9 +2348,10 @@ defineExpose({ inputValue });
         @chip-click="onChipClick"
       />
       <!-- 「最近添加」条带：**搜索框正下方**的普通流内一行，跟着盒子一起向下
-           生长（窗口高度由 measuredBoxHeight 按实测下发）。两种展开方式：
-           ① 进入子搜索模式（关键词含 " : "）时自动展开（见 inSubSearchMode 的 watch）；
-           ② 输入框聚焦时按纯 Alt 手动切换。
+           生长（窗口高度由 measuredBoxHeight 按实测下发）。展开条件：
+           进入子搜索模式（关键词含 " : "）时自动展开（见 inSubSearchMode 的 watch），
+           但**仅当结果里有能处理文件/文件夹的插件**（见 hasFileFolderAbility）——
+           没有这类插件时搜索框下不会有这一行，不再提供按 Alt 手动开合。
            隐藏时 display:none → offsetHeight=0 天然不计入高度。
            点条目 → 附加进上方输入框（成为附件 chip），条带随即不再列出它；
            把输入框里的 chip 删掉后，它会自动回到条带（见 stripFiles）。

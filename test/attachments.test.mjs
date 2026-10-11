@@ -17,6 +17,7 @@ import {
   hasFolder,
   mergeAttachments,
   buildAttachmentFilter,
+  anyHandlerCapability,
   attachmentPlaceholder,
   isPreviewImage,
   extOf,
@@ -158,6 +159,72 @@ const ok = (cond, name, extra = "") => {
     !folderFilter(itemOf("com.example.uploader")) && folderFilter(itemOf("com.example.finder")),
     "谓词惰性读取记录（禁用/卸载即时生效）"
   );
+}
+
+/* ---------- 3.5 「最近添加」条带主动显示的能力探测 ---------- */
+{
+  // searchItem 默认给一个可见项（插件会出现在搜索结果里）；handlers 决定处理能力
+  const mkRecord = (id, handlers, { enabled = true, searchItem = { title: "T", keyword: "k" } } = {}) => ({
+    id,
+    enabled,
+    manifest: {
+      contributes: {
+        ...(handlers ? { handlers } : {}),
+        ...(searchItem ? { searchItem } : {}),
+      },
+    },
+  });
+
+  // 有能处理文件/文件夹、且会出现在结果里的启用插件 → 条带该主动露出（如「文件搜索」）
+  ok(
+    anyHandlerCapability([mkRecord("com.mysearch.file-search", { folders: true })]),
+    "有文件夹处理能力的启用插件 → 主动显示"
+  );
+  ok(
+    anyHandlerCapability([mkRecord("com.example.uploader", { files: true })]),
+    "有文件处理能力的启用插件 → 主动显示"
+  );
+
+  // 纯 URL / 纯文本型插件（未声明 handlers）→ 不主动显示
+  ok(
+    !anyHandlerCapability([mkRecord("com.example.plain", undefined)]),
+    "未声明 handlers 的插件 → 不主动显示"
+  );
+  ok(
+    !anyHandlerCapability([mkRecord("com.example.weird", { files: false, folders: false })]),
+    "两类能力都 false → 不主动显示"
+  );
+  // 能力插件被禁用 → 视同没有
+  ok(
+    !anyHandlerCapability([mkRecord("com.example.off", { files: true }, { enabled: false })]),
+    "能力插件被禁用 → 不主动显示"
+  );
+  // 有处理能力但不贡献搜索项（纯后台插件）→ 结果里看不到它，不主动显示
+  ok(
+    !anyHandlerCapability([mkRecord("com.example.bg", { files: true }, { searchItem: null })]),
+    "有处理能力但无搜索项 → 不主动显示"
+  );
+  // 搜索项全部 visible:false（不在结果里）→ 同样不主动显示
+  ok(
+    !anyHandlerCapability([
+      mkRecord("com.example.hidden", { files: true }, { searchItem: { title: "隐藏", keyword: "h", visible: false } }),
+    ]),
+    "处理能力插件的搜索项全不可见 → 不主动显示"
+  );
+
+  // 混合：只要有一个能处理的启用插件就显示
+  ok(
+    anyHandlerCapability([
+      mkRecord("com.example.plain", undefined),
+      mkRecord("com.example.finder", { folders: true }),
+    ]),
+    "混合插件列表：存在任一能力插件即显示"
+  );
+
+  // 空 / 缺省输入不抛错、判定为「不显示」
+  ok(!anyHandlerCapability([]), "空列表 → 不主动显示");
+  ok(!anyHandlerCapability(undefined), "undefined 列表 → 不主动显示");
+  ok(!anyHandlerCapability(null), "null 列表 → 不主动显示");
 }
 
 /* ---------- 4. 引擎附件模式 ---------- */

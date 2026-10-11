@@ -198,6 +198,22 @@ const SEED = `(() => {
   localStorage.setItem('my-search-desktop:RECENT_ATTACH_KEY', JSON.stringify([
     { kind: 'file', name: 'notes.txt', path: 'C:/tmp/notes.txt' },
   ]));
+  // 一个声明了 contributes.handlers.folders 的插件：条带「按需显示」的前提——
+  // 没有能处理文件/文件夹的插件时，进入子搜索模式也不会露出条带（见 recent-strip-ui）。
+  localStorage.setItem('my-search-desktop:PLUGIN_REGISTRY_CACHE_KEY', JSON.stringify({
+    version: 1,
+    plugins: [{
+      id: 'com.mysearch.file-search', name: '文件搜索', version: '1.0.0', apiVersion: 1,
+      enabled: true, source: { kind: 'folder', ref: '/tmp/file-search' },
+      manifest: {
+        id: 'com.mysearch.file-search', name: '文件搜索', version: '1.0.0', apiVersion: 1,
+        contributes: {
+          handlers: { folders: true },
+          searchItem: { title: '文件搜索', keyword: '文件搜索' },
+        },
+      },
+    }],
+  }));
   return items.length;
 })()`;
 
@@ -309,12 +325,13 @@ check(
   `hide次数 ${hideBefore3} → ${await evalJs(`window.__windowHideCount`)}`
 );
 
-// ---- 4. 结果列表上 Alt 展开的条带：Esc 仍只收条带、不藏窗口（保留原分层）----
+// ---- 4. 结果列表上展开的条带：Esc 仍只收条带、不藏窗口（保留原分层）----
+// 条带改由「进入子搜索模式」展开（本场景已 seed 文件/文件夹插件，满足按需显示前提）；
+// 旧版按 Alt 手动开合的行为已移除。
+// 先离开子搜索模式（上一段仍停在 " : "），再重新进入以触发「跃变 → 展开」。
 await typeKeyword("普通");
-await evalJs(`document.getElementById('my_search_input').focus(); 1`);
-await sleep(100);
-await pressKey("Alt", "AltLeft", 18); // 输入框聚焦时纯 Alt = 开/关条带
-check("结果列表上 Alt 展开「最近添加」条带", (await stripShown()) === true);
+await typeKeyword("普通 : ");
+check("结果列表上（子搜索模式）展开「最近添加」条带", (await stripShown()) === true);
 const hideBefore4 = await evalJs(`window.__windowHideCount`);
 await evalJs(`document.getElementById('my_search_input').blur()`);
 await pressEsc();

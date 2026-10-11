@@ -1,7 +1,7 @@
 /**
  * 「最近添加」条带（Alt 条带）的真实浏览器回归：
- *   1. **进入子搜索模式自动展开**——关键词出现 `" : "`（SEARCH_BOUNDARY）时，
- *      搜索框下方的 #recentStrip 自动显示（等价于按一次 Alt）；
+ *   1. **进入子搜索模式自动展开**——关键词出现 `" : "`（SEARCH_BOUNDARY）且
+ *      存在文件/文件夹处理插件时，搜索框下方的 #recentStrip 自动显示；
  *   2. **左右溢出「隧道」效果**——右侧还有被裁内容时挂 .fade-right；向左滚过时
  *      挂 .fade-left、滚到最右则 .fade-right 消失、回到最左 .fade-left 消失；
  *   3. 离开子搜索模式（Shift+Tab 去掉分隔符）→ 条带对称收起；
@@ -206,6 +206,22 @@ const SEED = `(() => {
       path: 'C:/demo/一个名字相当长的目录_' + i + '/一个名字相当长的历史文件_' + i + '.docx' });
   }
   localStorage.setItem('my-search-desktop:RECENT_ATTACH_KEY', JSON.stringify(recent));
+  // 「文件搜索」插件：声明了 contributes.handlers.folders，是条带主动显示的前提。
+  // 没有这类能处理文件/文件夹的插件时，进入子搜索模式也不会露出条带（见测试 5）。
+  localStorage.setItem('my-search-desktop:PLUGIN_REGISTRY_CACHE_KEY', JSON.stringify({
+    version: 1,
+    plugins: [{
+      id: 'com.mysearch.file-search', name: '文件搜索', version: '1.0.0', apiVersion: 1,
+      enabled: true, source: { kind: 'folder', ref: '/tmp/file-search' },
+      manifest: {
+        id: 'com.mysearch.file-search', name: '文件搜索', version: '1.0.0', apiVersion: 1,
+        contributes: {
+          handlers: { folders: true },
+          searchItem: { title: '文件搜索', keyword: '文件搜索' },
+        },
+      },
+    }],
+  }));
   return recent.length;
 })()`;
 
@@ -278,7 +294,26 @@ const valAfterShiftTab = await evalJs(`document.getElementById('my_search_input'
 check("Shift+Tab 退出子搜索模式（值不含 ' : '）", !valAfterShiftTab.includes(" : "), `value=${JSON.stringify(valAfterShiftTab)}`);
 check("离开子搜索模式 → 条带自动收起", (await stripShown()) === false, `class=${await stripClass()}`);
 
-/* ---------------- 5. 无异常 ---------------- */
+/* ---------------- 5. 没有能处理文件/文件夹的插件 → 进入子搜索模式也不显示 ---------------- */
+// 清空插件注册表（去掉「文件搜索」），历史仍在：条带本可列出条目，但因没有任何
+// 声明 handlers 的插件，不该再主动占位（这是本次「按需显示」改动的核心契约）。
+await evalJs(
+  `localStorage.setItem('my-search-desktop:PLUGIN_REGISTRY_CACHE_KEY', JSON.stringify({ version: 1, plugins: [] })); 1`
+);
+await S("Page.navigate", { url: base + "/index.html" });
+await sleep(1500);
+await setInput("父关键词");
+await evalJs(`document.getElementById('my_search_input').focus(); 1`);
+await pressTab();
+const valNoPlugin = await evalJs(`document.getElementById('my_search_input').value`);
+check("（无插件场景）Tab 仍进入子搜索模式", valNoPlugin.includes(" : "), `value=${JSON.stringify(valNoPlugin)}`);
+check(
+  "无文件/文件夹插件：进入子搜索模式 → 条带不主动显示",
+  (await stripShown()) === false,
+  `class=${await stripClass()}`
+);
+
+/* ---------------- 6. 无异常 ---------------- */
 check("无未捕获页面异常", pageErrors.length === 0, pageErrors.slice(0, 2).join(" | "));
 
 const failed = results.filter((r) => !r.pass);

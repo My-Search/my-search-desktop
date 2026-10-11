@@ -403,8 +403,10 @@ check(
   dark.active ? `contrast=${contrast(dark.active.bg, darkBoxBg).toFixed(2)} (${dark.active.bg})` : "无选中行"
 );
 
+// 旧值 #33363d 对比度只有 1.46:1，深色边框压在深色底上几乎看不见（尤其贴白底时）。
+// 现在用 #4a4f58（2.14:1），阈值抬到 2.0 锁死，防止再退回「看不见的边框」。
 const borderContrast = contrast(dark.box.border, darkBoxBg);
-check("深色：搜索框边框仍可见（对比度 ≥ 1.25）", borderContrast >= 1.25, `contrast=${borderContrast.toFixed(2)} (${dark.box.border})`);
+check("深色：搜索框边框清晰可见（对比度 ≥ 2.0）", borderContrast >= 2.0, `contrast=${borderContrast.toFixed(2)} (${dark.box.border})`);
 
 check(
   "深色：快捷链接文字与链接底色对比度 ≥ 4.5",

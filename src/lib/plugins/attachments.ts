@@ -14,7 +14,7 @@
 
 import type { SearchItem } from "../../types/index.ts";
 import { pluginIdOf } from "./plugin-items.ts";
-import { inputHandlersOf } from "./manifest.ts";
+import { inputHandlersOf, listSearchItems } from "./manifest.ts";
 import type { PluginRecord } from "./registry.ts";
 
 /** 附件条目：搜索框里粘贴/拖入的一个文件或文件夹 */
@@ -98,7 +98,7 @@ export const RECENT_ATTACH_KEY = "RECENT_ATTACH_KEY";
 export const RECENT_ATTACH_CAP = 30;
 
 /**
- * 合并「最近添加」历史（Alt 条带的数据源）：本次新增的条目提到最前，
+ * 合并「最近添加」历史（「最近添加」条带的数据源）：本次新增的条目提到最前，
  * 按 attachmentKey 去重（同一文件反复添加只留最新一份并置顶），
  * **未固定**条目封顶 cap 条；**固定**条目额外保留、不计入上限，且始终排最前。
  *
@@ -198,6 +198,35 @@ export function buildAttachmentFilter(
     if (kinds.has("folder") && handlers.folders) return true;
     return false;
   };
+}
+
+/**
+ * 是否存在**既声明了附件处理能力、又会出现在搜索结果里**的插件。
+ *
+ * 用途：「最近添加」条带该不该**主动**显示——只有当搜索结果里有能处理
+ * 文件/文件夹的插件（如内置的「文件搜索」）时，把文件/文件夹再拖回来才有意义，
+ * 条带才主动占位；否则（纯 URL / 纯文本型搜索）条带只会白占一行窗口高度。
+ *
+ * 两个条件：
+ *   1. `contributes.handlers.files` / `folders` 至少一项为真（能接手文件/文件夹）；
+ *   2. `contributes.searchItem` 贡献了至少一个可见条目（`visible !== false`）——
+ *      只有会出现在结果列表里的插件才谈得上「结果里有能处理文件的项」，纯后台 /
+ *      无搜索项的插件不会让用户看到可选项。
+ *
+ * 只做「能力声明 + 是否可见」层面的存在性判断，不涉及具体某个文件能不能处理——
+ * 那是 `buildAttachmentFilter` 的职责（按当前附件类型匹配）。
+ */
+export function anyHandlerCapability(
+  records: readonly PluginRecord[] | null | undefined
+): boolean {
+  for (const rec of records ?? []) {
+    if (!rec || rec.enabled === false) continue;
+    const handlers = inputHandlersOf(rec.manifest);
+    if (!handlers.files && !handlers.folders) continue;
+    const items = listSearchItems(rec.manifest);
+    if (items.some((it) => it.visible !== false)) return true;
+  }
+  return false;
 }
 
 /**
