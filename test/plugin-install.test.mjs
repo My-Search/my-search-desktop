@@ -296,6 +296,56 @@ const ok = (cond, name, extra = "") => {
   );
   ok(!backendNoSpawn.ok, "声明 backend 但未申请 backend.spawn → 拒绝");
 
+  // backend.command（直接 argv，不经 cmd.exe）——静默启动正路
+  const backendCommand = parsePluginManifest(
+    JSON.stringify({
+      id: "com.example.xc",
+      name: "x",
+      version: "1.0.0",
+      apiVersion: 1,
+      permissions: ["backend.spawn"],
+      backend: { command: ["node", "backend/index.mjs"] },
+    }),
+    isKnownPermission
+  );
+  ok(backendCommand.ok, "backend.command（无 entry）通过", backendCommand.ok ? "" : backendCommand.errors.join(","));
+  ok(
+    backendCommand.ok &&
+      Array.isArray(backendCommand.manifest.backend?.command) &&
+      backendCommand.manifest.backend.command[0] === "node",
+    "backend.command 保留 argv"
+  );
+  ok(
+    backendCommand.ok && backendCommand.manifest.backend?.entry === "",
+    "仅有 command 时 entry 归一为空串"
+  );
+
+  const backendCommandBad = parsePluginManifest(
+    JSON.stringify({
+      id: "com.example.xd",
+      name: "x",
+      version: "1.0.0",
+      apiVersion: 1,
+      permissions: ["backend.spawn"],
+      backend: { command: [] },
+    }),
+    isKnownPermission
+  );
+  ok(!backendCommandBad.ok, "backend.command 为空数组 → 拒绝");
+
+  const backendCommandUnsafe = parsePluginManifest(
+    JSON.stringify({
+      id: "com.example.xe",
+      name: "x",
+      version: "1.0.0",
+      apiVersion: 1,
+      permissions: ["backend.spawn"],
+      backend: { command: ["node", "../../etc/passwd"] },
+    }),
+    isKnownPermission
+  );
+  ok(!backendCommandUnsafe.ok, "backend.command 路径穿越 → 拒绝");
+
   // scope 必需但缺失
   const noScope = parsePluginManifest(
     JSON.stringify({ id: "com.example.x3", name: "x", version: "1.0.0", apiVersion: 1, permissions: ["net.fetch"] }),

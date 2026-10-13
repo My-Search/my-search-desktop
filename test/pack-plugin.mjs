@@ -153,6 +153,20 @@ if (backend?.entry && !files.some((f) => f.name === backend.entry)) {
   console.error(`错误：清单声明的 backend.entry 不存在于包内：${backend.entry}`);
   process.exit(1);
 }
+// backend.command 里指向插件内文件的项（含分隔符、非绝对路径、非选项）也必须在包内
+if (Array.isArray(backend?.command)) {
+  for (const item of backend.command) {
+    if (typeof item !== "string") continue;
+    if (item.startsWith("-") || item.startsWith("$")) continue;
+    if (!item.includes("/") && !item.includes("\\")) continue;
+    if (/^[A-Za-z]:/.test(item) || item.startsWith("/") || item.startsWith("\\")) continue;
+    const rel = item.replace(/\\/g, "/");
+    if (!files.some((f) => f.name === rel)) {
+      console.error(`错误：清单声明的 backend.command 项不存在于包内：${item}`);
+      process.exit(1);
+    }
+  }
+}
 
 // ---- 3. 打包 ----
 const zip = await writeZip(files);

@@ -1,7 +1,7 @@
 {
   "id": "com.zhuangjie.github-upload",
   "name": "GitHub 文件上传",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "apiVersion": 1,
   "minAppVersion": "7.9.15",
   "author": "zhuangjie",
@@ -38,6 +38,7 @@
   },
   "backend": {
     "entry": "backend/run.cmd",
+    "command": ["node", "backend/index.mjs"],
     "protocol": "jsonrpc-stdio",
     "autostart": "on-demand",
     "closeBehavior": "exit",

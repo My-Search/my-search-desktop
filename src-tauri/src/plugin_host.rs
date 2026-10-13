@@ -186,6 +186,19 @@ pub struct GatewaySpec {
     pub grants: Vec<String>,
     #[serde(default)]
     pub backend_entry: Option<String>,
+    /// 直接 argv 形式的后台命令（如 `["node", "backend/index.mjs"]`）。
+    ///
+    /// **为什么需要它**：`backend_entry` 走 `.cmd` 时，Windows 上会先拉起一个
+    /// `cmd.exe` 中间进程（进程树里能看到 `cmd.exe /c .../run.cmd`）。即使用
+    /// `CREATE_NO_WINDOW` 把它藏住了，多出来的 `cmd.exe`/conhost 仍然是「黑窗口
+    /// 恐慌」的来源，且隐藏完全依赖创建标志穿过 `cmd.exe` 传递到孙进程——
+    /// 任一环节没走到（旧构建、异常路径、重试分支）就会闪窗。
+    ///
+    /// `backend_command` 让插件**直接**声明可执行文件与参数（不经 shell）：
+    /// 宿主 `Command::new(argv[0]).args(argv[1..])` + `CREATE_NO_WINDOW`，
+    /// 从根本上不产生 `cmd.exe`。两者同时存在时以本字段优先；都没有则报错。
+    #[serde(default)]
+    pub backend_command: Option<Vec<String>>,
     #[serde(default)]
     pub backend_protocol: Option<String>,
     #[serde(default)]
@@ -538,14 +551,23 @@ fn plugin_install_inner(
 
 /// 用新安装的清单校准网关镜像里的后台入口 / 协议（仅覆盖安装后重启进程时用）。
 ///
-/// 为什么需要：`spawn_backend` 从网关取 `backend_entry`，而网关是前端在安装后
-/// 才同步的。若本次更新改了后台入口路径，先重启就会按旧路径 spawn 失败。
-/// 这里只更新这两个字段，权限 / 策略等仍以前端下发的镜像为准。
+/// 为什么需要：`spawn_backend` 从网关取 `backend_entry` / `backend_command`，
+/// 而网关是前端在安装后才同步的。若本次更新改了后台入口，先重启就会按旧值
+/// spawn 失败。这里只更新这几个字段，权限 / 策略等仍以前端下发的镜像为准。
 fn apply_backend_entry_from_manifest(plugin_id: &str, manifest: &Value) {
     let backend = manifest.get("backend");
     let entry = backend.and_then(|b| b.get("entry")).and_then(|v| v.as_str());
     let protocol = backend.and_then(|b| b.get("protocol")).and_then(|v| v.as_str());
-    if entry.is_none() && protocol.is_none() {
+    let command: Option<Vec<String>> = backend
+        .and_then(|b| b.get("command"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .filter(|v: &Vec<String>| !v.is_empty());
+    if entry.is_none() && protocol.is_none() && command.is_none() {
         return;
     }
     if let Ok(mut g) = GATEWAY.lock() {
@@ -555,6 +577,9 @@ fn apply_backend_entry_from_manifest(plugin_id: &str, manifest: &Value) {
             }
             if let Some(protocol) = protocol {
                 spec.backend_protocol = Some(protocol.to_string());
+            }
+            if let Some(command) = command {
+                spec.backend_command = Some(command);
             }
         }
     }
@@ -728,6 +753,116 @@ fn resolve_plugin_file(app: &AppHandle, plugin_id: &str, rel: &str) -> Result<Pa
         return Err(err(format!("文件不存在: {rel}（查找于 {}）", full.display())));
     }
     Ok(full)
+}
+
+/// 解析后台进程的启动 argv：`(program, args, 用于日志的描述)`。
+///
+/// **优先 `backend_command`（直接 argv，不经 shell）**：这是「静默启动」的正路——
+/// 宿主 `Command::new(program).args(args)` 直接 CreateProcess，进程树里不会出现
+/// `cmd.exe`/conhost 中间层，也就不存在「创建标志没传到孙进程就闪窗」的风险。
+///   - argv[0] 是绝对路径 → 原样使用（去掉 `\\?\` 前缀）；
+///   - argv[0] 含路径分隔符 → 解析为插件目录内绝对路径；
+///   - argv[0] 是裸名（如 `node`）→ 先看插件目录内有没有同名文件，有则用绝对路径，
+///     否则原样交给系统按 PATH 查找。
+///   其余参数中「看起来像路径」的项（含 `/` 或 `\`、且不以 `-` 开头）也解析为
+///   插件目录内绝对路径——这样开发挂载（源码在别处、安装目录只有 .dev-source）
+///   也能正确找到脚本；其余参数原样传递。
+///
+/// 回退 `backend_entry`：解析为插件内绝对路径后直接执行（`.cmd`/`.exe`/脚本）。
+/// 返回 `Ok(None)` 表示两者都没声明（该插件没有后台进程）。
+fn resolve_backend_argv(
+    app: &AppHandle,
+    plugin_id: &str,
+    spec: &GatewaySpec,
+) -> Result<Option<(String, Vec<String>, String)>, String> {
+    // 插件「内容根目录」：开发挂载时是源目录，否则是安装目录。
+    let dir = plugin_dir(app, plugin_id)?;
+    let base = dev_source_checked(&dir)?.unwrap_or(dir);
+    plan_backend_argv(spec, &base)
+}
+
+/// `resolve_backend_argv` 的纯核心：只依赖插件内容根目录 `base`，便于单测。
+///
+/// 约定：
+///   - `command[0]` 绝对路径 → 原样（去 `\\?\`）；含分隔符 → `base` 内相对路径
+///     （必须存在，否则报错）；裸名 → `base` 内有同名文件则用绝对路径，否则交给 PATH。
+///   - `command[1..]` 中「路径样式」项解析为 `base` 内绝对路径（不存在则原样保留，
+///     因为它可能是运行时才生成的输出路径），其余原样。
+///   - 无 `command` 时回退 `entry`（`base` 内可执行文件 / `.cmd` 启动器）。
+fn plan_backend_argv(
+    spec: &GatewaySpec,
+    base: &Path,
+) -> Result<Option<(String, Vec<String>, String)>, String> {
+    if let Some(raw) = spec.backend_command.as_ref() {
+        let argv: Vec<&String> = raw.iter().filter(|s| !s.trim().is_empty()).collect();
+        let Some(first) = argv.first() else {
+            return Err(err("backend.command 为空"));
+        };
+        let program = plan_backend_program(base, first)?;
+        let args: Vec<String> = argv[1..]
+            .iter()
+            .map(|s| plan_backend_arg(base, s))
+            .collect();
+        let desc = format!("command={first} {}", args.join(" "));
+        return Ok(Some((program, args, desc.trim().to_string())));
+    }
+    if let Some(entry) = spec.backend_entry.as_ref() {
+        if !is_safe_relative(entry) {
+            return Err(err(format!("非法路径: {entry}")));
+        }
+        let full = without_verbatim_prefix(&base.join(entry.replace('\\', "/")));
+        if !full.is_file() {
+            return Err(err(format!("文件不存在: {entry}（查找于 {}）", full.display())));
+        }
+        return Ok(Some((full.to_string_lossy().to_string(), Vec::new(), entry.clone())));
+    }
+    Ok(None)
+}
+
+/// 解析 argv[0]（纯核心）：绝对路径原样；含分隔符 → base 内相对路径；裸名 → base 内文件优先。
+fn plan_backend_program(base: &Path, program: &str) -> Result<String, String> {
+    let p = Path::new(program);
+    if p.is_absolute() {
+        return Ok(without_verbatim_prefix(p).to_string_lossy().to_string());
+    }
+    if program.contains('/') || program.contains('\\') {
+        let full = without_verbatim_prefix(&base.join(program.replace('\\', "/")));
+        if !full.is_file() {
+            return Err(err(format!("文件不存在: {program}（查找于 {}）", full.display())));
+        }
+        return Ok(full.to_string_lossy().to_string());
+    }
+    let cand = base.join(program);
+    if cand.is_file() {
+        return Ok(without_verbatim_prefix(&cand).to_string_lossy().to_string());
+    }
+    Ok(program.to_string())
+}
+
+/// 解析单个参数（纯核心）：路径样式项解析为 base 内绝对路径（不存在则原样）。
+fn plan_backend_arg(base: &Path, arg: &str) -> String {
+    if !looks_like_plugin_path(arg) {
+        return arg.to_string();
+    }
+    let full = without_verbatim_prefix(&base.join(arg.replace('\\', "/")));
+    if full.is_file() {
+        full.to_string_lossy().to_string()
+    } else {
+        arg.to_string()
+    }
+}
+
+/// 纯判据：这个 argv 参数是否应被当作「插件目录内的相对路径」来解析。
+/// 含分隔符、不以 `-`（选项）或 `$`（变量引用）开头、且本身不是绝对路径。
+fn looks_like_plugin_path(arg: &str) -> bool {
+    if arg.starts_with('-') || arg.starts_with('$') {
+        return false;
+    }
+    // 前导分隔符 = 根路径 / 绝对路径（Windows 上 `/x`、`\x` 都不是合法的插件内相对路径）
+    if arg.starts_with('/') || arg.starts_with('\\') {
+        return false;
+    }
+    (arg.contains('/') || arg.contains('\\')) && !Path::new(arg).is_absolute()
 }
 
 /// 读取插件内文本文件
@@ -1212,10 +1347,6 @@ fn spawn_backend(app: &AppHandle, plugin_id: &str) -> Result<BackendState, Strin
     if !has_base_permission(&spec, "backend.spawn") {
         return Err(err("未授予「运行本机程序」权限"));
     }
-    let entry = spec
-        .backend_entry
-        .clone()
-        .ok_or_else(|| err("该插件没有声明后台进程"))?;
     let protocol = spec
         .backend_protocol
         .clone()
@@ -1223,13 +1354,19 @@ fn spawn_backend(app: &AppHandle, plugin_id: &str) -> Result<BackendState, Strin
     if protocol != "jsonrpc-stdio" {
         return Err(err(format!("暂不支持的进程协议: {protocol}")));
     }
-    // cmd.exe 执行 .cmd 不认 \\?\ 前缀（开发挂载的源目录是 canonicalize 出来的）
-    let exe = without_verbatim_prefix(&resolve_plugin_file(app, plugin_id, &entry)?);
+    // 解析「怎么起进程」：优先直接 argv（backend_command，不经 shell），
+    // 否则回退到 backend_entry 指定的可执行文件 / .cmd 启动器。
+    // 两者都没有 = 没声明后台进程。
+    let (program, args, entry_desc) = match resolve_backend_argv(app, plugin_id, &spec)? {
+        Some(v) => v,
+        None => return Err(err("该插件没有声明后台进程")),
+    };
     let cwd = plugin_dir(app, plugin_id)?;
     let data_dir = plugin_data_dir(app, plugin_id)?;
 
-    let mut cmd = Command::new(&exe);
-    cmd.current_dir(&cwd)
+    let mut cmd = Command::new(&program);
+    cmd.args(&args)
+        .current_dir(&cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -1260,9 +1397,9 @@ fn spawn_backend(app: &AppHandle, plugin_id: &str) -> Result<BackendState, Strin
 
     let mut child = cmd
         .spawn()
-        .map_err(|e| err(format!("启动插件进程失败（{}）: {e}", exe.display())))?;
+        .map_err(|e| err(format!("启动插件进程失败（{entry_desc}）: {e}")))?;
     let pid = child.id();
-    append_log(app, plugin_id, &format!("进程已启动 pid={pid} entry={entry}"));
+    append_log(app, plugin_id, &format!("进程已启动 pid={pid} entry={entry_desc}"));
 
     // Windows：把子进程放进 Job Object，宿主退出/崩溃时整棵树一起结束
     #[cfg(windows)]
@@ -2080,7 +2217,11 @@ pub fn autostart_enabled_backends(app: &AppHandle) {
     load_gateway_snapshot(app);
     let ids: Vec<String> = gateway_all()
         .into_iter()
-        .filter(|spec| spec.enabled && spec.auto_start == "always" && spec.backend_entry.is_some())
+        .filter(|spec| {
+            spec.enabled
+                && spec.auto_start == "always"
+                && (spec.backend_command.is_some() || spec.backend_entry.is_some())
+        })
         .map(|spec| spec.plugin_id)
         .collect();
     if ids.is_empty() {
@@ -2107,8 +2248,8 @@ pub fn plugin_check_path(rel_path: String) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        decide_sync_action, has_base_permission, is_safe_relative, scope_allows,
-        validate_plugin_id, without_verbatim_prefix, GatewaySpec, SyncAction,
+        decide_sync_action, has_base_permission, is_safe_relative, looks_like_plugin_path,
+        scope_allows, validate_plugin_id, without_verbatim_prefix, GatewaySpec, SyncAction,
     };
 
     fn spec_with(grants: &[&str]) -> GatewaySpec {
@@ -2166,6 +2307,76 @@ mod tests {
         assert!(!is_safe_relative("http://evil.com/x"));
         assert!(!is_safe_relative("a\\..\\..\\b"));
         assert!(!is_safe_relative(""));
+    }
+
+    #[test]
+    fn backend_arg_path_heuristic() {
+        // 路径样式：应解析为插件目录内绝对路径
+        assert!(looks_like_plugin_path("backend/index.mjs"));
+        assert!(looks_like_plugin_path("ui\\index.js"));
+        // 选项 / 值 / 绝对路径：原样传递
+        assert!(!looks_like_plugin_path("--flag"));
+        assert!(!looks_like_plugin_path("-c"));
+        assert!(!looks_like_plugin_path("$GITHUB_TOKEN"));
+        assert!(!looks_like_plugin_path("plain"));
+        assert!(!looks_like_plugin_path(r"D:\x\y.mjs"));
+        assert!(!looks_like_plugin_path("/abs/path"));
+    }
+
+    #[test]
+    fn backend_argv_planning() {
+        use super::plan_backend_argv;
+        use std::fs;
+        use std::path::Path;
+        // 构造一个「插件目录」：backend/index.mjs 存在，node 不在此目录（模拟裸名走 PATH）
+        let base = std::env::temp_dir().join(format!("ms-argv-test-{}", std::process::id()));
+        let backend = base.join("backend");
+        fs::create_dir_all(&backend).unwrap();
+        let script = backend.join("index.mjs");
+        fs::write(&script, "// noop").unwrap();
+
+        // command 形式：裸名 node 原样（PATH），脚本参数解析为绝对路径，且**不经 cmd.exe**
+        let spec = GatewaySpec {
+            backend_command: Some(vec!["node".into(), "backend/index.mjs".into()]),
+            ..Default::default()
+        };
+        let (program, args, _desc) = plan_backend_argv(&spec, &base).unwrap().unwrap();
+        assert_eq!(program, "node");
+        assert_eq!(args.len(), 1);
+        assert!(args[0].ends_with("index.mjs"));
+        assert!(Path::new(&args[0]).is_absolute());
+        // 关键回归：绝不能是 cmd.exe / run.cmd
+        assert!(!program.to_ascii_lowercase().contains("cmd"));
+
+        // entry 回退形式：解析为 base 内绝对路径
+        let spec_entry = GatewaySpec {
+            backend_entry: Some("backend/index.mjs".into()),
+            ..Default::default()
+        };
+        let (program2, args2, _) = plan_backend_argv(&spec_entry, &base).unwrap().unwrap();
+        assert!(Path::new(&program2).is_absolute());
+        assert!(program2.ends_with("index.mjs"));
+        assert!(args2.is_empty());
+
+        // argv[0] 指向不存在的相对路径 → 报错（而不是静默启动失败）
+        let spec_missing = GatewaySpec {
+            backend_command: Some(vec!["backend/nope.exe".into()]),
+            ..Default::default()
+        };
+        assert!(plan_backend_argv(&spec_missing, &base).is_err());
+
+        // 参数中的路径样式项不存在 → 宽松保留原文（可能是运行时才生成的输出路径）
+        let spec_out = GatewaySpec {
+            backend_command: Some(vec!["node".into(), "backend/index.mjs".into(), "out/x.mp4".into()]),
+            ..Default::default()
+        };
+        let (_p, args_out, _) = plan_backend_argv(&spec_out, &base).unwrap().unwrap();
+        assert_eq!(args_out[1], "out/x.mp4");
+
+        // 两者都没有 → None（无后台进程）
+        assert!(plan_backend_argv(&GatewaySpec::default(), &base).unwrap().is_none());
+
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]

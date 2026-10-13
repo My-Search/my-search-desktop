@@ -76,6 +76,18 @@ export const DEFAULT_PLUGIN_THEME: PluginThemePreference = "inherit";
 export interface PluginBackendSpec {
   /** 可执行文件相对路径（如 backend/ai-ask.exe） */
   entry: string;
+  /**
+   * 直接 argv 形式的后台命令（如 `["node", "backend/index.mjs"]`）。
+   *
+   * **推荐用 `command` 而不是 `entry`（.cmd 启动器）**：`entry` 指向 `.cmd` 时，
+   * Windows 上宿主会先拉起 `cmd.exe` 中间进程（黑窗口的根源）；`command` 则让
+   * 宿主直接 `CreateProcess`（不经 shell、无 `cmd.exe`），从根本上保证静默。
+   * 声明了 `command` 时 `entry` 可省略（但仍建议保留 `entry` 供校验/兼容）。
+   *
+   * 约定：argv[0] 为绝对路径 / 插件内相对路径 / 裸命令名（裸名走 PATH）；
+   * 其余参数原样传递，工作目录已是插件目录。
+   */
+  command?: string[];
   /** 通信协议：stdio JSON-RPC（默认，无端口）/ 本地 HTTP（插件自起服务） */
   protocol?: "jsonrpc-stdio" | "localhost-http";
   /** 请求的自动启动策略（默认 always：未声明时安装后即随应用启动常驻） */
@@ -403,10 +415,38 @@ export function normalizeBackendSpec(
   }
   const src = raw as Record<string, unknown>;
   const entry = asString(src.entry);
-  if (!entry) {
+  // command：直接 argv 形式（推荐）。entry 与 command 至少要有一个。
+  let command: string[] | undefined;
+  if (src.command != null) {
+    if (!Array.isArray(src.command) || src.command.length === 0) {
+      errors.push("backend.command.invalid");
+    } else {
+      const argv: string[] = [];
+      for (const item of src.command) {
+        const s = asString(item);
+        if (!s) {
+          errors.push("backend.command.invalid");
+          argv.length = 0;
+          break;
+        }
+        argv.push(s);
+      }
+      if (argv.length > 0) command = argv;
+    }
+  }
+  if (!entry && !command) {
     errors.push("backend.entry.missing");
-  } else if (!isSafeRelativePath(entry)) {
+  } else if (entry && !isSafeRelativePath(entry)) {
     errors.push("backend.entry.unsafe");
+  }
+  // command 里带路径分隔符的项（argv[0] 或相对路径参数）必须安全
+  if (command) {
+    for (const item of command) {
+      if ((item.includes("/") || item.includes("\\")) && !item.startsWith("/") && !/^[A-Za-z]:/.test(item) && !isSafeRelativePath(item)) {
+        errors.push("backend.command.unsafe");
+        break;
+      }
+    }
   }
 
   const protocol = src.protocol;
@@ -449,11 +489,12 @@ export function normalizeBackendSpec(
   if (errors.length > 0) return { ok: false, errors };
 
   const spec: PluginBackendSpec = {
-    entry: entry as string,
+    entry: entry || "",
     protocol: (protocol as PluginBackendSpec["protocol"]) ?? "jsonrpc-stdio",
     autostart: (autostart as PluginAutostart) ?? DEFAULT_PLUGIN_AUTOSTART,
     closeBehavior: (closeBehavior as PluginCloseBehavior) ?? DEFAULT_CLOSE_BEHAVIOR,
   };
+  if (command) spec.command = command;
   for (const key of Object.keys(NUMBER_LIMITS) as Array<keyof typeof NUMBER_LIMITS>) {
     const n = clampNumber(src[key], key);
     if (n != null) (spec as unknown as Record<string, number>)[key] = n;
@@ -816,9 +857,13 @@ export function describeManifestError(code: string): string {
     case "backend.invalid":
       return "backend 必须是一个对象";
     case "backend.entry.missing":
-      return "backend 缺少可执行文件入口（entry）";
+      return "backend 缺少可执行文件入口（entry 或 command 至少一个）";
     case "backend.entry.unsafe":
       return "backend.entry 路径不安全（必须位于插件目录内）";
+    case "backend.command.invalid":
+      return "backend.command 必须是非空字符串数组";
+    case "backend.command.unsafe":
+      return "backend.command 中含不安全的路径（必须位于插件目录内）";
     case "backend.protocol.invalid":
       return "backend.protocol 只支持 jsonrpc-stdio / localhost-http";
     case "backend.autostart.invalid":

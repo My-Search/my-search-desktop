@@ -715,7 +715,7 @@ function stopRecord() {
     } catch {}
     const t = setTimeout(() => {
       try {
-        if (process.platform === "win32") spawn("taskkill", ["/PID", String(session.child.pid), "/T", "/F"]);
+        if (process.platform === "win32") spawn("taskkill", ["/PID", String(session.child.pid), "/T", "/F"], { windowsHide: true });
         else session.child.kill("SIGKILL");
       } catch {}
       done();
@@ -1157,7 +1157,7 @@ async function handleRequest(id, method, params) {
     case "cancelWatermark": {
       if (!transcoding) return sendResult(id, { ok: false, error: "没有进行中的转码" });
       try {
-        if (process.platform === "win32") spawn("taskkill", ["/PID", String(transcoding.child.pid), "/T", "/F"]);
+        if (process.platform === "win32") spawn("taskkill", ["/PID", String(transcoding.child.pid), "/T", "/F"], { windowsHide: true });
         else transcoding.child.kill("SIGKILL");
       } catch {}
       sendResult(id, { ok: true });
@@ -1255,7 +1255,7 @@ process.on("exit", () => {
   stopRegionBorder();
   try {
     if (recording?.child?.pid && process.platform === "win32") {
-      spawn("taskkill", ["/PID", String(recording.child.pid), "/T", "/F"]);
+      spawn("taskkill", ["/PID", String(recording.child.pid), "/T", "/F"], { windowsHide: true });
     }
   } catch {}
 });

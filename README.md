@@ -365,7 +365,7 @@ node test/pack-plugin.mjs plugins/baidu-translate              # → dist/baidu-
 node test/pack-plugin.mjs plugins/baidu-translate -o out/x.mspp
 ```
 
-打包前会先跑清单校验，并检查 `detailView.entry` / `backend.entry` 等声明文件确实存在于包内（否则用户装上会打不开界面）。
+打包前会先跑清单校验，并检查 `detailView.entry` / `backend.entry` / `backend.command` 里指向插件内文件的项确实存在于包内（否则用户装上会打不开界面）。
 
 ### 开发并发布插件（从 0 到上架）
 
@@ -470,7 +470,8 @@ https://github.com/My-Search/my-search-plugin-market/blob/main/index.error.json
     }
   },
   "backend": {                       // 可选：后台进程
-    "entry": "backend/serve.exe",
+    "command": ["node", "backend/index.mjs"],  // 推荐：直接 argv，不经 cmd.exe（静默、无黑窗）
+    "entry": "backend/serve.exe",    // 兼容旧写法：可执行文件 / .cmd 启动器（Windows 会经 cmd.exe）
     "protocol": "jsonrpc-stdio",
     "autostart": "on-demand",        // always | on-demand | prompt | never（只是「请求」）
     "closeBehavior": "minimize",     // minimize | exit（只是「请求」；与 detailView 同名项是一个开关）
@@ -478,6 +479,8 @@ https://github.com/My-Search/my-search-plugin-market/blob/main/index.error.json
   }
 }
 ```
+
+`backend.command` 与 `backend.entry` **至少写一个**（都写时 `command` 优先）。`command[0]` 可以是绝对路径、插件内相对路径或裸命令名（如 `node`，走系统 PATH）；其余参数原样传递，其中「路径样式」项（含 `/` 或 `\`、不以 `-` 开头）会解析为插件目录内绝对路径，这样开发挂载（源码在别处）也能正确定位脚本。
 
 清单校验是纯函数（`src/lib/plugins/manifest.ts`），**永不抛异常**，返回可读中文文案（`describeManifestErrors`）——用户看到的是「缺少插件 id」，而不是 `id.missing`。
 
@@ -663,6 +666,7 @@ ms.ui.applyTheme();                                           // 让宿主立即
 ### 后台进程
 
 - 宿主 spawn 并托管（**绝不写系统自启动项**，进程生死只由面板 / 前台视图 / 应用退出驱动）；协议为 stdio JSON-RPC 2.0；
+- **静默启动（无黑窗口）**：清单用 `backend.command` 声明**直接 argv**（如 `["node", "backend/index.mjs"]`），宿主 `Command::new(argv[0]).args(argv[1..])` 直接 CreateProcess，**不经 `cmd.exe`/shell**；Windows 上再叠加 `CREATE_NO_WINDOW`，进程树里不会出现 `cmd.exe`/conhost 中间层。老的 `backend.entry`（指向 `.cmd` 启动器）仍兼容，但那样会先起一个 `cmd.exe` 中间进程，静默完全依赖创建标志穿过 `cmd.exe` 传到孙进程——**新插件请用 `command`**；
 - 「开机自启」的判定发生在应用启动时，因此网关镜像会落盘到 `plugin-gateway.json`，启动时先读回再按 `autoStart === "always"` 拉起（否则那一刻前端还没加载，自启动形同死代码）；
 - 进程树清理：Windows 用 Job Object（`KILL_ON_JOB_CLOSE`，宿主崩溃时子进程一起走），Unix 用进程组——`Child::kill()` 只杀直接子进程，会留孤儿；
 - 空闲自动退出（`idleExitSec`，`always` 的插件不回收）、崩溃退避重启（1s/5s/30s，上限 `maxRestarts`）、日志落 `plugin-logs/<id>.log`（面板可看，超过 1MB 保留尾部）。

@@ -103,7 +103,9 @@ export function lookupViaShell(binName, { platform = process.platform, run = def
   const cmd = platform === "win32" ? "cmd.exe" : "sh";
   const args = platform === "win32" ? ["/c", "where", binName] : ["-lc", `command -v ${binName}`];
   return new Promise((resolve) => {
-    run(cmd, args, { timeout: 5000 }, (err, stdout) => {
+    // windowsHide：宿主是 GUI 子系统、后端自身也由 CREATE_NO_WINDOW 拉起，但
+    // cmd.exe 子进程默认仍会分配控制台——不隐藏就会闪一下黑窗（探测阶段很频繁）。
+    run(cmd, args, { timeout: 5000, windowsHide: true }, (err, stdout) => {
       if (err) return resolve(null);
       const first = String(stdout || "").split(/\r?\n/).map((l) => l.trim()).find(Boolean);
       if (!first) return resolve(null);

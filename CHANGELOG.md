@@ -12,6 +12,25 @@
 
 ---
 
+## v7.9.31 - 2026-10-13
+
+### 修复
+
+- **插件后台进程改为「直接 argv」启动，彻底消除开机黑窗口**：以前插件后台
+  一律经 `cmd.exe /c backend/run.cmd` 拉起 `node`，Windows 上会先起一个
+  `cmd.exe` 中间进程（conhost），是「开机弹一堆黑窗口」的根源——即便宿主已加
+  `CREATE_NO_WINDOW`，静默仍完全依赖创建标志穿过 `cmd.exe` 传到孙进程。现在
+  清单可声明 **`backend.command`**（如 `["node", "backend/index.mjs"]`），宿主
+  直接 `CreateProcess`（不经 shell、进程树里不再有 `cmd.exe`）；老的
+  `backend.entry` 仍兼容（旧版应用读到含 `command` 的新清单也照常走 `entry`）。
+  同时修复录屏插件里 `taskkill` / `where` 探测未加 `windowsHide` 导致的黑窗闪现。
+
+### 插件（已发布到 my-search-plugin-market）
+
+- 资源监控 1.0.1 → 1.0.2、Pi Agent 2.7.1 → 2.7.2、录屏与水印 1.3.1 → 1.3.2、
+  截图 1.3.0 → 1.3.1、GitHub 文件上传 1.0.0 → 1.0.1：后台清单改用
+  `backend.command` 直接启动，不再经 `cmd.exe`。
+
 ## v7.9.30 - 2026-10-13
 
 ### 优化

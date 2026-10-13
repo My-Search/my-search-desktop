@@ -19,6 +19,7 @@ export function gatewaySpecOf(rec: PluginRecord): {
   autoStart: string;
   grants: string[];
   backendEntry: string | null;
+  backendCommand: string[] | null;
   backendProtocol: string | null;
   idleExitSec: number;
   /** 前台关闭后的保留窗口期（秒） */
@@ -37,7 +38,8 @@ export function gatewaySpecOf(rec: PluginRecord): {
     enabled: rec.enabled,
     autoStart: rec.autoStart,
     grants: rec.grants.map((g) => g.permission),
-    backendEntry: backend?.entry ?? null,
+    backendEntry: backend?.entry || null,
+    backendCommand: backend?.command ?? null,
     backendProtocol: backend?.protocol ?? null,
     // 「开机自启」的插件不做空闲回收（idleExitSec=0 表示常驻）
     idleExitSec: rec.autoStart === "always" ? 0 : backend?.idleExitSec ?? 30,

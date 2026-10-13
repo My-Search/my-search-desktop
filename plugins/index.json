@@ -9,8 +9,8 @@
     {
       "plugin": "official-plugins/com.mysearch.pi-agent",
       "createTime": "2026-09-24T12:41:29.674Z",
-      "latestVersionUpdateTime": "2026-10-02T03:43:12.449Z",
-      "lastVersion": "2.7.1"
+      "latestVersionUpdateTime": "2026-10-13T06:06:35.598Z",
+      "lastVersion": "2.7.2"
     },
     {
       "plugin": "official-plugins/com.mysearch.file-search",
@@ -34,8 +34,8 @@
       "plugin": "official-plugins/com.zhuangjie.github-upload",
       "official": false,
       "createTime": "2026-09-24T12:41:43.131Z",
-      "latestVersionUpdateTime": "2026-09-24T12:41:43.131Z",
-      "lastVersion": "1.0.0"
+      "latestVersionUpdateTime": "2026-10-13T06:06:35.621Z",
+      "lastVersion": "1.0.1"
     },
     {
       "plugin": "official-plugins/com.mysearch.clipboard",
@@ -48,15 +48,15 @@
       "plugin": "official-plugins/com.mysearch.recorder",
       "official": false,
       "createTime": "2026-09-27T01:37:44.089Z",
-      "latestVersionUpdateTime": "2026-10-01T13:26:47.642Z",
-      "lastVersion": "1.3.1"
+      "latestVersionUpdateTime": "2026-10-13T06:06:35.640Z",
+      "lastVersion": "1.3.2"
     },
     {
       "plugin": "official-plugins/com.zhuangjie.screenshot",
       "official": false,
       "createTime": "2026-09-27T01:37:46.031Z",
-      "latestVersionUpdateTime": "2026-09-30T03:17:35.468Z",
-      "lastVersion": "1.3.0"
+      "latestVersionUpdateTime": "2026-10-13T06:06:35.648Z",
+      "lastVersion": "1.3.1"
     },
     {
       "plugin": "official-plugins/com.zhuangjie.todo-list",
@@ -69,8 +69,8 @@
       "plugin": "official-plugins/com.zhuangjie.resource-monitor",
       "official": false,
       "createTime": "2026-09-30T14:05:49.846Z",
-      "latestVersionUpdateTime": "2026-10-02T03:43:12.504Z",
-      "lastVersion": "1.0.1"
+      "latestVersionUpdateTime": "2026-10-13T06:06:35.662Z",
+      "lastVersion": "1.0.2"
     }
   ],
   "three-parties": [
@@ -78,7 +78,7 @@
       "plugin": "My-Search/my-search-plugin-MayeLite",
       "createTime": "2026-09-27T01:41:31.148Z",
       "latestVersionUpdateTime": "2026-09-27T01:41:31.148Z",
-      "lastVersion": "1.0.0"
+      "lastVersion": "1.1.0"
     }
   ]
 }

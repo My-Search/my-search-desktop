@@ -251,6 +251,7 @@ export async function syncGateway(payload: {
   autoStart: string;
   grants: string[];
   backendEntry: string | null;
+  backendCommand?: string[] | null;
   backendProtocol: string | null;
   idleExitSec: number;
   graceSec: number;
