@@ -52,13 +52,13 @@ check(
 );
 check(
   "style.css：搜索窗口根定义了深色覆盖变量（html.theme-dark）",
-  /html\.theme-dark\s*\{[^}]*--card:\s*#212429/s.test(styleCss),
+  /html\.theme-dark\s*\{[^}]*--card:\s*#292c31/s.test(styleCss),
 );
 check(
   "style.css：深色覆盖块同时给出 --surface/--text/--line（插件常用三项）",
-  /html\.theme-dark\s*\{[^}]*--surface:\s*#17191d/s.test(styleCss) &&
+  /html\.theme-dark\s*\{[^}]*--surface:\s*#1f2125/s.test(styleCss) &&
     /html\.theme-dark\s*\{[^}]*--text:\s*#e4e6ea/s.test(styleCss) &&
-    /html\.theme-dark\s*\{[^}]*--line:\s*#33363d/s.test(styleCss),
+    /html\.theme-dark\s*\{[^}]*--line:\s*#3b3e45/s.test(styleCss),
 );
 check(
   "theme.ts：applyTheme 派发 DOM 事件（本窗口主题变更汇聚点）",
@@ -277,7 +277,8 @@ const dark = seen.dark;
 /* ---- 变量层：搜索窗口根真的有两套值 ---- */
 const EXPECT = {
   light: { card: "#ffffff", surface: "#f5f6f8", text: "#1f2329", muted: "#7a828e", line: "#e6e8ec", err: "#e02424" },
-  dark: { card: "#212429", surface: "#17191d", text: "#e4e6ea", muted: "#98a0ab", line: "#33363d", err: "#ff6b6b" },
+  // 深色底与整套中性色阶梯统一 +0x08（#17191d → #1f2125），去掉近黑的压迫感
+  dark: { card: "#292c31", surface: "#1f2125", text: "#e4e6ea", muted: "#98a0ab", line: "#3b3e45", err: "#ff6b6b" },
 };
 for (const theme of ["light", "dark"]) {
   for (const [k, want] of Object.entries(EXPECT[theme])) {
@@ -331,7 +332,7 @@ check(
 
 /* ---- pi-agent：深色设计稿在深色宿主下保持，浅色宿主下真正变浅 ---- */
 check(
-  "pi-agent[深]：容器底 = --card（深色 #212429）",
+  "pi-agent[深]：容器底 = --card（深色 #292c31）",
   marketEq(dark.piContainer.backgroundColor, EXPECT.dark.card),
   dark.piContainer.backgroundColor
 );

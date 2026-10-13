@@ -230,23 +230,65 @@ const monoSvg = svgWrap(leafGroup({
 }));
 
 /**
- * `.mspp` 插件包的文件类型图标：透明背景的**纯叶子**（无白色圆角底板）。
+ * `.mspp` 插件包的文件类型图标：透明背景的叶子 + 右下角包裹角标
+ * （无白色圆角底板）。
  *
  * 为什么不用应用图标：资源管理器里 16px 下带底板的图标会糊成一枚白方块，
  * 叶子本身才是可辨识的形状；而且文件类型图标与「应用本体」区分开更清楚
  * （与托盘图标同一取舍，见 TRAY_GLYPH_W 的说明）。
+ *
+ * 叶子右下角再叠一枚「包裹」角标：只看叶子时仍像主软件图标，角标则把
+ * `.mspp` 明确标成可安装的插件包。角标使用蓝色 + 白色描边，在浅色/深色
+ * 资源管理器背景下都能保持轮廓；尺寸按 16px 文件图标仍可辨识来取。
  */
 const MSPP_GLYPH_W = 0.94; // 文件图标比托盘略收一点，避免小尺寸贴边
 const MSPP_SIZES = [16, 24, 32, 48, 64, 128, 256];
+
+// 包裹图形沿用用户给定的 SVG 路径；包围盒由该路径渲染结果量得，
+// 用于按“可见宽度”而非整个 1024 viewBox 精确放置角标。
+const MSPP_PACKAGE_PATH =
+  'M173.12 319.872v444.416l310.848 122.752V442.688l-310.848-122.88z ' +
+  'm384 567.168l310.848-122.752V319.872L557.184 442.688v444.352z ' +
+  'm384-596.096v523.072l-420.544 166.08-420.608-166.08V231.36l23.424-9.792L520.576 54.848l420.544 176.512v59.584z ' +
+  'm-121.024-31.04l-299.52-125.76-89.6 37.632 282.24 130.304 106.88-42.24z' +
+  'M619.2 339.2l-279.68-129.088-118.464 49.792 299.52 118.272L619.2 339.2z';
+const MSPP_PACKAGE_BOX = { minX: 100, minY: 54, maxX: 940, maxY: 979 };
+const MSPP_PACKAGE_VISUAL_W = 340;
+const MSPP_PACKAGE_CENTER = { x: 800, y: 775 };
+
+/** 把包裹路径缩放到指定可见宽度，并放到叶子右下角。 */
+function packageBadgeGroup() {
+  const scale =
+    MSPP_PACKAGE_VISUAL_W / (MSPP_PACKAGE_BOX.maxX - MSPP_PACKAGE_BOX.minX);
+  const cx = (MSPP_PACKAGE_BOX.minX + MSPP_PACKAGE_BOX.maxX) / 2;
+  const cy = (MSPP_PACKAGE_BOX.minY + MSPP_PACKAGE_BOX.maxY) / 2;
+  const tx = MSPP_PACKAGE_CENTER.x - cx * scale;
+  const ty = MSPP_PACKAGE_CENTER.y - cy * scale;
+  const transform =
+    `translate(${tx.toFixed(3)} ${ty.toFixed(3)}) scale(${scale.toFixed(6)})`;
+
+  // 先铺一圈白色 halo，再上蓝色本体；包裹路径本身有镂空，白边能保证
+  // 角标压到叶子边缘时仍然读得出“独立的包”，而不是和叶子融成一块。
+  return (
+    `<g transform="${transform}">` +
+    `<path d="${MSPP_PACKAGE_PATH}" fill="none" stroke="#ffffff" ` +
+    `stroke-width="72" stroke-linejoin="round"/>` +
+    `<path d="${MSPP_PACKAGE_PATH}" fill="#2563eb" stroke="#ffffff" ` +
+    `stroke-width="18" stroke-linejoin="round"/>` +
+    `</g>`
+  );
+}
+
 const msppSvg = svgWrap(leafGroup({
   box: leafBox, cx: CANVAS / 2, cy: CANVAS / 2, width: CANVAS * MSPP_GLYPH_W,
-}));
+}) + packageBadgeGroup());
 
 console.log('生成资源：');
 write(path.join(OUT_DIR, 'icon-master.svg'), Buffer.from(macSvg, 'utf8'));
 write(path.join(OUT_DIR, 'icon-master-win.svg'), Buffer.from(winSvg, 'utf8'));
 write(path.join(OUT_DIR, 'tray.svg'), Buffer.from(traySvg, 'utf8'));
 write(path.join(OUT_DIR, 'tray-mono.svg'), Buffer.from(monoSvg, 'utf8'));
+write(path.join(OUT_DIR, 'mspp-master.svg'), Buffer.from(msppSvg, 'utf8'));
 write(path.join(OUT_DIR, 'icon-master.png'), render(macSvg, CANVAS));
 write(path.join(OUT_DIR, 'icon-master-win.png'), render(winSvg, CANVAS));
 write(path.join(ICON_DIR, 'tray.png'), render(traySvg, TRAY_SIZE));

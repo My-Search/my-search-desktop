@@ -1311,31 +1311,31 @@ html.ms-config-root {
   html.ms-config-root {
     --brand: #6c6ce0;
     --brand-hover: #7f7ff2;
-    --line: #33363d;
+    --line: #3b3e45;
     --text: #e4e6ea;
     --muted: #98a0ab;
-    --surface: #17191d;
-    --card: #212429;
-    --field: #1a1c21;
-    --chip: #1e2126;
-    --chip-count: #7f8792;
+    --surface: #1f2125;
+    --card: #292c31;
+    --field: #222429;
+    --chip: #26292e;
+    --chip-count: #878e9a;
     --chip-text: #aab2bd;
     --chip-count-text: #8b93a0;
-    --hover-border: #4a4f58;
-    --hover-bg: #2a2d33;
-    --code-bg: #2a2d33;
-    --seg-bg: #2a2d33;
+    --hover-border: #525760;
+    --hover-bg: #32353b;
+    --code-bg: #32353b;
+    --seg-bg: #32353b;
     --accent: #a5a6ff;
-    --accent-soft-bg: #2c2d4a;
-    --accent-soft-border: #3f4170;
+    --accent-soft-bg: #343552;
+    --accent-soft-border: #474978;
     --accent-soft-count: #9a9cf0;
     /* 选中标签：中性灰，不含彩色 */
-    --chip-on-bg: #363b43;
-    --chip-on-border: #4a505a;
+    --chip-on-bg: #3e434b;
+    --chip-on-border: #525862;
     --chip-on-text: #f2f4f7;
     --chip-on-count: #b9c0ca;
-    --chip-check: #4a505a;
-    --divider-soft: #2b2e34;
+    --chip-check: #525862;
+    --divider-soft: #33363c;
     --ok: #3ddc84;
     --err: #ff6b6b;
     --btn-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
@@ -1382,30 +1382,30 @@ html.ms-config-root.theme-light {
 html.ms-config-root.theme-dark {
   --brand: #6c6ce0;
   --brand-hover: #7f7ff2;
-  --line: #33363d;
+  --line: #3b3e45;
   --text: #e4e6ea;
   --muted: #98a0ab;
-  --surface: #17191d;
-  --card: #212429;
-  --field: #1a1c21;
-  --chip: #1e2126;
-  --chip-count: #7f8792;
+  --surface: #1f2125;
+  --card: #292c31;
+  --field: #222429;
+  --chip: #26292e;
+  --chip-count: #878e9a;
   --chip-text: #aab2bd;
   --chip-count-text: #8b93a0;
-  --hover-border: #4a4f58;
-  --hover-bg: #2a2d33;
-  --code-bg: #2a2d33;
-  --seg-bg: #2a2d33;
+  --hover-border: #525760;
+  --hover-bg: #32353b;
+  --code-bg: #32353b;
+  --seg-bg: #32353b;
   --accent: #a5a6ff;
-  --accent-soft-bg: #2c2d4a;
-  --accent-soft-border: #3f4170;
+  --accent-soft-bg: #343552;
+  --accent-soft-border: #474978;
   --accent-soft-count: #9a9cf0;
-  --chip-on-bg: #363b43;
-  --chip-on-border: #4a505a;
+  --chip-on-bg: #3e434b;
+  --chip-on-border: #525862;
   --chip-on-text: #f2f4f7;
   --chip-on-count: #b9c0ca;
-  --chip-check: #4a505a;
-  --divider-soft: #2b2e34;
+  --chip-check: #525862;
+  --divider-soft: #33363c;
   --ok: #3ddc84;
   --err: #ff6b6b;
   --btn-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
@@ -1514,30 +1514,30 @@ html.theme-light {
 html.theme-dark {
   --brand: #6c6ce0;
   --brand-hover: #7f7ff2;
-  --line: #33363d;
+  --line: #3b3e45;
   --text: #e4e6ea;
   --muted: #98a0ab;
-  --surface: #17191d;
-  --card: #212429;
-  --field: #1a1c21;
-  --chip: #1e2126;
-  --chip-count: #7f8792;
+  --surface: #1f2125;
+  --card: #292c31;
+  --field: #222429;
+  --chip: #26292e;
+  --chip-count: #878e9a;
   --chip-text: #aab2bd;
   --chip-count-text: #8b93a0;
-  --hover-border: #4a4f58;
-  --hover-bg: #2a2d33;
-  --code-bg: #2a2d33;
-  --seg-bg: #2a2d33;
+  --hover-border: #525760;
+  --hover-bg: #32353b;
+  --code-bg: #32353b;
+  --seg-bg: #32353b;
   --accent: #a5a6ff;
-  --accent-soft-bg: #2c2d4a;
-  --accent-soft-border: #3f4170;
+  --accent-soft-bg: #343552;
+  --accent-soft-border: #474978;
   --accent-soft-count: #9a9cf0;
-  --chip-on-bg: #363b43;
-  --chip-on-border: #4a505a;
+  --chip-on-bg: #3e434b;
+  --chip-on-border: #525862;
   --chip-on-text: #f2f4f7;
   --chip-on-count: #b9c0ca;
-  --chip-check: #4a505a;
-  --divider-soft: #2b2e34;
+  --chip-check: #525862;
+  --divider-soft: #33363c;
   --ok: #3ddc84;
   --err: #ff6b6b;
   --btn-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
@@ -5010,31 +5010,33 @@ html.theme-dark #ms-config-view .page.sync .cfg-select option {
 /* ========== 搜索窗口深色主题 ========== */
 html.theme-dark,
 html.theme-dark body {
-  background: #17191d;
+  background: #1f2125;
 }
 
-/* 呼出框外框：深色下用 #4a4f58（与深色 --hover-border 同值）。
-   旧值 #33363d 与填充色 #17191d 的对比度仅 1.46:1，深色边框压在深色底上几乎
-   融为一片——尤其窗口下沿贴着白色页面时，视觉上就是「深色块直接切到白」，边框
-   仿佛不存在。提到 #4a4f58 后对比度 2.14:1（浅色主题 #cecece/#ffffff 为 1.57:1，
-   深色需更高才等观感），四条边都清晰可辨，且贴白底时仍是明确的深色描边。
+/* 呼出框外框：深色下用 #525760（与深色 --hover-border 同值）。
+   边框可见性演进（底色提到 #1f2125 后按新底色重算）：
+   最初 #33363d 对旧底色仅 1.46:1，深色边框压在深色底上几乎融为一片——尤其窗口
+   下沿贴着白色页面时，视觉上就是「深色块直接切到白」，边框仿佛不存在；一步提到
+   #4a4f58（对旧底色 2.14:1）又太抢眼、与内容底色色差过重。现取 #525760：
+   对 #1f2125 为 2.22:1（浅色主题 #cecece/#ffffff 是 1.57:1，深色需更高才等观感），
+   四条边清晰可辨但不从内容里跳出来，贴白底时仍是明确的深色描边（对白 7.3:1）。
    回归测试：test/dark-theme-ui.test.mjs（锁死对比度 ≥ 2.0）。 */
 html.theme-dark #my_search_box {
-  background: #17191d;
-  border-color: #4a4f58;
+  background: #1f2125;
+  border-color: #525760;
 }
 
 html.theme-dark #searchBox {
-  background: #17191d;
+  background: #1f2125;
 }
 
 html.theme-dark #my_search_input {
-  background: #17191d;
+  background: #1f2125;
   color: rgba(228, 230, 234, 0.87);
 }
 
 html.theme-dark #my_search_input::placeholder {
-  color: #7f8792;
+  color: #878e9a;
 }
 
 html.theme-dark #matchResult li {
@@ -5042,20 +5044,20 @@ html.theme-dark #matchResult li {
 }
 
 html.theme-dark #matchResult li.active {
-  background: #1e3a5f;
+  background: #264267;
 }
 
 /* 结果项图标：**底板跟随主题**（与插件市场的插件 icon 同口径）。
 
    底板（background + padding:3px）给 favicon / 内置图标一个稳定的承载面。
-   深色下取 --surface 往白提亮约 26% 的中性深色 #55575a（而不是纯白/浅灰的
+   深色下取比 --surface（#1f2125）明显更亮的中性深色 #5d5f62（而不是纯白/浅灰的
    #e8eaed）——纯浅色底板在深色浮窗里是刺眼的白方块；但仍比行底色亮，保证
-   深色字形（内置 sketch/script 图标为 #231815）压在上面仍清晰可见（≥2.3:1）。
+   深色字形（内置 sketch/script 图标为 #231815）压在上面仍清晰可见（2.7:1）。
    简言之：底板整体降为深色档，只保留“比行底亮一点”的区别度。
    回归测试：test/dark-theme-ui.test.mjs（锁死底板亮度 <0.30、与行底对比≥1.8、
    与深色字形对比≥2.3）。 */
 html.theme-dark #matchResult img {
-  background: #55575a;
+  background: #5d5f62;
   box-shadow: 0 0 3px rgba(0, 0, 0, 0.45);
   border-radius: 30%;
 }
@@ -5065,7 +5067,7 @@ html.theme-dark #matchResult .item_title {
 }
 
 html.theme-dark #matchResult .obsolete {
-  color: #7f8792;
+  color: #878e9a;
 }
 
 html.theme-dark #matchResult .item_desc {
@@ -5073,13 +5075,13 @@ html.theme-dark #matchResult .item_desc {
 }
 
 html.theme-dark .related-links > a {
-  background: #1a2340;
+  background: #222b48;
   color: #8ab4f8;
 }
 
 html.theme-dark .related-links > a:hover {
-  background: #152035;
-  border-color: #2a3a5a;
+  background: #1d283d;
+  border-color: #324263;
   color: #a5c4f8;
 }
 
@@ -5089,38 +5091,38 @@ html.theme-dark #text_show {
 
 html.theme-dark #text_show .text-head {
   color: #98a0ab;
-  border-bottom-color: #33363d;
+  border-bottom-color: #3b3e45;
 }
 
 html.theme-dark #text_show .markdown-body blockquote {
   color: #98a0ab;
-  border-left-color: #33363d;
-  background: #1e2126;
+  border-left-color: #3b3e45;
+  background: #26292e;
 }
 
 html.theme-dark #text_show .markdown-body code {
-  background: #1e2126;
+  background: #26292e;
 }
 
 html.theme-dark #text_show .markdown-body pre {
-  background: #1e2126;
+  background: #26292e;
 }
 
 html.theme-dark #text_show .markdown-body pre .copy-btn {
-  background: #4a4f58;
+  background: #525760;
   color: #e4e6ea;
 }
 
 html.theme-dark #text_show .markdown-body pre .copy-btn:hover {
-  background: #5a5f68;
+  background: #626770;
 }
 
 html.theme-dark #text_show .markdown-body pre .copy-btn:active {
-  background: #6a6f78;
+  background: #727780;
 }
 
 html.theme-dark #text_show .markdown-body hr {
-  border-top-color: #33363d;
+  border-top-color: #3b3e45;
 }
 
 html.theme-dark #text_show .markdown-body a {
@@ -5129,32 +5131,32 @@ html.theme-dark #text_show .markdown-body a {
 
 html.theme-dark #text_show .markdown-body th,
 html.theme-dark #text_show .markdown-body td {
-  border-color: #33363d;
+  border-color: #3b3e45;
 }
 
 html.theme-dark #text_show .markdown-body th {
-  background: #1e2126;
+  background: #26292e;
 }
 
 html.theme-dark #text_show .markdown-body tr:nth-child(2n) td {
-  background: #1e2126;
+  background: #26292e;
 }
 
 html.theme-dark #text_show::-webkit-scrollbar-track {
-  background-color: #1e2126;
+  background-color: #26292e;
 }
 
 html.theme-dark #text_show::-webkit-scrollbar-thumb {
-  background-color: #4a4f58;
-  border-color: #1e2126;
+  background-color: #525760;
+  border-color: #26292e;
 }
 
 html.theme-dark #text_show::-webkit-scrollbar-thumb:hover {
-  background-color: #5a5f68;
+  background-color: #626770;
 }
 
 html.theme-dark #text_show::-webkit-scrollbar-thumb:active {
-  background-color: #6a6f78;
+  background-color: #727780;
 }
 
 html.theme-dark #text_show .markdown-body pre::-webkit-scrollbar-thumb {
@@ -5167,8 +5169,8 @@ html.theme-dark #text_show .markdown-body pre::-webkit-scrollbar-thumb:hover {
 
 /* 搜索窗口弹层深色主题 */
 html.theme-dark #my_search_box > .cfg-toast {
-  background: #212429;
-  border-color: #33363d;
+  background: #292c31;
+  border-color: #3b3e45;
   color: #e4e6ea;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
 }
@@ -5186,7 +5188,7 @@ html.theme-dark #my_search_box .token-overlay {
 }
 
 html.theme-dark #my_search_box .token-dialog {
-  background: #212429;
+  background: #292c31;
   box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
 }
 
@@ -5195,14 +5197,14 @@ html.theme-dark #my_search_box .token-dialog p {
 }
 
 html.theme-dark #my_search_box .token-actions .cfg-btn {
-  border-color: #33363d;
-  background: #212429;
+  border-color: #3b3e45;
+  background: #292c31;
   color: #e4e6ea;
 }
 
 html.theme-dark #my_search_box .token-actions .cfg-btn:hover {
-  border-color: #4a4f58;
-  background: #2a2d33;
+  border-color: #525760;
+  background: #32353b;
 }
 
 html.theme-dark #my_search_box .token-actions .cfg-btn.ghost {
@@ -5226,7 +5228,7 @@ html.theme-dark #my_search_box .token-actions .cfg-btn:focus-visible {
 
 /* 搜索框内文件图标背景 */
 html.theme-dark #ms-input-files .ms-input-file img {
-  background: #4a4f58;
+  background: #525760;
 }
 
 /* 系统图标在深色下同样不要灰底（这条比上面那条多一个类型选择器 img，
@@ -5239,8 +5241,8 @@ html.theme-dark #ms-input-files .ms-input-file img.chip-sys-icon {
 
 /* 附件 chip（深色） */
 html.theme-dark #ms-input-files .ms-input-file {
-  background: #2c313a;
-  border-color: #3d434e;
+  background: #343942;
+  border-color: #454b56;
   color: #cfd3da;
 }
 
@@ -5250,8 +5252,8 @@ html.theme-dark #ms-input-files .ms-input-file .chip-icon {
 
 /* 图片附件缩略图（深色） */
 html.theme-dark #ms-input-files .ms-input-file .chip-thumb {
-  border-color: #4a505b;
-  background: #1a1c20;
+  border-color: #525863;
+  background: #222428;
 }
 
 html.theme-dark #ms-input-files .ms-input-file.is-folder .chip-icon {
@@ -5269,18 +5271,18 @@ html.theme-dark #ms-input-files .ms-input-file .chip-x:hover {
 
 html.theme-dark #searchBox.drag-over {
   outline-color: #7c7cf0;
-  background: #1f2126;
+  background: #27292e;
 }
 
 /* 「最近添加」条带（深色）：底色与 #searchBox 同款，与搜索框连成一体 */
 html.theme-dark #recentStrip {
-  background: #17191d;
-  border-top-color: #2c313a;
+  background: #1f2125;
+  border-top-color: #343942;
 }
 
 html.theme-dark #recentStrip .recent-item {
-  background: #2c313a;
-  border-color: #3d434e;
+  background: #343942;
+  border-color: #454b56;
   color: #cfd3da;
 }
 
@@ -5311,11 +5313,11 @@ html.theme-dark #recentStrip .recent-item .chip-x:hover {
 
 /* 空状态 */
 html.theme-dark .empty-state {
-  color: #7f8792;
+  color: #878e9a;
 }
 
 html.theme-dark .empty-state .empty-hint {
-  color: #5a5f68;
+  color: #626770;
 }
 
 /* ========== 插件安装确认弹窗（设置窗口 + 搜索窗口共用组件） ==========
@@ -5905,7 +5907,7 @@ html.theme-dark #ms-config-view .plugin-install-sync-notice {
 
 /* 暗色主题 */
 html.theme-dark #my_search_box .plugin-install-dialog {
-  background: #212429;
+  background: #292c31;
   box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
 }
 
@@ -5948,19 +5950,19 @@ html.theme-dark #my_search_box .plugin-install-running-notice {
 }
 
 html.theme-dark #my_search_box .plugin-install-logo-placeholder {
-  background: #2a2d33;
+  background: #32353b;
 }
 
 /* 弹窗按钮（暗色）：与 .token-actions .cfg-btn 同一套口径 */
 html.theme-dark #my_search_box .plugin-install-actions .cfg-btn {
-  border-color: #33363d;
-  background: #212429;
+  border-color: #3b3e45;
+  background: #292c31;
   color: #e4e6ea;
 }
 
 html.theme-dark #my_search_box .plugin-install-actions .cfg-btn:hover {
-  border-color: #4a4f58;
-  background: #2a2d33;
+  border-color: #525760;
+  background: #32353b;
 }
 
 html.theme-dark #my_search_box .plugin-install-actions .cfg-btn.ghost {

@@ -4,7 +4,9 @@
  *
  * 每条快捷键由三部分组成（新）：
  *   1. **快捷键**：录入组合键（点击 → 按下 → 完成；Esc 取消 / Backspace 清空）
- *   2. **作用类型**：呼出 / 隐藏搜索框（必有且仅一条） | 打开插件 | 快速过滤 | 快捷打开项
+ *   2. **作用类型**：下拉按来源分为「系统」与「插件」两个分区（<optgroup>）——
+ *        系统：呼出 / 隐藏搜索框（必有且仅一条） | 打开插件 | 快速过滤 | 快捷打开项；
+ *        插件：由已安装插件声明 / 提供的动作（截图、剪贴板历史、plugin:<id>:<name>）
  *   3. **作用对象**：
  *        - 打开插件 → 下拉选择某个已安装插件
  *        - 快速过滤 → 填写常用头文本（按下后填入「常用头 + ` : `」并立即搜索）
@@ -131,36 +133,51 @@ async function loadPlugins(): Promise<void> {
 }
 
 /**
- * 作用类型下拉的候选：内置四项 + 当前可用的插件动作。
+ * 作用类型下拉的候选：按**来源**分成「系统」与「插件」两个分区（`<optgroup>`）。
  *
- * 插件动作只列**已安装**的（`pluginActions`）；若某条绑定引用了刚被卸载的动作
- * （宿主同步尚未跑完），把绑定自身的动作补进来展示，避免下拉「当前值不在选项里」
- * 而显示成空白（与插件下拉的「已卸载」兜底同一思路）。
+ * - **系统**：宿主内置的四项（呼出/隐藏、打开插件、快速过滤、快捷打开项），永远可用；
+ * - **插件**：由已安装插件提供的动作（截图 / 剪贴板历史这类宿主原生动作，以及插件
+ *   自定义的 `plugin:<id>:<name>`）。只列**已安装**的（`pluginActions`）；若某条绑定
+ *   引用了刚被卸载的动作（宿主同步尚未跑完），把绑定自身的动作补进「插件」分区并标注
+ *   「已卸载」，避免下拉「当前值不在选项里」而显示成空白（与插件下拉的「已卸载」兜底同一思路）。
+ *
+ * 判定口径复用 `isPluginShortcutAction`，与数据模型保持一致。
  */
 interface ActionOption {
   value: ShortcutAction;
   label: string;
 }
 
-function actionOptionsFor(row: ShortcutBinding | null): ActionOption[] {
-  const opts: ActionOption[] = [
+interface ActionOptionGroup {
+  label: string;
+  options: ActionOption[];
+}
+
+function actionOptionsFor(row: ShortcutBinding | null): ActionOptionGroup[] {
+  // 系统内置四项：单独一类，永远排在最前
+  const systemOptions: ActionOption[] = [
     { value: "toggle-window", label: "呼出 / 隐藏搜索框" },
     { value: "open-plugin", label: "打开插件" },
     { value: "quick-filter", label: "快速过滤" },
     { value: "quick-open", label: "快捷打开项" },
   ];
-  const seen = new Set<string>(opts.map((o) => o.value));
+  const pluginOptions: ActionOption[] = [];
+  const seen = new Set<string>(systemOptions.map((o) => o.value));
   for (const a of pluginActions.value) {
     if (seen.has(a.action)) continue;
     seen.add(a.action);
-    opts.push({ value: a.action as ShortcutAction, label: a.title });
+    pluginOptions.push({ value: a.action as ShortcutAction, label: a.title });
   }
-  // 行引用的插件动作当前不可用（插件已卸载）→ 补一条，标明「已卸载」
+  // 行引用的插件动作当前不可用（插件已卸载）→ 补进「插件」分区，标明「已卸载」
   if (row && isPluginShortcutAction(row.action) && !seen.has(row.action)) {
     const title = actionTitleOf(row.action) || describeBinding(row);
-    opts.push({ value: row.action, label: `${title}（插件已卸载）` });
+    pluginOptions.push({ value: row.action, label: `${title}（插件已卸载）` });
   }
-  return opts;
+  // 只保留有内容的分区：「系统」恒有四项，「插件」为空时整组不渲染（不留空标题）
+  return [
+    { label: "系统", options: systemOptions },
+    { label: "插件", options: pluginOptions },
+  ].filter((g) => g.options.length > 0);
 }
 
 /** 某一行插件下拉的候选项：已知插件 + 当前值（可能已卸载，保留展示以便删除） */
@@ -538,16 +555,23 @@ const emptyPluginHint = computed(() =>
             :title="row.action === 'toggle-window' ? '呼出 / 隐藏搜索框是必需能力，只能改键、不能改类型' : '选择这条快捷键的作用类型'"
             @change="onActionChange(row, ($event.target as HTMLSelectElement).value)"
           >
-            <!-- 内置四项固定；插件动作（截图 / 剪贴板历史）随已安装插件动态增减；
-                 行引用的是刚被卸载的插件动作时也补一条并标注「已卸载」 -->
-            <option
-              v-for="opt in actionOptionsFor(row)"
-              :key="opt.value"
-              :value="opt.value"
-              :disabled="opt.value === 'toggle-window' && hasOtherToggle(row)"
+            <!-- 下拉按来源分区：<optgroup>「系统」为内置四项，「插件」为已安装插件提供的
+                 动作（截图 / 剪贴板历史 / plugin:<id>:<name>）。插件动作为空时整组不渲染，
+                 不留空标题；行引用的是刚被卸载的插件动作时也补进「插件」并标注「已卸载」 -->
+            <optgroup
+              v-for="group in actionOptionsFor(row)"
+              :key="group.label"
+              :label="group.label"
             >
-              {{ opt.label }}
-            </option>
+              <option
+                v-for="opt in group.options"
+                :key="opt.value"
+                :value="opt.value"
+                :disabled="opt.value === 'toggle-window' && hasOtherToggle(row)"
+              >
+                {{ opt.label }}
+              </option>
+            </optgroup>
           </select>
           <!-- 作用对象（仅「打开插件」） -->
           <select

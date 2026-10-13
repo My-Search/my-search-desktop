@@ -385,7 +385,7 @@ fn apply_theme_to_windows(app: &tauri::AppHandle, pref: ThemePref, resolved_dark
         let _ = win.set_theme(native);
         // 浅色下各窗口底色不同：主窗口 html/body 是纯白，设置窗口是 --surface #f5f6f8
         let background = if resolved_dark {
-            Color(23, 25, 29, 255) // #17191d —— 与深色主题一致
+            Color(31, 33, 37, 255) // #1f2125 —— 与深色主题 --surface 一致
         } else if label == "main" {
             Color(255, 255, 255, 255)
         } else {
@@ -2176,7 +2176,7 @@ async fn open_config_window(app: tauri::AppHandle) {
         // （system 档 native=None：跟随系统，与页面内联脚本读到的 matchMedia 同源）
         let _ = win.set_theme(native);
         let _ = win.set_background_color(Some(if is_dark {
-            Color(23, 25, 29, 255) // #17191d —— 与深色主题 --surface 一致
+            Color(31, 33, 37, 255) // #1f2125 —— 与深色主题 --surface 一致
         } else {
             Color(245, 246, 248, 255) // #f5f6f8 —— 与浅色主题 --surface 一致
         }));
@@ -2189,7 +2189,7 @@ async fn open_config_window(app: tauri::AppHandle) {
     // 露出的是 WebView 自身的背景色，默认是白色，会在深色下造成「先白一下
     // 再变深色」的闪白。取自前端上报值 / 落盘偏好 / 系统兜底（见 current_theme）。
     let background = if is_dark {
-        Color(23, 25, 29, 255) // #17191d —— 与深色主题 --surface 一致
+        Color(31, 33, 37, 255) // #1f2125 —— 与深色主题 --surface 一致
     } else {
         Color(245, 246, 248, 255) // #f5f6f8 —— 与浅色主题 --surface 一致
     };

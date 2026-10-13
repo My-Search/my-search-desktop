@@ -204,12 +204,12 @@ const SEED = `(() => {
     version: 1,
     plugins: [{
       id: 'com.mysearch.file-search', name: '文件搜索', version: '1.0.0', apiVersion: 1,
-      enabled: true, source: { kind: 'folder', ref: '/tmp/file-search' },
+      enabled: true, grants: [], denied: [], source: { kind: 'folder', ref: '/tmp/file-search' },
       manifest: {
         id: 'com.mysearch.file-search', name: '文件搜索', version: '1.0.0', apiVersion: 1,
         contributes: {
           handlers: { folders: true },
-          searchItem: { title: '文件搜索', keyword: '文件搜索' },
+          searchItem: { title: '可搜索文本项', keyword: '可搜索文本项', subSearch: true },
         },
       },
     }],
@@ -329,8 +329,8 @@ check(
 // 条带改由「进入子搜索模式」展开（本场景已 seed 文件/文件夹插件，满足按需显示前提）；
 // 旧版按 Alt 手动开合的行为已移除。
 // 先离开子搜索模式（上一段仍停在 " : "），再重新进入以触发「跃变 → 展开」。
-await typeKeyword("普通");
-await typeKeyword("普通 : ");
+await typeKeyword("可搜索文本项");
+await typeKeyword("可搜索文本项 : ");
 check("结果列表上（子搜索模式）展开「最近添加」条带", (await stripShown()) === true);
 const hideBefore4 = await evalJs(`window.__windowHideCount`);
 await evalJs(`document.getElementById('my_search_input').blur()`);

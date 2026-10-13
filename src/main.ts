@@ -48,16 +48,16 @@ setThemeOverrideReporter((theme, resolved) => {
   const skeleton = document.getElementById("ms-skeleton");
   if (!skeleton) return;
   if (isDark) {
-    skeleton.style.background = "#17191d";
+    skeleton.style.background = "#1f2125";
     const borderBox = skeleton.firstElementChild as HTMLElement | null;
     if (borderBox) {
-      borderBox.style.background = "#17191d";
-      borderBox.style.borderColor = "#4a4f58";
+      borderBox.style.background = "#1f2125";
+      borderBox.style.borderColor = "#525760";
       // 叶子占位圆：深色时也改暗，避免浅灰圆在深色背景上白闪
       const flexRow = borderBox.firstElementChild as HTMLElement | null;
       if (flexRow) {
         const leafCircle = flexRow.lastElementChild as HTMLElement | null;
-        if (leafCircle) leafCircle.style.background = "#33363d";
+        if (leafCircle) leafCircle.style.background = "#3b3e45";
       }
     }
   }

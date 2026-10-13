@@ -81,7 +81,7 @@ import { SEARCH_BOUNDARY, SPECIAL_KEYWORD, scoreSelect, historySelect } from "..
 import { normalizeQuickFilterHeader, pluginDefinedActionName } from "../../lib/shortcut-bindings";
 import {
   attachmentKey,
-  anyHandlerCapability,
+  hasFileFolderHandlerInResults,
   buildAttachmentFilter,
   mergeAttachments,
   mergeRecentAttachments,
@@ -1280,26 +1280,29 @@ watch(stripFiles, (list) => {
 });
 
 /**
- * 条带**主动显示**的条件：当前是否存在「**既声明了文件/文件夹处理能力、又会出现在
- * 搜索结果里**」的启用插件（如内置的「文件搜索」：`contributes.handlers.folders`
- * + `contributes.searchItem`）。
+ * 条带**主动显示**的条件：当前结果列表（而不是注册表快照）里确实出现了一个
+ * 声明了 `contributes.handlers.files` / `folders` 的插件项。
  *
- * 为什么以「是否存在这类插件」为准：条带里全是文件/文件夹，只有把它们再拖回来
- * 有去处（有插件能处理）时，主动露出才有意义；纯 URL / 纯文本型搜索（只剩搜索
- * 框 + 结果列表）若还占着这一行，纯属浪费窗口高度。
+ * 注册表里装过文件搜索，不代表本次搜索结果会包含它：例如结果只剩翻译插件时，
+ * 把最近文件附加进去也没有能接手的去处，这一行就不该占窗口高度。
  *
- * 为什么盯插件**能力声明**而不是「当前结果里出现了哪个插件」：进入子搜索模式
- * 那一刻 `state.results` 尚在异步计算中，若等结果落地才决定，条带会先收着、过一拍
- * 才冒出来（观感跳动）。而「有没有能处理文件的插件」由注册表同步决定，与检索结果
- * 无关——没有这种插件的用户从头到尾都不会看到条带，有的用户则按原先的节奏（进入
- * 子搜索模式）自然展开，不会闪烁。
- *
- * 每次调用都现读 `activePlugins()`（不做 computed 缓存）：注册表可能在会话中途
- * 变化（用户在设置窗口新装 / 启用了「文件搜索」），而调用点（进入子搜索模式的跃变）
- * 本就不频繁，现读能保证「刚装好插件、切回来进子搜索模式」立刻生效。
+ * `state.rawKeyword !== inputValue.value` 表示结果还是上一次搜索的残留（输入
+ * 防抖尚未落完），此时先收起；真正的结果由 `afterResultsRendered` 回调再次
+ * 同步，避免用旧结果抢先展开。
  */
-function hasFileFolderAbility(): boolean {
-  return pluginHost.loaded.value && anyHandlerCapability(pluginHost.activePlugins());
+function hasFileFolderResult(): boolean {
+  if (!inSubSearchMode.value || !pluginHost.loaded.value) return false;
+  if (state.rawKeyword !== inputValue.value) return false;
+  return hasFileFolderHandlerInResults(
+    visibleResults.value.map((result) => result.item),
+    pluginHost.activePlugins()
+  );
+}
+
+/** 结果落地 / 模式变化后统一决定条带显隐（不提供 Alt 手动开关） */
+function syncRecentStripVisibility(): void {
+  if (hasFileFolderResult()) void showRecentStrip();
+  else hideRecentStrip();
 }
 
 /**
@@ -1313,14 +1316,13 @@ function hasFileFolderAbility(): boolean {
  *
  * 只在**进入 / 离开的跃变**上动作：模式内继续打字（子关键词）不该反复触发；
  * 离开子搜索模式则对称收回（模式驱动语义）。**不再提供「按 Alt 手动开合」**：
- * 显示与否完全由「结果里有没有能处理文件/文件夹的插件」驱动（见 hasFileFolderAbility），
+ * 显示与否完全由「结果里有没有能处理文件/文件夹的插件」驱动（见 hasFileFolderResult），
  * 用户不再需要、也无法用 Alt 手动唤起它。
  */
 const inSubSearchMode = computed(() => inputValue.value.includes(SEARCH_BOUNDARY));
 watch(inSubSearchMode, (now, was) => {
   if (now === was) return;
-  if (now) void showRecentStrip();
-  else hideRecentStrip();
+  syncRecentStripVisibility();
 });
 
 /** 条带开关后按最新内容重下发高度（详情视图除外）。
@@ -1337,11 +1339,10 @@ function refreshHeightAfterStripToggle(): void {
     两道前置门槛，缺一不可（任一不满足都直接返回、保持收起态）：
       1. **没有可选项就不展开**（历史为空、或历史里的条目全都已经在输入框里了）：
          与其显示一条「暂无…」的空行，不如不占位；
-      2. **没有文件/文件夹处理插件就不展开**（`hasFileFolderAbility` 为假）：
-         条带只在结果里有能接手文件/文件夹的插件（如「文件搜索」）时才主动露出，
-         纯 URL / 纯文本型搜索不该被这行占掉窗口高度。 */
+      2. **当前结果里没有文件/文件夹处理插件就不展开**（`hasFileFolderResult`
+         为假）：翻译、纯 URL 等结果没有能接手文件的去处，不该占掉窗口高度。 */
 async function showRecentStrip(): Promise<void> {
-  if (!hasFileFolderAbility()) {
+  if (!hasFileFolderResult()) {
     hideRecentStrip();
     return;
   }
@@ -1905,6 +1906,9 @@ function onResultLink(url: string): void {
 // 输入值读取器（占位提示/子搜索都用它）
 search.bindInputValueGetter(() => inputValue.value);
 search.bindAfterResultsRendered(() => {
+  // 搜索真正落地后按“本次结果”重算：进入子搜索时旧结果可能是翻译等
+  // 不具备文件处理能力的项，必须等这次结果出来再决定是否展开。
+  syncRecentStripVisibility();
   if (state.mode === MODE.SHOW_RESULT) {
     void syncWindowHeightToContent();
   } else {
@@ -2350,7 +2354,7 @@ defineExpose({ inputValue });
       <!-- 「最近添加」条带：**搜索框正下方**的普通流内一行，跟着盒子一起向下
            生长（窗口高度由 measuredBoxHeight 按实测下发）。展开条件：
            进入子搜索模式（关键词含 " : "）时自动展开（见 inSubSearchMode 的 watch），
-           但**仅当结果里有能处理文件/文件夹的插件**（见 hasFileFolderAbility）——
+           但**仅当本次结果里有能处理文件/文件夹的插件**（见 hasFileFolderResult）——
            没有这类插件时搜索框下不会有这一行，不再提供按 Alt 手动开合。
            隐藏时 display:none → offsetHeight=0 天然不计入高度。
            点条目 → 附加进上方输入框（成为附件 chip），条带随即不再列出它；

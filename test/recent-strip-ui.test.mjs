@@ -1,7 +1,7 @@
 /**
- * 「最近添加」条带（Alt 条带）的真实浏览器回归：
+ * 「最近添加」条带的真实浏览器回归：
  *   1. **进入子搜索模式自动展开**——关键词出现 `" : "`（SEARCH_BOUNDARY）且
- *      存在文件/文件夹处理插件时，搜索框下方的 #recentStrip 自动显示；
+ *      **本次结果**包含文件/文件夹处理插件时，搜索框下方的 #recentStrip 自动显示；
  *   2. **左右溢出「隧道」效果**——右侧还有被裁内容时挂 .fade-right；向左滚过时
  *      挂 .fade-left、滚到最右则 .fade-right 消失、回到最左 .fade-left 消失；
  *   3. 离开子搜索模式（Shift+Tab 去掉分隔符）→ 条带对称收起；
@@ -188,7 +188,7 @@ await S("Page.addScriptToEvaluateOnNewDocument", {
 const SEED = `(() => {
   const items = [
     {
-      title: '父关键词命中项', desc: '用于进入子搜索模式后仍有结果',
+      title: '文件搜索命中项', desc: '用于进入子搜索模式后仍有结果',
       resource: 'https://example.com/plain',
     },
   ];
@@ -212,12 +212,12 @@ const SEED = `(() => {
     version: 1,
     plugins: [{
       id: 'com.mysearch.file-search', name: '文件搜索', version: '1.0.0', apiVersion: 1,
-      enabled: true, source: { kind: 'folder', ref: '/tmp/file-search' },
+      enabled: true, grants: [], denied: [], source: { kind: 'folder', ref: '/tmp/file-search' },
       manifest: {
         id: 'com.mysearch.file-search', name: '文件搜索', version: '1.0.0', apiVersion: 1,
         contributes: {
           handlers: { folders: true },
-          searchItem: { title: '文件搜索', keyword: '文件搜索' },
+          searchItem: { title: '文件搜索', keyword: '文件搜索', subSearch: true },
         },
       },
     }],
@@ -250,12 +250,13 @@ const setInput = async (kw) => {
 const settle = () => sleep(220);
 
 /* ---------------- 1. 初始：不在子搜索模式，条带不显示 ---------------- */
-await setInput("父关键词");
+await setInput("文件搜索");
 check("普通搜索（无分隔符）→ 条带不显示", (await stripShown()) === false, `class=${await stripClass()}`);
 
 /* ---------------- 2. Tab 进入子搜索模式 → 自动展开 ---------------- */
 await evalJs(`document.getElementById('my_search_input').focus(); 1`);
 await pressTab();
+await sleep(500);
 const valAfterTab = await evalJs(`document.getElementById('my_search_input').value`);
 check("Tab 进入子搜索模式（值含 ' : '）", valAfterTab.includes(" : "), `value=${JSON.stringify(valAfterTab)}`);
 check("进入子搜索模式 → 条带自动显示", (await stripShown()) === true, `class=${await stripClass()}`);
@@ -294,21 +295,47 @@ const valAfterShiftTab = await evalJs(`document.getElementById('my_search_input'
 check("Shift+Tab 退出子搜索模式（值不含 ' : '）", !valAfterShiftTab.includes(" : "), `value=${JSON.stringify(valAfterShiftTab)}`);
 check("离开子搜索模式 → 条带自动收起", (await stripShown()) === false, `class=${await stripClass()}`);
 
-/* ---------------- 5. 没有能处理文件/文件夹的插件 → 进入子搜索模式也不显示 ---------------- */
-// 清空插件注册表（去掉「文件搜索」），历史仍在：条带本可列出条目，但因没有任何
-// 声明 handlers 的插件，不该再主动占位（这是本次「按需显示」改动的核心契约）。
+/* ---------------- 5. 结果只有翻译插件 → 进入子搜索模式也不显示 ---------------- */
+// 注册表同时装着「文件搜索」和「翻译」，但本次结果只有翻译：全局存在能力插件
+// 不算数，结果里没有能接手文件/文件夹的项就不该主动占位（核心契约）。
 await evalJs(
-  `localStorage.setItem('my-search-desktop:PLUGIN_REGISTRY_CACHE_KEY', JSON.stringify({ version: 1, plugins: [] })); 1`
+  `localStorage.setItem('my-search-desktop:PLUGIN_REGISTRY_CACHE_KEY', JSON.stringify({
+    version: 1,
+    plugins: [
+      {
+        id: 'com.mysearch.file-search', name: '文件搜索', version: '1.0.0', apiVersion: 1,
+        enabled: true, grants: [], denied: [], source: { kind: 'folder', ref: '/tmp/file-search' },
+        manifest: {
+          id: 'com.mysearch.file-search', name: '文件搜索', version: '1.0.0', apiVersion: 1,
+          contributes: {
+            handlers: { folders: true },
+            searchItem: { title: '文件搜索', keyword: '文件搜索', subSearch: true },
+          },
+        },
+      },
+      {
+        id: 'com.example.translate', name: '翻译', version: '1.0.0', apiVersion: 1,
+        enabled: true, grants: [], denied: [], source: { kind: 'folder', ref: '/tmp/translate' },
+        manifest: {
+          id: 'com.example.translate', name: '翻译', version: '1.0.0', apiVersion: 1,
+          contributes: {
+            searchItem: { title: '翻译', keyword: '翻译', subSearch: true },
+          },
+        },
+      },
+    ],
+  })); 1`
 );
 await S("Page.navigate", { url: base + "/index.html" });
 await sleep(1500);
-await setInput("父关键词");
+await setInput("翻译");
 await evalJs(`document.getElementById('my_search_input').focus(); 1`);
 await pressTab();
-const valNoPlugin = await evalJs(`document.getElementById('my_search_input').value`);
-check("（无插件场景）Tab 仍进入子搜索模式", valNoPlugin.includes(" : "), `value=${JSON.stringify(valNoPlugin)}`);
+await sleep(500);
+const valTranslation = await evalJs(`document.getElementById('my_search_input').value`);
+check("（翻译结果）Tab 仍进入子搜索模式", valTranslation.includes(" : "), `value=${JSON.stringify(valTranslation)}`);
 check(
-  "无文件/文件夹插件：进入子搜索模式 → 条带不主动显示",
+  "结果只有不能处理文件的翻译插件 → 条带不主动显示",
   (await stripShown()) === false,
   `class=${await stripClass()}`
 );

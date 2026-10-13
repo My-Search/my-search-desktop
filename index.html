@@ -44,16 +44,16 @@
             document.documentElement.classList.add("theme-dark");
             var sk = document.getElementById("ms-skeleton");
             if (sk) {
-              sk.style.background = "#17191d";
+              sk.style.background = "#1f2125";
               var box = sk.firstElementChild;
               if (box) {
-                box.style.background = "#17191d";
-                box.style.borderColor = "#4a4f58";
+                box.style.background = "#1f2125";
+                box.style.borderColor = "#525760";
                 // 叶子占位圆：深色时也改暗，避免浅灰圆在深色背景上白闪
                 var flexRow = box.firstElementChild;
                 if (flexRow) {
                   var leafCircle = flexRow.lastElementChild;
-                  if (leafCircle) leafCircle.style.background = "#33363d";
+                  if (leafCircle) leafCircle.style.background = "#3b3e45";
                 }
               }
             }

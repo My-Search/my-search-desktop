@@ -201,11 +201,10 @@ export function buildAttachmentFilter(
 }
 
 /**
- * 是否存在**既声明了附件处理能力、又会出现在搜索结果里**的插件。
+ * 注册表里是否存在**声明了附件处理能力、且具备可见搜索项**的插件。
  *
- * 用途：「最近添加」条带该不该**主动**显示——只有当搜索结果里有能处理
- * 文件/文件夹的插件（如内置的「文件搜索」）时，把文件/文件夹再拖回来才有意义，
- * 条带才主动占位；否则（纯 URL / 纯文本型搜索）条带只会白占一行窗口高度。
+ * 这是注册表层面的存在性判断，不能代表本次结果里真的出现了该插件；
+ * 「最近添加」条带必须使用下方的 `hasFileFolderHandlerInResults`。
  *
  * 两个条件：
  *   1. `contributes.handlers.files` / `folders` 至少一项为真（能接手文件/文件夹）；
@@ -225,6 +224,33 @@ export function anyHandlerCapability(
     if (!handlers.files && !handlers.folders) continue;
     const items = listSearchItems(rec.manifest);
     if (items.some((it) => it.visible !== false)) return true;
+  }
+  return false;
+}
+
+/**
+ * 当前结果列表里是否真的出现了一个能处理文件/文件夹的插件。
+ *
+ * `anyHandlerCapability` 只回答“注册表里有没有这类插件”，不能回答“这次
+ * 搜索结果里有没有它”——两者在翻译、纯 URL 等插件混装时会得出不同结论。
+ * 这里按结果项的 `_pluginId` 反查启用记录，再读取该插件的 handlers 声明；
+ * 结果项本身就是已进入列表的可见项，因此不再重复检查 searchItem.visible。
+ */
+export function hasFileFolderHandlerInResults(
+  items: readonly SearchItem[] | null | undefined,
+  records: readonly PluginRecord[] | null | undefined
+): boolean {
+  const byId = new Map<string, PluginRecord>();
+  for (const rec of records ?? []) {
+    if (rec && rec.enabled !== false) byId.set(rec.id, rec);
+  }
+  for (const item of items ?? []) {
+    const pluginId = pluginIdOf(item);
+    if (!pluginId) continue;
+    const rec = byId.get(pluginId);
+    if (!rec) continue;
+    const handlers = inputHandlersOf(rec.manifest);
+    if (handlers.files || handlers.folders) return true;
   }
   return false;
 }

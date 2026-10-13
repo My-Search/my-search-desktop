@@ -18,6 +18,7 @@ import {
   mergeAttachments,
   buildAttachmentFilter,
   anyHandlerCapability,
+  hasFileFolderHandlerInResults,
   attachmentPlaceholder,
   isPreviewImage,
   extOf,
@@ -161,7 +162,7 @@ const ok = (cond, name, extra = "") => {
   );
 }
 
-/* ---------- 3.5 「最近添加」条带主动显示的能力探测 ---------- */
+/* ---------- 3.5 注册表层面的文件/文件夹处理能力探测 ---------- */
 {
   // searchItem 默认给一个可见项（插件会出现在搜索结果里）；handlers 决定处理能力
   const mkRecord = (id, handlers, { enabled = true, searchItem = { title: "T", keyword: "k" } } = {}) => ({
@@ -175,41 +176,41 @@ const ok = (cond, name, extra = "") => {
     },
   });
 
-  // 有能处理文件/文件夹、且会出现在结果里的启用插件 → 条带该主动露出（如「文件搜索」）
+  // 注册表存在处理能力 + 可见搜索项的启用插件（如「文件搜索」）。
   ok(
     anyHandlerCapability([mkRecord("com.mysearch.file-search", { folders: true })]),
-    "有文件夹处理能力的启用插件 → 主动显示"
+    "启用插件具备文件夹处理能力 → 判定为有能力"
   );
   ok(
     anyHandlerCapability([mkRecord("com.example.uploader", { files: true })]),
-    "有文件处理能力的启用插件 → 主动显示"
+    "启用插件具备文件处理能力 → 判定为有能力"
   );
 
-  // 纯 URL / 纯文本型插件（未声明 handlers）→ 不主动显示
+  // 纯 URL / 纯文本型插件（未声明 handlers）→ 不具备处理能力
   ok(
     !anyHandlerCapability([mkRecord("com.example.plain", undefined)]),
-    "未声明 handlers 的插件 → 不主动显示"
+    "未声明 handlers 的插件 → 不具备处理能力"
   );
   ok(
     !anyHandlerCapability([mkRecord("com.example.weird", { files: false, folders: false })]),
-    "两类能力都 false → 不主动显示"
+    "两类能力都 false → 不具备处理能力"
   );
   // 能力插件被禁用 → 视同没有
   ok(
     !anyHandlerCapability([mkRecord("com.example.off", { files: true }, { enabled: false })]),
-    "能力插件被禁用 → 不主动显示"
+    "能力插件被禁用 → 注册表中视同不存在"
   );
-  // 有处理能力但不贡献搜索项（纯后台插件）→ 结果里看不到它，不主动显示
+  // 有处理能力但不贡献搜索项（纯后台插件）→ 不计入可见能力插件
   ok(
     !anyHandlerCapability([mkRecord("com.example.bg", { files: true }, { searchItem: null })]),
-    "有处理能力但无搜索项 → 不主动显示"
+    "有处理能力但无搜索项 → 不计入可见能力插件"
   );
-  // 搜索项全部 visible:false（不在结果里）→ 同样不主动显示
+  // 搜索项全部 visible:false（不在结果里）→ 不计入可见能力插件
   ok(
     !anyHandlerCapability([
       mkRecord("com.example.hidden", { files: true }, { searchItem: { title: "隐藏", keyword: "h", visible: false } }),
     ]),
-    "处理能力插件的搜索项全不可见 → 不主动显示"
+    "处理能力插件的搜索项全不可见 → 不计入可见能力插件"
   );
 
   // 混合：只要有一个能处理的启用插件就显示
@@ -222,9 +223,34 @@ const ok = (cond, name, extra = "") => {
   );
 
   // 空 / 缺省输入不抛错、判定为「不显示」
-  ok(!anyHandlerCapability([]), "空列表 → 不主动显示");
-  ok(!anyHandlerCapability(undefined), "undefined 列表 → 不主动显示");
-  ok(!anyHandlerCapability(null), "null 列表 → 不主动显示");
+  ok(!anyHandlerCapability([]), "空列表 → 不具备能力");
+  ok(!anyHandlerCapability(undefined), "undefined 列表 → 不具备能力");
+  ok(!anyHandlerCapability(null), "null 列表 → 不具备能力");
+
+  // 结果项感知：装了能力插件 ≠ 本次结果里有它（翻译结果不该触发条带）
+  const resultItem = (id) => ({ title: "结果", type: "script", _pluginId: id });
+  const fileSearch = mkRecord("com.mysearch.file-search", { folders: true });
+  const translation = mkRecord("com.example.translate", undefined);
+  ok(
+    !hasFileFolderHandlerInResults([resultItem("com.example.translate")], [fileSearch, translation]),
+    "结果只有翻译插件 → 不主动显示"
+  );
+  ok(
+    hasFileFolderHandlerInResults(
+      [resultItem("com.example.translate"), resultItem("com.mysearch.file-search")],
+      [fileSearch, translation]
+    ),
+    "结果同时包含文件搜索插件 → 主动显示"
+  );
+  ok(
+    !hasFileFolderHandlerInResults([resultItem("com.example.plain")], [fileSearch, translation]),
+    "结果里的插件没有处理能力 → 不主动显示"
+  );
+  ok(
+    !hasFileFolderHandlerInResults([resultItem("com.mysearch.file-search")], [translation]),
+    "结果项对应的能力插件不在启用注册表 → 不主动显示"
+  );
+  ok(!hasFileFolderHandlerInResults([], [fileSearch]), "结果为空 → 不主动显示");
 }
 
 /* ---------- 4. 引擎附件模式 ---------- */
