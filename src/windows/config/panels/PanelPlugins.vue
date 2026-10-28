@@ -33,6 +33,8 @@ import { useEnvPicker } from "../../../composables/useEnvPicker";
 import type { PluginManifest, PluginThemePreference } from "../../../lib/plugins/manifest";
 import { compareVersion, detailViewThemeOf } from "../../../lib/plugins/manifest";
 import { findPlugin, loadRegistry } from "../../../lib/plugins/registry";
+import { checkAndApplyMarketUpdates } from "../../../lib/plugins/market";
+import { updatePluginFromMarket } from "../../../lib/plugins/host";
 
 const props = defineProps<{
   notify: (text: string, type?: "ok" | "error") => void;
@@ -453,6 +455,71 @@ async function stopAll(): Promise<void> {
   props.notify("已停止所有后台进程", "ok");
 }
 
+// ===================== 市场更新 =====================
+/** 检查更新中（按钮禁用 + 文案切换） */
+const checkingUpdates = ref(false);
+/** 检查更新：拉目录、比对已装插件、重写 updateAvailable、落盘，并提示结果 */
+async function checkUpdates(): Promise<void> {
+  if (checkingUpdates.value) return;
+  checkingUpdates.value = true;
+  try {
+    const n = await checkAndApplyMarketUpdates();
+    props.notify(
+      n > 0 ? `检查完成：发现 ${n} 个插件有可用更新` : "检查完成：已是最新",
+      n > 0 ? "ok" : "ok"
+    );
+  } catch (e) {
+    props.notify(`检查更新失败: ${String((e as Error)?.message ?? e)}`, "error");
+  } finally {
+    checkingUpdates.value = false;
+  }
+}
+
+/** 逐插件更新：弹安装确认框（复用本面板已有的 installDialog 视觉与文案）→ 更新 */
+async function updatePlugin(rec: any): Promise<void> {
+  if (!updatingId.value) {
+    updatingId.value = rec.id;
+    try {
+      const result = await updatePluginFromMarket(rec.id, "update", confirmMarketInstall);
+      if (result.ok) {
+        props.notify(`已升级「${rec.name}」到 v${result.version}`, "ok");
+        // 升级可能换了 logo：忘掉旧缓存再预读
+        forgetIconCache(rec.id);
+        await preloadIcons();
+      } else if (!result.cancelled) {
+        props.notify(`更新失败: ${result.error ?? "未知错误"}`, "error");
+      }
+    } catch (e) {
+      props.notify(`更新失败: ${String((e as Error)?.message ?? e)}`, "error");
+    } finally {
+      updatingId.value = null;
+    }
+  }
+}
+/** 正在更新的插件 id（按钮显示「更新中…」） */
+const updatingId = ref<string | null>(null);
+
+/**
+ * 市场更新的确认闸门：复用本面板已有的安装确认弹窗（installDialog* + installDialogVisible），
+ * 通过独立的 marketUpdateResolver 解析——与文件安装的 pendingPrepared / onInstallConfirm
+ * 文件分支彻底隔离，互不干扰（安装来源不同：市场更新由 host.ts 落盘，文件安装由本面板落盘）。
+ */
+let marketUpdateResolver: ((ok: boolean) => void) | null = null;
+async function confirmMarketInstall(req: any): Promise<boolean> {
+  if (installDialogVisible.value) return false;
+  installDialogMode = "market";
+  installDialogManifest.value = req.manifest;
+  installDialogIcon.value = req.iconUrl;
+  installDialogPerms.value = req.permBlocks;
+  installDialogWarnings.value = req.warnings;
+  installDialogInstalledVersion.value = req.installedVersion;
+  installDialogRunning.value = req.running === true;
+  installDialogVisible.value = true;
+  return new Promise<boolean>((resolve) => {
+    marketUpdateResolver = resolve;
+  });
+}
+
 // ===================== 启用/禁用/卸载 =====================
 async function toggleEnabled(rec: any): Promise<void> {
   await rt.setEnabled(rec.id, !rec.enabled);
@@ -505,6 +572,8 @@ async function uninstallPlugin(rec: any): Promise<void> {
 // ===================== 安装 =====================
 // 插件安装确认弹窗（标题「插件安装」，展示 logo / 名称 / 版本 / 权限分组 / 警告）
 const installDialogVisible = ref(false);
+/** 弹窗来源：file = 本地文件安装（本面板落盘）；market = 市场更新（host.ts 落盘，本面板仅确认） */
+let installDialogMode: "file" | "market" = "file";
 const installDialogManifest = ref<PluginManifest | null>(null);
 const installDialogIcon = ref<string | null>(null);
 const installDialogPerms = ref<PermissionGroupBlock[]>([]);
@@ -564,6 +633,15 @@ async function installFromPath(path: string): Promise<void> {
 
 /** 安装确认弹窗：用户点击「安装」 */
 async function onInstallConfirm(): Promise<void> {
+  // 市场更新路径：落盘由 host.ts 的 updatePluginFromMarket 负责，本面板只回传确认；
+  // 先把弹窗隐藏并复位展示态，再 resolve（避免调用方在 await 后读到旧值）。
+  if (marketUpdateResolver) {
+    const resolve = marketUpdateResolver;
+    marketUpdateResolver = null;
+    closeInstallDialogState();
+    resolve(true);
+    return;
+  }
   installDialogVisible.value = false;
   if (!pendingPrepared) return;
   const prepared = pendingPrepared;
@@ -601,6 +679,14 @@ async function onInstallConfirm(): Promise<void> {
 
 /** 安装确认弹窗：用户点击「取消」 */
 function onInstallCancel(): void {
+  // 市场更新路径：只回传取消（落盘由 host.ts 负责，本面板不参与）
+  if (marketUpdateResolver) {
+    const resolve = marketUpdateResolver;
+    marketUpdateResolver = null;
+    closeInstallDialogState();
+    resolve(false);
+    return;
+  }
   installDialogVisible.value = false;
   pendingPrepared = null;
   pendingInstallPath = "";
@@ -608,6 +694,16 @@ function onInstallCancel(): void {
   installDialogIcon.value = null;
   installDialogInstalledVersion.value = null;
   installDialogRunning.value = false;
+}
+
+/** 复位安装确认弹窗的展示态（市场更新与文件安装共用，避免四处重复） */
+function closeInstallDialogState(): void {
+  installDialogVisible.value = false;
+  installDialogManifest.value = null;
+  installDialogIcon.value = null;
+  installDialogInstalledVersion.value = null;
+  installDialogRunning.value = false;
+  installDialogMode = "file";
 }
 
 async function installFromFile(): Promise<void> {
@@ -839,6 +935,9 @@ function durFrom(ts: number | null): string {
       >{{ f.label }}
         <span v-if="f.value === 'running' && runningCount > 0" class="badge">{{ runningCount }}</span>
       </button>
+      <button class="btn-filter" :class="{ on: checkingUpdates }" :disabled="checkingUpdates" @click="checkUpdates">
+        {{ checkingUpdates ? '检查中…' : '检查更新' }}
+      </button>
     </div>
 
     <div class="cfg-card plugins-list" v-if="displayList.length > 0">
@@ -1012,6 +1111,13 @@ function durFrom(ts: number | null): string {
 
           <!-- 操作 -->
           <div class="plugin-detail-actions">
+            <button
+              v-if="record.updateAvailable"
+              class="btn-sm btn-update"
+              :disabled="updatingId === record.id"
+              :title="`有可用更新 v${record.updateAvailable}`"
+              @click.stop="updatePlugin(record)"
+            >{{ updatingId === record.id ? '更新中…' : `更新到 v${record.updateAvailable}` }}</button>
             <button class="btn-sm" @click.stop="showLog(record)">日志</button>
             <button
               class="btn-sm btn-warn"

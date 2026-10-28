@@ -877,6 +877,18 @@ export async function clipboardHistorySetFavorite(id: string, favorite: boolean)
 }
 
 /**
+ * 修改一条文本历史的内容（插件「编辑」按钮）。
+ *
+ * 只改 `text` 与 `size`，`createdAt` / `favorite` / 来源等元数据在 Rust 侧
+ * 原样保留；落盘后宿主广播 `clipboard-updated`，打开中的列表自动刷新。
+ * 浏览器调试环境**抛错**而非静默返回：静默会让插件误以为保存成功。
+ */
+export async function clipboardHistoryUpdate(id: string, text: string): Promise<void> {
+  if (!isTauri) throw new Error("编辑剪贴板历史仅在桌面端可用");
+  await invoke("clipboard_history_update", { id: String(id ?? ""), text: String(text ?? "") });
+}
+
+/**
  * 把某条历史复制回系统剪贴板。
  *
  * 这是**用户显式触发**的写入——宿主监听路径永远只读，

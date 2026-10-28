@@ -37,6 +37,16 @@ const props = defineProps<{
   attachments?: AttachedEntry[];
   /** 系统正在向窗口拖入文件（Tauri 拖拽事件驱动的高亮） */
   dragging?: boolean;
+  /**
+   * 当前打开的插件若有可更新的新版本，给出其信息：点击左侧升级图标即更新。
+   * null = 没有插件在显示，或该插件无需更新（不显示升级图标）。
+   */
+  pluginUpgrade?: {
+    pluginId: string;
+    name: string;
+    currentVersion: string;
+    availableVersion: string;
+  } | null;
 }>();
 
 const emit = defineEmits<{
@@ -52,6 +62,8 @@ const emit = defineEmits<{
   (e: "detach", index: number): void;
   /** 点击插件包 chip（.mspp） */
   (e: "chip-click", index: number): void;
+  /** 点击当前打开插件的「升级」图标 */
+  (e: "plugin-update"): void;
 }>();
 
 const inputEl = ref<HTMLInputElement | null>(null);
@@ -64,6 +76,16 @@ const value = computed({
 
 /** 是否已有「下载完成、可安装」的更新（决定叶子右下角小红箭头与点击语义） */
 const updateReady = computed(() => props.update.isDownloaded());
+
+/** 当前打开的插件是否有可更新的新版本（决定叶子**左侧**是否显示升级图标） */
+const pluginUpgradeAvailable = computed(() => props.pluginUpgrade != null);
+
+/** 升级图标的提示文案 */
+const pluginUpgradeTitle = computed(() =>
+  props.pluginUpgrade
+    ? `「${props.pluginUpgrade.name}」有更新（v${props.pluginUpgrade.currentVersion} → v${props.pluginUpgrade.availableVersion}），点击升级`
+    : ""
+);
 
 /** 叶子按钮提示：仅在可安装时提示，其余保持无提示 */
 const logoTitle = computed(() => (updateReady.value ? props.update.updateTip() : ""));
@@ -397,6 +419,25 @@ function onLogoContextMenu(e: MouseEvent) {
       @paste="onPaste"
     />
     <div class="logo-wrapper">
+      <!-- 当前打开的插件有可更新的新版本：叶子**左侧**显示升级图标，点击即更新 -->
+      <button
+        v-if="pluginUpgradeAvailable"
+        id="pluginUpgradeButton"
+        type="button"
+        class="plugin-upgrade-btn"
+        :title="pluginUpgradeTitle"
+        @click="emit('plugin-update')"
+      >
+        <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true">
+          <path
+            d="M12 3l7 8h-4v10h-6V11H5l7-8z"
+            fill="#f5222d"
+            stroke="#f5222d"
+            stroke-width="1.4"
+            stroke-linejoin="round"
+          />
+        </svg>
+      </button>
       <!-- 叶子 logo：**始终显示**（更新提示不再顶掉它，只是叠一个小箭头） -->
       <button
         id="logoButton"

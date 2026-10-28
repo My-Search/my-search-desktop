@@ -1030,6 +1030,63 @@ pub fn clipboard_history_set_favorite(
     Ok(())
 }
 
+/// 把编辑提交的原始文本归一成可入库的文本；空内容返回 `None`（调用方据此拒绝）。
+///
+/// 与 `push_text` 的口径**逐字一致**（剥尾部 `\r\n`、按 `chars()` 而非字节截断到
+/// `MAX_TEXT_CHARS`）——否则同一条内容「复制进来的」和「编辑保存的」会因为换行 /
+/// 长度处理不同而在列表里表现不一致，也会让「按字符数」的既有约定出现第二个口径。
+///
+/// 中间的换行**保留**：多行文本（日志、配置片段）是常见收藏对象，剥掉就失去意义。
+fn normalize_edit_text(raw: &str) -> Option<String> {
+    let trimmed = raw.trim_end_matches(['\r', '\n']);
+    if trimmed.trim().is_empty() {
+        return None;
+    }
+    let mut content = trimmed.to_string();
+    if content.chars().count() > MAX_TEXT_CHARS {
+        content = content.chars().take(MAX_TEXT_CHARS).collect();
+    }
+    Some(content)
+}
+
+/// 修改一条**文本**历史的内容（插件「编辑」按钮走这里）。
+///
+/// 与 `clipboard_history_set_favorite` 同构：按 id 找到条目、只改 `text` 与
+/// `size`、落盘、广播更新事件。三条约束：
+///
+///   1. **只改内容，不动元数据**：`id` / `kind` / `created_at` / `source` /
+///      `favorite` / 图片 `rel_path` 全部原样保留。所以「收藏」标签的排序不会
+///      因为编辑而跳动（列表按 `created_at` 从新到旧），收藏标记也不会丢。
+///   2. **图片不可编辑**：像素内容没有文本形态，`kind != "text"` 直接拒绝。
+///   3. **不在这里校验 `favorite`**：收藏门禁是纯 UI 决策（「编辑」按钮只在
+///      收藏项上渲染），命令本身保持「改一条文本的内容」这个通用语义。若在这里
+///      加校验，「编辑中途取消收藏」这个交互会莫名失败，得不偿失。
+///
+/// 落盘后广播 `clipboard-updated`，打开中的列表会自动重拉（与收藏/删除一致）。
+#[tauri::command]
+pub fn clipboard_history_update(
+    app: tauri::AppHandle,
+    id: String,
+    text: String,
+) -> Result<(), String> {
+    let content = normalize_edit_text(&text).ok_or_else(|| "内容不能为空".to_string())?;
+    let mut idx = load_index(&app);
+    let item = idx
+        .items
+        .iter_mut()
+        .find(|it| it.id == id)
+        .ok_or_else(|| "该历史已不存在".to_string())?;
+    if item.kind != "text" {
+        return Err("只能编辑文本历史".to_string());
+    }
+    item.text = Some(content.clone());
+    // size 与 push_text 同口径：UTF-8 字节数（不是字符数，中文一条会大 3 倍）
+    item.size = content.len() as u64;
+    save_index(&app, &idx)?;
+    let _ = app.emit(EVENT_CLIPBOARD_UPDATED, ());
+    Ok(())
+}
+
 /// 清空历史。
 ///
 /// `keep_favorites` 为 `true`（默认）时**保留收藏条目**，只清掉未收藏的；
@@ -1294,6 +1351,35 @@ mod tests {
         assert_eq!(truncated.chars().count(), MAX_TEXT_CHARS);
         // 截断后仍是合法 UTF-8（String 本身就保证）
         assert!(truncated.chars().all(|c| c == '中'));
+    }
+
+    /// 编辑保存的文本归一化：空内容必须被拒，尾部换行剥掉、中间换行保留，
+    /// 超长按**字符**截断。与 `push_text` 同口径是重点——两条写入路径若处理不同，
+    /// 同一份内容「复制进来的」和「编辑保存的」会在列表里长得不一样。
+    #[test]
+    fn normalize_edit_text_rejects_empty_trims_and_truncates() {
+        // 空 / 纯空白：返回 None（否则列表里会出现一行空白条目）
+        assert!(normalize_edit_text("").is_none());
+        assert!(normalize_edit_text("   \n\t ").is_none());
+
+        // 普通文本原样通过
+        assert_eq!(normalize_edit_text("hello").as_deref(), Some("hello"));
+
+        // 尾部 \r\n 剥掉，中间换行保留（多行文本是常见收藏对象）
+        assert_eq!(
+            normalize_edit_text("第一行\r\n第二行\n\n").as_deref(),
+            Some("第一行\r\n第二行")
+        );
+
+        // 超长按字符截断：中文占 3 字节，若误按字节截断会被切成乱码
+        let long: String = "中".repeat(MAX_TEXT_CHARS + 10);
+        let out = normalize_edit_text(&long).expect("超长文本应被截断而非拒绝");
+        assert_eq!(out.chars().count(), MAX_TEXT_CHARS);
+        assert!(out.chars().all(|c| c == '中'));
+
+        // 恰好等于上限：不应被截断（边界）
+        let exact: String = "a".repeat(MAX_TEXT_CHARS);
+        assert_eq!(normalize_edit_text(&exact).unwrap().chars().count(), MAX_TEXT_CHARS);
     }
 
     /// 构造测试条目的小工具：id 形如 `t-<n>`，可指定文本/来源/收藏。

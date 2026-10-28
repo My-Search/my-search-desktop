@@ -130,3 +130,41 @@ export function clearUpdateAvailable(reg: PluginRegistryFile, id: string): void 
 export function updateableCount(reg: PluginRegistryFile): number {
   return reg.plugins.filter((p) => p.updateAvailable != null).length;
 }
+
+/**
+ * 拉取市场目录、比对已装插件、幂等重写 `updateAvailable`，并落盘注册表。
+ *
+ * 这是「检查更新」的统一入口：设置面板点「检查更新」、以及搜索窗口呼出时
+ * 都走它。沿用 `host.ts` 里 `catalogFetch` 的同一套拼装（`MARKET_CATALOG_URL`
+ * 地址、版本兼容过滤、目录 vs 注册表差异）。
+ *
+ * 返回可更新插件数量（= 落盘后 `updateAvailable` 非空的条目数），失败抛错。
+ * 调用方负责把「检查中 / 失败」的状态与文案暴露给用户。
+ */
+export async function checkAndApplyMarketUpdates(): Promise<number> {
+  const { marketFetchRaw } = await import("./ipc.ts");
+  const { compatibleEntries, parseCatalog } = await import("./market-types.ts");
+  const { loadRegistry, saveRegistry } = await import("./registry.ts");
+
+  const reg = loadRegistry();
+  const raw = await marketFetchRaw(
+    "com.mysearch.market",
+    typeof MARKET_CATALOG_URL !== "undefined" ? MARKET_CATALOG_URL : "",
+    ""
+  );
+  const text = new TextDecoder("utf-8").decode(raw);
+  const parsed = parseCatalog(text);
+  if (!parsed.ok) throw new Error("市场目录解析失败");
+  const compat = compatibleEntries(
+    parsed.catalog,
+    typeof __APP_VERSION__ !== "undefined" ? __APP_VERSION__ : ""
+  );
+  const diff = diffCatalog(reg, compat);
+  applyUpdateAvailable(reg, diff);
+  saveRegistry(reg);
+  return updateableCount(reg);
+}
+
+/** 插件市场目录地址（与 host.ts 同源；这里单独声明以避免与 host.ts 形成循环依赖） */
+export const MARKET_CATALOG_URL =
+  "https://raw.githubusercontent.com/My-Search/my-search-plugin-market/main/index.dist.json";

@@ -59,6 +59,7 @@ import {
   clipboardHistoryClear,
   clipboardHistoryCopy,
   clipboardHistorySetFavorite,
+  clipboardHistoryUpdate,
   clipboardHistoryGetShortcut,
   clipboardHistorySetShortcut,
   stopPluginBackend,
@@ -633,6 +634,7 @@ export function usePluginHost(opts: PluginHostRuntimeOptions) {
       clipboardHistoryClear: (keepFavorites) => clipboardHistoryClear(keepFavorites),
       clipboardHistoryCopy: (id) => clipboardHistoryCopy(id),
       clipboardHistorySetFavorite: (id, favorite) => clipboardHistorySetFavorite(id, favorite),
+      clipboardHistoryUpdate: (id, text) => clipboardHistoryUpdate(id, text),
       clipboardHistoryGetShortcut: () => clipboardHistoryGetShortcut(),
       clipboardHistorySetShortcut: (shortcut) => clipboardHistorySetShortcut(shortcut),
       // ===== 数据同步：转发到 App.vue 注入的桥（那边负责引擎生命周期）=====
