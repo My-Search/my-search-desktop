@@ -500,33 +500,6 @@ html, body {
   -webkit-app-region: no-drag;
 }
 
-/* 插件升级图标：当前打开的插件有可更新版本时，**原位替换**叶子 logo
-   （同一 25×25 区域，不并排挤压布局）。
-   - 点击 = 走安装确认弹窗 → 更新当前插件；更新完换回叶子；
-   - 用用户指定的「升级」图标（齿轮+云+箭头语义），保持品牌蓝 #1296db。 */
-.plugin-upgrade-btn {
-  width: 25px;
-  height: 25px;
-  padding: 2px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  -webkit-app-region: no-drag;
-  animation: badge-pop 0.3s ease-out;
-}
-.plugin-upgrade-btn:hover {
-  background: rgba(255, 0, 0, 0.12);
-  border-radius: 6px;
-}
-.plugin-upgrade-btn svg {
-  width: 100%;
-  height: 100%;
-  display: block;
-}
-
 /* 更新就绪角标：后台更新下载完成后，贴在叶子 logo **右下角**的丰满小红箭头。
    - 只出现这一个「可安装」信号，不再顶掉叶子、不再有环形进度条；
    - 造型 = **只有箭头本体**（无圆底），但做得丰满厚实：宽箭头 + 粗箭杆，

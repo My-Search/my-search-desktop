@@ -113,8 +113,6 @@ import { useSharedPluginRuntime } from "../config/usePluginRuntime.ts";
 import type { PluginManifest } from "../../lib/plugins/manifest.ts";
 import { compareVersion } from "../../lib/plugins/manifest.ts";
 import { findPlugin, loadRegistry } from "../../lib/plugins/registry.ts";
-import { updatePluginFromMarket } from "../../lib/plugins/host.ts";
-import { checkAndApplyMarketUpdates } from "../../lib/plugins/market.ts";
 import type { SearchItem } from "../../types/index";
 
 const search = useSearchState();
@@ -623,78 +621,6 @@ const pluginViewHost = usePluginViewHost({
   // 关闭界面时是否停后台进程由插件的 closeBehavior 决定（判定在 usePluginViewHost.clear）
   stopBackend: (id) => pluginHost.stopBackend(id),
 });
-
-/**
- * 市场检查节拍：每次「检查更新」后 +1，强制下面的 computed 重算
- * （注册表里的 `updateAvailable` 写完后，需要这个节拍把旧值刷新成新值）。
- */
-const marketCheckTick = ref(0);
-
-/**
- * 当前打开的插件若可更新，给出其升级信息（驱动搜索框叶子左侧的升级图标）。
- * 仅当「前台显示着某个插件视图」且「该插件登记了新版本」时才非空。
- */
-const activePluginUpgrade = computed(() => {
-  void marketCheckTick.value; // 依赖节拍：检查更新后立即重算
-  const id = pluginViewHost.activePluginId.value;
-  if (!id) return null;
-  const rec = pluginHost.get(id);
-  if (!rec || !rec.updateAvailable) return null;
-  return {
-    pluginId: id,
-    name: rec.name,
-    currentVersion: rec.version,
-    availableVersion: rec.updateAvailable,
-  };
-});
-
-/** 点击叶子左侧的升级图标：弹安装确认框 → 更新 → 重载插件页到新版 */
-async function onPluginUpgradeClick(): Promise<void> {
-  const info = activePluginUpgrade.value;
-  if (!info) return;
-  try {
-    const result = await updatePluginFromMarket(info.pluginId, "update", confirmMarketInstall);
-    if (!result.ok) {
-      if (!result.cancelled) toast.showToast(`更新失败：${result.error ?? "未知错误"}`, "error");
-      return;
-    }
-    toast.showToast(`已升级「${info.name}」到 v${result.version}`, "ok");
-    // 重新挂载到新版：先丢前台旧会话，再按当前项重新打开（新入口文件/脚本）。
-    const item = pluginHost.itemForPlugin(info.pluginId);
-    pluginViewHost.release(info.pluginId, "用户从搜索框点击升级，重载到新版");
-    if (item && detailVisible.value && state.mode === MODE.SHOW_ITEM_DETAIL) {
-      try {
-        await pluginViewHost.open(item);
-        detailRef.value?.onScriptMounted();
-      } catch (e) {
-        warn(`[插件] 升级后重载失败 (${info.pluginId}):`, e);
-        toast.showToast(`「${info.name}」已更新，请重新打开`, "error");
-      }
-    }
-  } catch (e) {
-    toast.showToast(`更新失败：${String((e as Error)?.message ?? e)}`, "error");
-  }
-}
-
-/**
- * 市场更新检查的节流：呼出时顺带比对已装插件（让当前打开插件的升级图标
- * 无需先去设置面板手动「检查更新」）。呼出可能很频繁，每次真查会迅速打爆
- * GitHub 目录的未认证限额，因此复用「至少 60s 一次」的节流。
- */
-const MARKET_CHECK_INTERVAL_MS = 60 * 1000;
-let lastMarketCheckAt = 0;
-async function recheckMarketUpdatesOnSummon(): Promise<void> {
-  const now = Date.now();
-  if (now - lastMarketCheckAt < MARKET_CHECK_INTERVAL_MS) return;
-  lastMarketCheckAt = now;
-  try {
-    await checkAndApplyMarketUpdates();
-    marketCheckTick.value++; // 强制 activePluginUpgrade 重算
-  } catch (e) {
-    // 网络/解析失败静默：升级图标只是便利性提示，不应因检查失败干扰用户
-    debug("[市场] 呼出时检查更新失败（已忽略）:", e);
-  }
-}
 
 // 宿主检索 / 加权实现注入（插件 ms.search.query / ms.search.score 用）
 bindPluginHostRuntime({
@@ -2124,9 +2050,6 @@ onMounted(async () => {
     // （开启则检查、关闭则立即清空并隐藏叶子上的红箭头）。此处走节流版本——
     // 呼出可能很频繁，每次都真查会迅速打爆 GitHub API 未认证限额并掩盖新版本。
     update.recheckOnSummon();
-    // 市场插件更新检查（带 60s 节流，与上面同源理由）：呼出时顺带比对已装插件，
-    // 让「当前打开的插件可更新」左侧升级图标在多数情况下无需先去设置面板点检查。
-    void recheckMarketUpdatesOnSummon();
     // 弹窗开着时焦点留在弹窗按钮上（PluginInstallDialog 可见时会自动聚焦「安装」）
     if (!installDialogVisible.value) searchBoxRef.value?.focus();
   });
@@ -2419,7 +2342,6 @@ defineExpose({ inputValue });
         :update="update"
         :attachments="attachments"
         :dragging="draggingFiles"
-        :plugin-upgrade="activePluginUpgrade"
         @input="onInput"
         @keydown="onKeydown"
         @badge-click="onLogoClick"
@@ -2428,7 +2350,6 @@ defineExpose({ inputValue });
         @attach="onAttachEntries"
         @detach="onDetachEntry"
         @chip-click="onChipClick"
-        @plugin-update="onPluginUpgradeClick"
       />
       <!-- 「最近添加」条带：**搜索框正下方**的普通流内一行，跟着盒子一起向下
            生长（窗口高度由 measuredBoxHeight 按实测下发）。展开条件：
