@@ -500,17 +500,13 @@ html, body {
   -webkit-app-region: no-drag;
 }
 
-/* 插件升级图标：当前打开的插件有可更新版本时，显示在叶子 logo **左侧**。
-   - 造型与叶子右下角的「可安装」红箭头一致（丰满红箭头），但独立可点击：
-     点它 = 走安装确认弹窗 → 更新当前插件，不穿透到叶子（叶子仍是搜索/安装应用更新）；
-   - 尺寸压到 13px 保持轻巧，并用向下投影保留实体感（与 UpdateBadge 同源视觉语言）。 */
+/* 插件升级图标：当前打开的插件有可更新版本时，**原位替换**叶子 logo
+   （同一 25×25 区域，不并排挤压布局）。
+   - 点击 = 走安装确认弹窗 → 更新当前插件；更新完换回叶子；
+   - 用用户指定的「升级」图标（齿轮+云+箭头语义），保持品牌蓝 #1296db。 */
 .plugin-upgrade-btn {
-  position: absolute;
-  left: -15px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 17px;
-  height: 17px;
+  width: 25px;
+  height: 25px;
   padding: 2px;
   display: flex;
   align-items: center;
@@ -518,16 +514,12 @@ html, body {
   border: none;
   background: transparent;
   cursor: pointer;
-  z-index: 3;
   -webkit-app-region: no-drag;
-  filter:
-    drop-shadow(0 0.5px 0.5px rgba(0, 0, 0, 0.35))
-    drop-shadow(0 1px 1.5px rgba(0, 0, 0, 0.2));
   animation: badge-pop 0.3s ease-out;
 }
 .plugin-upgrade-btn:hover {
-  background: rgba(245, 34, 45, 0.12);
-  border-radius: 4px;
+  background: rgba(18, 150, 219, 0.14);
+  border-radius: 6px;
 }
 .plugin-upgrade-btn svg {
   width: 100%;
