@@ -2078,6 +2078,7 @@ export async function updatePluginFromMarket(
 ): Promise<{ ok: true; version: string } | { ok: false; error?: string; cancelled?: boolean }> {
   const { marketFetchRaw, installPluginPackage } = await import("./ipc.ts");
   const { parseCatalog } = await import("./market-types.ts");
+  const { clearUpdateAvailable } = await import("./market.ts");
   const catalogRaw = await marketFetchRaw(MARKET_PLUGIN_ID, MARKET_CATALOG_URL, "");
   const parsed = parseCatalog(new TextDecoder("utf-8").decode(catalogRaw));
   const entry = parsed.ok ? parsed.catalog.plugins.find((e) => e.id === id) : null;
@@ -2129,6 +2130,9 @@ export async function updatePluginFromMarket(
     integrity: { sha256: prepared.sha256, signed: false },
   });
   upsertPlugin(reg, record, { preserveUserChoices: false });
+  // 更新已生效：清掉「可更新」标记，否则面板仍会显示旧的新版本提示，
+  // 直到下一次「检查更新」重写 registry 才消失。
+  clearUpdateAvailable(reg, id);
   saveRegistry(reg);
   // 覆盖安装（action="update"）：该插件若在后台运行，Rust 侧的 plugin_install
   // 会先强制停进程再落盘、随后用新版本拉回；这里补充两件事——

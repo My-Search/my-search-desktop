@@ -965,6 +965,11 @@ fn paginate(filtered: Vec<ClipItem>, offset: usize, limit: usize) -> ClipPage {
 }
 
 /// 读回一张剪贴板图片 → data URL（列表缩略图 / 大图预览）。
+///
+/// MIME 类型按文件**魔数**判定而非文件名/扩展名：历史上个别图片可能以非 png
+/// 扩展名落盘（或扩展名与实际内容不符），若写死 `image/png` 会让这些图片在
+/// `<img src>` 里解码失败、表现为「图不显示」。PNG/JPEG/GIF/WebP 四种浏览器
+/// 原生支持的格式都识别，其余按 png 兜底（IMG 解码失败也只是不显示，不影响其它）。
 #[tauri::command]
 pub fn clipboard_history_read_image(
     app: tauri::AppHandle,
@@ -979,8 +984,29 @@ pub fn clipboard_history_read_image(
         return Err("图片过大，拒绝读取".to_string());
     }
     let bytes = std::fs::read(&path).map_err(|e| format!("读取图片失败: {e}"))?;
+    let mime = image_mime_of(&bytes);
     let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
-    Ok(format!("data:image/png;base64,{b64}"))
+    Ok(format!("data:{mime};base64,{b64}"))
+}
+
+/// 按文件头魔数判定图片 MIME（浏览器 `<img>` 解码需要的 data URL 前缀）。
+fn image_mime_of(bytes: &[u8]) -> &'static str {
+    match bytes {
+        // PNG: 89 50 4E 47 0D 0A 1A 0A
+        b"\x89PNG\r\n\x1a\n" => "image/png",
+        // JPEG: FF D8 FF
+        b if b.len() >= 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF => "image/jpeg",
+        // GIF87a / GIF89a
+        b if b.len() >= 6 && &b[0..3] == b"GIF" && (&b[3..6] == b"87a" || &b[3..6] == b"89a") => {
+            "image/gif"
+        }
+        // WebP: RIFF....WEBP
+        b if b.len() >= 12 && &b[0..4] == b"RIFF" && &b[8..12] == b"WEBP" => "image/webp",
+        // BMP: 42 4D
+        b if b.len() >= 2 && b[0] == 0x42 && b[1] == 0x4D => "image/bmp",
+        // 识别不出：兜底 png（IMG 解码失败也只是不显示，不影响其它条目）
+        _ => "image/png",
+    }
 }
 
 /// 删除一条历史（文本直接从索引移除；图片连同磁盘文件一起删）。

@@ -548,11 +548,16 @@
 
   /** 复制某条到系统剪贴板（用户点击触发；这是唯一会写剪贴板的路径）。
    *
-   *  成功**不弹状态提示**：复制是高频动作，每次都顶一行「已复制到剪贴板」
-   *  属于噪音，且系统剪贴板本身已给了隐含反馈。失败仍然要报错——那是用户
-   *  需要知道、否则会以为复制成功的事。 */
+   *  成功在右上角弹一条轻量的「已复制」提示（走宿主 ui.toast）：复制是高频动作，
+   *  用右上角浮层而非底部状态条，既给明确反馈又不会一直顶着状态区；
+   *  失败仍要报错——那是用户需要知道、否则会以为复制成功的事。 */
   function copyItem(it) {
     Promise.resolve(ms.clipboard.copy(it.id))
+      .then(function () {
+        if (ms.ui && typeof ms.ui.toast === "function") {
+          try { ms.ui.toast("已复制", "ok"); } catch (e) { /* 浮层失败不阻塞主流程 */ }
+        }
+      })
       .catch(function (e) { setStatus("复制失败：" + errorText(e), true); });
   }
 

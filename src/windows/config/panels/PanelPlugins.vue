@@ -486,6 +486,9 @@ async function updatePlugin(rec: any): Promise<void> {
         // 升级可能换了 logo：忘掉旧缓存再预读
         forgetIconCache(rec.id);
         await preloadIcons();
+        // 重新载入注册表：updatePluginFromMarket 直接写 localStorage，内存快照仍是旧的，
+        // 不重载则版本号/updateAvailable 不刷新、列表继续显示「有新版本」。
+        rt.reloadRegistry();
       } else if (!result.cancelled) {
         props.notify(`更新失败: ${result.error ?? "未知错误"}`, "error");
       }
