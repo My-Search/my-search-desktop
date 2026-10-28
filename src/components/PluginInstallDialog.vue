@@ -33,7 +33,9 @@ const okBtn = ref<HTMLButtonElement | null>(null);
 watch(
   () => props.visible,
   (v) => {
-    if (v) nextTick(() => okBtn.value?.focus());
+    // 只把焦点移到「安装」按钮（便于回车确认），但不滚动——否则权限多的插件
+    // 弹窗内容超过 max-height 时，聚焦底部按钮会把弹窗滚到最底部，一打开只见底部。
+    if (v) nextTick(() => okBtn.value?.focus({ preventScroll: true }));
   }
 );
 

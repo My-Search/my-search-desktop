@@ -316,10 +316,28 @@
   color: var(--cb-muted);
 }
 
-.cb-item-kind img {
+/* 图片项的列表内预览缩略图：独立的方形区，比原来的类型小标更显眼，
+   点开大图前就能在列表里看到内容。读取是异步的（按 relPath 懒加载），
+   没回来前显示「图片」占位两字。 */
+.cb-item-thumb {
+  flex: none;
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  border-radius: 5px;
+  overflow: hidden;
+  background: var(--cb-field);
+  border: 1px solid var(--cb-line);
+  font-size: 11px;
+  color: var(--cb-muted);
+}
+
+.cb-item-thumb img {
   width: 100%;
   height: 100%;
   object-fit: cover;
+  display: block;
 }
 
 .cb-item-body {
@@ -388,6 +406,53 @@
 .cb-item-btn.fav.on {
   color: var(--cb-star);
   border-color: var(--cb-star);
+}
+
+/* ---------- 行内编辑（仅收藏的文本条目可编辑） ---------- */
+/* 编辑中的行：换成 textarea + 保存/取消。用主题色描边标明「这一行在编辑」，
+   背景改用 hover 色让它从列表里浮出来。 */
+.cb-item-editing {
+  border-color: var(--cb-accent);
+  background: var(--cb-hover);
+  cursor: default;
+  /* 多行文本要与顶部对齐（默认 align-items:center 会把短文本框悬在中间） */
+  align-items: flex-start;
+}
+
+.cb-item-edit-input {
+  width: 100%;
+  min-height: 44px;
+  /* 长文本不至于把整个视图（max-height 486px）撑爆，超出自行滚动 */
+  max-height: 200px;
+  padding: 5px 8px;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--cb-text);
+  background: var(--cb-card);
+  border: 1px solid var(--cb-line);
+  border-radius: 5px;
+  /* 高度由脚本按 scrollHeight 撑（growEditBox），禁用手动拖拽：
+     拖出来的高度不受 max-height 约束，会破坏列表节奏 */
+  resize: none;
+  overflow-y: auto;
+}
+
+.cb-item-edit-input:focus {
+  outline: none;
+  border-color: var(--cb-accent);
+}
+
+/* 编辑态里的「保存」用主色，与「取消」一眼区分 */
+.cb-item-btn.primary {
+  background: var(--cb-accent);
+  border-color: var(--cb-accent);
+  color: #fff;
+}
+
+.cb-item-btn.primary:hover {
+  color: #fff;
+  opacity: 0.9;
 }
 
 /* ---------- 触底哨兵（加载更多 / 已全部加载） ---------- */

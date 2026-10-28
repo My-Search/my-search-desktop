@@ -18,14 +18,20 @@
  *   3) **复制 / 删除 / 清空**：分别走 `ms.clipboard.copy/remove/clear`。
  *      其中 **copy 是唯一会写系统剪贴板的动作，且必须由用户点击触发**——
  *      宿主的监听路径是纯只读的，绝不会在你复制别的东西时把剪贴板改掉。
- *   4) **收藏**：`ms.clipboard.setFavorite(id, on)` 打标（收藏/取消都先确认）；
+ *   4) **收藏 / 编辑**：`ms.clipboard.setFavorite(id, on)` 打标（收藏/取消都先确认）；
  *      顶部「全部 / 收藏」标签切换时从第一页重拉（过滤在宿主侧）。
  *      收藏条目在宿主侧永久保留（不参与上限淘汰），「清空」默认也保留收藏。
+ *      **已收藏的文本条目**可点「编辑」就地修改内容
+ *      （`ms.clipboard.update(id, text)`，Enter 保存 / Shift+Enter 换行 /
+ *      Esc 取消）。只改内容，创建时间与收藏标记都不动；图片没有可编辑的
+ *      文本形态，未收藏条目是临时噪音，两者都不开放编辑。
  *   5) **呼出快捷键**：读写宿主「剪贴板历史」动作的绑定（`ms.clipboard.getShortcut/
  *      setShortcut`），不自己存一份，因而与「设置 → 快捷键」永远一致。
  *   6) **自动刷新**：视图开着时，宿主原监听到剪贴板变更会广播
  *      `my-search://clipboard-updated`，`ms.clipboard.onUpdated` 收到后重拉第一页。
  *      视图没开时事件自然丢弃，下次打开 list/page 兜底——所以不需要常驻轮询。
+ *      **编辑中**这一路要特别小心：重拉会重写列表 DOM，草稿暂存在 `editDraft`、
+ *      重写后回填并补聚焦，否则用户正敲的字会被冲掉（见 3c/3d）。
  *
  * ============================ 数据放在哪 ============================
  *
@@ -69,6 +75,13 @@
   var query = "";
   /** 当前标签："all" = 全部历史，"fav" = 只看收藏 */
   var filter = "all";
+  /** 正在行内编辑的条目 id（null = 无）。编辑态在 render() 里体现：
+   *  该行换成 textarea + 保存/取消，其余行照旧。 */
+  var editingId = null;
+  /** 编辑中的草稿文本。render() 会用 innerHTML 重建列表、textarea 随之失效，
+   *  所以把当前输入暂存到这里，重建后回填——否则宿主每广播一次
+   *  clipboard-updated（复制任何东西都会）就会冲掉用户正敲的字。 */
+  var editDraft = "";
   /** 正在刷新/加载（防重入） */
   var loading = false;
   /** 待重扫标记：刷新中又有新事件时，等这轮结束再补一次 */
@@ -217,36 +230,25 @@
 
     var html = "";
     for (var i = 0; i < shown.length; i++) {
-      var it = shown[i];
-      var isImg = it.kind === "image";
-      var isFav = it.favorite === true;
-      var preview = isImg
-        ? ""
-        : '<div class="cb-item-text">' + escapeHtml(it.text || "") + "</div>";
-      var sourceLine = it.source
-        ? '<div class="cb-item-sub">' + escapeHtml(it.source) + "</div>"
-        : "";
-      html +=
-        '<div class="cb-item" data-id="' + escapeHtml(it.id) + '" data-kind="' + escapeHtml(it.kind) + '"' +
-          (it.relPath ? ' data-rel-path="' + escapeHtml(it.relPath) + '"' : "") + ">" +
-          '<div class="cb-item-kind">' + (isImg ? "图片" : "文本") + "</div>" +
-          '<div class="cb-item-body">' +
-            preview +
-            sourceLine +
-            '<div class="cb-item-sub">' + escapeHtml(itemSubline(it)) + "</div>" +
-          "</div>" +
-          '<div class="cb-item-actions">' +
-            '<button class="cb-item-btn fav' + (isFav ? " on" : "") + '" data-act="fav" title="' +
-              (isFav ? "取消收藏" : "收藏") + '">' + (isFav ? "★" : "☆") + "</button>" +
-            '<button class="cb-item-btn" data-act="copy" title="复制到剪贴板">复制</button>' +
-            '<button class="cb-item-btn del" data-act="del" title="删除这条">删除</button>' +
-          "</div>" +
-        "</div>";
+      html += itemHtml(shown[i]);
     }
     // 底部哨兵：触底加载更多时显示「加载中… / 已全部加载」
     html += '<div id="cb-sentinel" class="cb-sentinel">' +
       (hasMore ? "加载中…" : "已全部加载") + "</div>";
     list.innerHTML = html;
+
+    // 编辑中：innerHTML 重建会换掉 textarea 节点，焦点与光标位置随之丢失。
+    // 这里补一次聚焦并把光标放回末尾——宿主每广播一次 clipboard-updated
+    // （复制任何东西都会）就会走到这里，不补的话用户敲几个字就得重点一次。
+    if (editingId) {
+      var ta = editBoxOf(editingId);
+      if (ta) {
+        var end = ta.value.length;
+        ta.focus();
+        ta.setSelectionRange(end, end);
+        growEditBox(ta);
+      }
+    }
 
     // 图片缩略图懒加载（并发受限）
     loadVisibleThumbs();
@@ -255,13 +257,104 @@
     scheduleSentinelCheck();
   }
 
-  /** 为列表里的图片项按并发上限加载缩略图 */
+  /**
+   * 单条目的 HTML。
+   *
+   * 两种形态：
+   *   1) **编辑态**（`editingId === it.id`）：该行换成 textarea + 保存/取消，
+   *      不再显示「★/复制/删除」——避免编辑中误触其它动作把行删了。
+   *   2) **普通态**：原样展示，动作按钮 `★  复制  [编辑]  删除`。
+   *
+   * 「编辑」按钮只在**已收藏的文本**上出现：图片没有可编辑的文本形态，
+   * 未收藏条目是临时噪音、按产品定义不值得整理（见 3c 的 startEdit 注释）。
+   */
+  function itemHtml(it) {
+    var isImg = it.kind === "image";
+    var isFav = it.favorite === true;
+
+    if (editingId === it.id) {
+      return editRowHtml(it, isImg);
+    }
+
+    var preview = isImg
+      ? ""
+      : '<div class="cb-item-text">' + escapeHtml(it.text || "") + "</div>";
+    var sourceLine = it.source
+      ? '<div class="cb-item-sub">' + escapeHtml(it.source) + "</div>"
+      : "";
+    // 「编辑」只在收藏的文本条目上出现
+    var editBtn = (!isImg && isFav)
+      ? '<button class="cb-item-btn" data-act="edit" title="修改这条收藏的内容">编辑</button>'
+      : "";
+
+    return (
+      '<div class="cb-item" data-id="' + escapeHtml(it.id) + '" data-kind="' + escapeHtml(it.kind) + '"' +
+        (it.relPath ? ' data-rel-path="' + escapeHtml(it.relPath) + '"' : "") + ">" +
+        // 图片：左侧独立的缩略图区（点击放大前就能在列表里看到预览）；
+        // 文本：保留原来的「文本/图片」类型小标。
+        (isImg
+          ? '<div class="cb-item-thumb" data-thumb="' + escapeHtml(it.relPath) + '">图片</div>'
+          : '<div class="cb-item-kind">文本</div>') +
+        '<div class="cb-item-body">' +
+          preview +
+          sourceLine +
+          '<div class="cb-item-sub">' + escapeHtml(itemSubline(it)) + "</div>" +
+        "</div>" +
+        '<div class="cb-item-actions">' +
+          '<button class="cb-item-btn fav' + (isFav ? " on" : "") + '" data-act="fav" title="' +
+            (isFav ? "取消收藏" : "收藏") + '">' + (isFav ? "★" : "☆") + "</button>" +
+          '<button class="cb-item-btn" data-act="copy" title="复制到剪贴板">复制</button>' +
+          editBtn +
+          '<button class="cb-item-btn del" data-act="del" title="删除这条">删除</button>' +
+        "</div>" +
+      "</div>");
+  }
+
+  /**
+   * 编辑态那一行的 HTML：textarea + 保存/取消。
+   *
+   * 内容回填 `editDraft` 而不是 `it.text`——列表会被宿主事件触发重建
+   * （复制任何东西都会广播 clipboard-updated → reload → innerHTML 重写），
+   * 用草稿才能不让用户正敲的字被冲掉。
+   *
+   * textarea 内容走 `escapeHtml`——它转义 `& < > " '`，在 RCDATA 里既能防
+   * 注入，读 `.value` 时又会被浏览器还原成原字符（不会重复转义）。
+   */
+  function editRowHtml(it, isImg) {
+    return (
+      '<div class="cb-item cb-item-editing" data-id="' + escapeHtml(it.id) + '"' +
+        ' data-kind="' + escapeHtml(it.kind) + '"' +
+        (it.relPath ? ' data-rel-path="' + escapeHtml(it.relPath) + '"' : "") + ">" +
+        '<div class="cb-item-kind">' + (isImg ? "图片" : "文本") + "</div>" +
+        '<div class="cb-item-body">' +
+          '<textarea class="cb-item-edit-input" data-edit-input="' + escapeHtml(it.id) + '" ' +
+            'rows="1" spellcheck="false" placeholder="输入内容…">' +
+            escapeHtml(editDraft) + "</textarea>" +
+        "</div>" +
+        '<div class="cb-item-actions">' +
+          '<button class="cb-item-btn primary" data-act="edit-save" title="保存修改（Enter）">保存</button>' +
+          '<button class="cb-item-btn" data-act="edit-cancel" title="放弃修改（Esc）">取消</button>' +
+        "</div>" +
+      "</div>");
+  }
+
+  /** 为列表里的图片项按并发上限加载缩略图。
+   *
+   *  **必须先回填缓存，再加载新图**：`render()` 每次都用 innerHTML 整块重建
+   *  列表，旧的 `<img>` 节点随之销毁；若只加载「未缓存」的图，已缓存过的图
+   *  在重渲染后就再也不会被填回 DOM，永远停在「图片」占位——复制任何东西
+   *  （宿主广播 clipboard-updated）、切标签、刷新都会触发一次重渲染，所以这个
+   *  问题在真实使用中几乎必然出现。 */
   function loadVisibleThumbs() {
     var pending = [];
     for (var i = 0; i < items.length; i++) {
       var it = items[i];
       if (it.kind !== "image" || !it.relPath) continue;
-      if (thumbCache[it.relPath]) continue;
+      if (thumbCache[it.relPath]) {
+        // 已读过：直接把缓存填回刚重建出来的占位节点（幂等）
+        applyThumb(it.relPath, thumbCache[it.relPath]);
+        continue;
+      }
       pending.push(it.relPath);
     }
     var next = 0;
@@ -282,11 +375,11 @@
     for (var w = 0; w < Math.min(THUMB_CONCURRENCY, pending.length); w++) worker();
   }
 
-  /** 把读到的缩略图填进对应条目的占位块（按 data-rel-path 精确定位） */
+  /** 把读到的缩略图填进对应条目的占位块（按 data-thumb 精确定位） */
   function applyThumb(rel, dataUrl) {
     var list = dom["cb-list"];
     if (!list) return;
-    var node = list.querySelector('[data-rel-path="' + cssEscape(rel) + '"] .cb-item-kind');
+    var node = list.querySelector('[data-thumb="' + cssEscape(rel) + '"]');
     if (!node) return;
     node.innerHTML = '<img alt="" src="' + dataUrl + '">';
   }
@@ -467,12 +560,17 @@
 
   /* ======================= 条目操作 ======================= */
 
-  /** 复制某条到系统剪贴板（用户点击触发；这是唯一会写剪贴板的路径） */
+  /** 复制某条到系统剪贴板（用户点击触发；这是唯一会写剪贴板的路径）。
+   *
+   *  成功在右上角弹一条轻量的「已复制」提示（走宿主 ui.toast）：复制是高频动作，
+   *  用右上角浮层而非底部状态条，既给明确反馈又不会一直顶着状态区；
+   *  失败仍要报错——那是用户需要知道、否则会以为复制成功的事。 */
   function copyItem(it) {
     Promise.resolve(ms.clipboard.copy(it.id))
       .then(function () {
-        setStatus("已复制到剪贴板");
-        setTimeout(function () { if (alive()) setStatus(""); }, 2000);
+        if (ms.ui && typeof ms.ui.toast === "function") {
+          try { ms.ui.toast("已复制", "ok"); } catch (e) { /* 浮层失败不阻塞主流程 */ }
+        }
       })
       .catch(function (e) { setStatus("复制失败：" + errorText(e), true); });
   }
@@ -488,6 +586,8 @@
       .then(function (r) {
         if (r === null) return; // 用户取消
         if (viewerItem && viewerItem.id === it.id) closeViewer();
+        // 删掉的正是正在编辑的那行：清掉编辑态，别让 render() 找不到目标行
+        if (editingId === it.id) editingId = null;
         reload(false);
       })
       .catch(function (e) { setStatus("删除失败：" + errorText(e), true); });
@@ -521,6 +621,9 @@
           items = items.filter(function (x) { return x.id !== it.id; });
           total = Math.max(0, total - 1);
         }
+        // 编辑态边界：不收藏了就不该还能编辑——若正在编辑这一行，先退出编辑态，
+        // 否则 render() 会把 textarea 换成只读预览，用户敲的字凭空消失。
+        if (editingId === it.id) editingId = null;
         render();
         return Promise.resolve(ms.clipboard.setFavorite(it.id, next));
       })
@@ -534,6 +637,133 @@
         loadFirstPageQuiet();
         setStatus((next ? "收藏失败：" : "取消收藏失败：") + errorText(e), true);
       });
+  }
+
+  /* ======================= 条目编辑（仅收藏的文本） ======================= */
+
+  /**
+   * 进入某条的行内编辑态。
+   *
+   * 只对**已收藏的文本**开放：图片没有可编辑的文本形态；未收藏条目是临时
+   * 噪音，按产品定义不值得整理（要整理先收藏）。按钮本就不在这两类条目上
+   * 渲染，这里再兜一层，防止别处误调。
+   */
+  function startEdit(it) {
+    if (editingId === it.id) return;                 // 已在编辑这一行：不重渲染（会打断输入）
+    if (it.kind !== "text" || it.favorite !== true) return;
+    editingId = it.id;
+    editDraft = it.text || "";
+    render();
+    var ta = editBoxOf(it.id);
+    if (!ta) return;
+    ta.focus();
+    ta.select();
+    growEditBox(ta);
+    // 编辑框要露出来：这一行可能在视口下方（列表可滚动）
+    if (typeof ta.scrollIntoView === "function") ta.scrollIntoView({ block: "nearest" });
+  }
+
+  /** 退出编辑态（不保存）。 */
+  function cancelEdit() {
+    if (editingId === null) return;
+    editingId = null;
+    editDraft = "";
+    render();
+  }
+
+  /**
+   * 保存编辑结果。
+   *
+   * 顺序是有意的：
+   *   1. 输入框没了 → 直接退出（列表被外部重建过，没有可保存的东西）；
+   *   2. 空内容 → 报错并**留在编辑态**（让用户接着改，不丢已敲的字）；
+   *   3. 内容没变 → 直接退出，**不发 IPC**（纯本地操作不该白写一次盘）；
+   *   4. 乐观更新 → 先让界面响应，失败再回滚（与 toggleFavorite 同手法）。
+   *
+   * 空白判定用 `trim()`，与 Rust 侧 `normalize_edit_text` 的口径一致：
+   * 纯空白在宿主那里会被拒，前端先拦一次能少一次无谓往返。
+   */
+  function saveEdit(id) {
+    var it = findItem(id);
+    var ta = editBoxOf(id);
+    if (!it || !ta) { cancelEdit(); return; }
+
+    var raw = ta.value;
+    if (!raw.trim()) {
+      editDraft = raw;
+      setStatus("内容不能为空", true);
+      return;
+    }
+    if (raw === (it.text || "")) {
+      cancelEdit();
+      setStatus("内容未变化");
+      setTimeout(function () { if (alive()) setStatus(""); }, 2000);
+      return;
+    }
+
+    if (typeof ms.clipboard?.update !== "function") {
+      setStatus("当前宿主版本不支持编辑，请升级", true);
+      return;
+    }
+
+    // 乐观更新：先落本地，失败回滚。
+    // size 只在图片条目上展示（文本显示字数），这里仍按宿主口径（UTF-8 字节）
+    // 填一份近似值——真要精确得等下次重拉，而那时 Rust 的权威值就回来了。
+    var oldText = it.text;
+    var oldSize = it.size;
+    it.text = raw;
+    it.size = utf8Len(raw);
+    editingId = null;
+    editDraft = "";
+    render();
+
+    Promise.resolve(ms.clipboard.update(it.id, raw))
+      .then(function () {
+        if (!alive()) return;
+        setStatus("已保存");
+        setTimeout(function () { if (alive()) setStatus(""); }, 2000);
+      })
+      .catch(function (e) {
+        if (!alive()) return;
+        // 回滚，避免界面与磁盘不一致
+        it.text = oldText;
+        it.size = oldSize;
+        loadFirstPageQuiet();
+        setStatus("保存失败：" + errorText(e), true);
+      });
+  }
+
+  /** 按 id 取当前列表里的编辑框（列表是整块 innerHTML 重建的，只能现查） */
+  function editBoxOf(id) {
+    var list = dom["cb-list"];
+    if (!list) return null;
+    return list.querySelector('[data-edit-input="' + cssEscape(id) + '"]');
+  }
+
+  /** 按内容自适应 textarea 高度（长文本不会把整个视图撑爆，有 max-height 兜底） */
+  function growEditBox(ta) {
+    if (!ta || !ta.style) return;
+    ta.style.height = "auto";
+    ta.style.height = ta.scrollHeight + "px";
+  }
+
+  /**
+   * UTF-8 字节数（与 Rust 侧 `content.len()` 同口径）。
+   *
+   * 老 WebView 可能没有 TextEncoder，退回 `encodeURIComponent` 的等价算法：
+   * 它把每个非 ASCII 字符编成 `%XX%XX%XX`（每 3 个字符 = 1 字节），所以
+   * 字节数 = 编码后字符数 − 2 × `%` 的个数。
+   */
+  function utf8Len(s) {
+    if (typeof TextEncoder === "function") {
+      try { return new TextEncoder().encode(s).length; } catch (e) { /* 落到近似算法 */ }
+    }
+    var encoded = encodeURIComponent(s);
+    var percent = 0;
+    for (var i = 0; i < encoded.length; i++) {
+      if (encoded.charAt(i) === "%") percent++;
+    }
+    return encoded.length - 2 * percent;
   }
 
   /** 静默重拉第一页（失败回滚后校正列表，不显示状态） */
@@ -756,6 +986,9 @@
       if (tab === filter) return;
       filter = tab;
       persistFilter(tab);
+      // 过滤条件变了：正在编辑的那行可能不在新列表里，先退出编辑态，
+      // 否则 render() 后 textarea 消失、用户敲的字凭空丢了
+      cancelEdit();
       // 从头拉：避免把另一个标签的已加载页混进当前列表
       reload(false);
     });
@@ -768,11 +1001,13 @@
       searchTimer = setTimeout(function () {
         if (!alive()) return;
         persistQuery(v);
+        // 同切标签：搜索会重拉列表，先退出编辑态（原因见 tab handler）
+        cancelEdit();
         reload(false, v);
       }, 200);
     });
 
-    // 列表事件委托：收藏 / 复制 / 删除 / 点图片看大图
+    // 列表事件委托：收藏 / 复制 / 删除 / 编辑 / 点图片看大图
     dom["cb-list"]?.addEventListener("click", function (e) {
       var btn = e.target.closest("button[data-act]");
       var row = e.target.closest(".cb-item");
@@ -786,11 +1021,39 @@
         if (act === "copy") copyItem(it);
         else if (act === "del") removeItem(it);
         else if (act === "fav") toggleFavorite(it);
+        else if (act === "edit") startEdit(it);
+        else if (act === "edit-save") saveEdit(it.id);
+        else if (act === "edit-cancel") cancelEdit();
         return;
       }
       // 点条目本身：图片看大图，文本直接复制
       if (it.kind === "image") openViewer(it);
       else copyItem(it);
+    });
+
+    // 编辑框键盘：Enter 保存（Shift+Enter 换行）、Esc 取消。
+    // 委托在列表容器上——行是整块 innerHTML 重建的，绑定在元素上会失效。
+    // `isComposing`：中文输入法选字期间的回车不能当保存，否则选不字。
+    dom["cb-list"]?.addEventListener("keydown", function (e) {
+      var ta = e.target;
+      if (!ta || !ta.getAttribute || !ta.getAttribute("data-edit-input")) return;
+      var id = ta.getAttribute("data-edit-input");
+      if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+        e.preventDefault();
+        saveEdit(id);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        cancelEdit();
+      }
+    });
+
+    // 编辑框内容变化：按需长高（长文本不用一开始就把视图撑满），并暂存草稿，
+    // 供列表被外部重建时回填
+    dom["cb-list"]?.addEventListener("input", function (e) {
+      var ta = e.target;
+      if (!ta || !ta.getAttribute || !ta.getAttribute("data-edit-input")) return;
+      growEditBox(ta);
+      editDraft = ta.value;
     });
 
     dom["cb-viewer-close"]?.addEventListener("click", closeViewer);

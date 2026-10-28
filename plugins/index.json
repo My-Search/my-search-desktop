@@ -41,8 +41,8 @@
       "plugin": "official-plugins/com.mysearch.clipboard",
       "official": false,
       "createTime": "2026-09-27T01:37:42.029Z",
-      "latestVersionUpdateTime": "2026-09-30T03:17:35.444Z",
-      "lastVersion": "1.3.0"
+      "latestVersionUpdateTime": "2026-10-28T13:56:47.908Z",
+      "lastVersion": "1.4.3"
     },
     {
       "plugin": "official-plugins/com.mysearch.recorder",

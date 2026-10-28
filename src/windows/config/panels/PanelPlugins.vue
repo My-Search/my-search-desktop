@@ -33,6 +33,8 @@ import { useEnvPicker } from "../../../composables/useEnvPicker";
 import type { PluginManifest, PluginThemePreference } from "../../../lib/plugins/manifest";
 import { compareVersion, detailViewThemeOf } from "../../../lib/plugins/manifest";
 import { findPlugin, loadRegistry } from "../../../lib/plugins/registry";
+import { checkAndApplyMarketUpdates } from "../../../lib/plugins/market";
+import { updatePluginFromMarket } from "../../../lib/plugins/host";
 
 const props = defineProps<{
   notify: (text: string, type?: "ok" | "error") => void;
@@ -453,33 +455,128 @@ async function stopAll(): Promise<void> {
   props.notify("已停止所有后台进程", "ok");
 }
 
+// ===================== 市场更新 =====================
+/** 检查更新中（按钮禁用 + 文案切换） */
+const checkingUpdates = ref(false);
+/** 检查更新：拉目录、比对已装插件、重写 updateAvailable、落盘，并提示结果 */
+async function checkUpdates(): Promise<void> {
+  if (checkingUpdates.value) return;
+  checkingUpdates.value = true;
+  try {
+    const n = await checkAndApplyMarketUpdates();
+    props.notify(
+      n > 0 ? `检查完成：发现 ${n} 个插件有可用更新` : "检查完成：已是最新",
+      n > 0 ? "ok" : "ok"
+    );
+  } catch (e) {
+    props.notify(`检查更新失败: ${String((e as Error)?.message ?? e)}`, "error");
+  } finally {
+    checkingUpdates.value = false;
+  }
+}
+
+/** 逐插件更新：弹安装确认框（复用本面板已有的 installDialog 视觉与文案）→ 更新 */
+async function updatePlugin(rec: any): Promise<void> {
+  if (!updatingId.value) {
+    updatingId.value = rec.id;
+    try {
+      const result = await updatePluginFromMarket(rec.id, "update", confirmMarketInstall);
+      if (result.ok) {
+        props.notify(`已升级「${rec.name}」到 v${result.version}`, "ok");
+        // 升级可能换了 logo：忘掉旧缓存再预读
+        forgetIconCache(rec.id);
+        await preloadIcons();
+        // 重新载入注册表：updatePluginFromMarket 直接写 localStorage，内存快照仍是旧的，
+        // 不重载则版本号/updateAvailable 不刷新、列表继续显示「有新版本」。
+        rt.reloadRegistry();
+      } else if (!result.cancelled) {
+        props.notify(`更新失败: ${result.error ?? "未知错误"}`, "error");
+      }
+    } catch (e) {
+      props.notify(`更新失败: ${String((e as Error)?.message ?? e)}`, "error");
+    } finally {
+      updatingId.value = null;
+    }
+  }
+}
+/** 正在更新的插件 id（按钮显示「更新中…」） */
+const updatingId = ref<string | null>(null);
+
+/**
+ * 市场更新的确认闸门：复用本面板已有的安装确认弹窗（installDialog* + installDialogVisible），
+ * 通过独立的 marketUpdateResolver 解析——与文件安装的 pendingPrepared / onInstallConfirm
+ * 文件分支彻底隔离，互不干扰（安装来源不同：市场更新由 host.ts 落盘，文件安装由本面板落盘）。
+ */
+let marketUpdateResolver: ((ok: boolean) => void) | null = null;
+async function confirmMarketInstall(req: any): Promise<boolean> {
+  if (installDialogVisible.value) return false;
+  installDialogMode = "market";
+  installDialogManifest.value = req.manifest;
+  installDialogIcon.value = req.iconUrl;
+  installDialogPerms.value = req.permBlocks;
+  installDialogWarnings.value = req.warnings;
+  installDialogInstalledVersion.value = req.installedVersion;
+  installDialogRunning.value = req.running === true;
+  installDialogVisible.value = true;
+  return new Promise<boolean>((resolve) => {
+    marketUpdateResolver = resolve;
+  });
+}
+
 // ===================== 启用/禁用/卸载 =====================
 async function toggleEnabled(rec: any): Promise<void> {
   await rt.setEnabled(rec.id, !rec.enabled);
   props.notify(rec.enabled ? `${rec.name} 已启用` : `${rec.name} 已禁用`, "ok");
 }
 
-/** 卸载确认文案：插件在后台运行时明确告知「卸载前会自动停止」 */
-function uninstallConfirmText(rec: any, base: string): string {
-  const s = rt.runtimeOf(rec.id);
-  if (s.status === "running" || s.status === "starting") {
-    return `${base}\n\n该插件正在后台运行，卸载前将自动停止其进程。`;
-  }
-  return base;
+/** 插件是否正在后台运行（卸载弹窗里提示「将自动停止进程」用） */
+function isRunning(id: string): boolean {
+  const s = rt.runtimeOf(id);
+  return s.status === "running" || s.status === "starting";
 }
 
-async function uninstallPlugin(rec: any): Promise<void> {
+/**
+ * 卸载确认弹窗（带「清理数据」勾选框）。
+ *
+ * 旧逻辑是「先确认卸载、再弹第二个框问是否删数据」——两步确认且第二个默认焦点在
+ * 「删除数据」上，极易在误触下把用户数据清掉。改为**一个弹窗**：下方一个勾选框
+ * 「将插件清理，后续不打算再安装」（即删除数据），默认不勾=只卸插件、保留数据；
+ * 勾选才在卸载时一并清理 plugin-data。这样「删数据」是显式、需主动勾选的动作。
+ */
+const uninstallDialogVisible = ref(false);
+const uninstallTarget = ref<any | null>(null);
+const clearDataChecked = ref(true);
+
+/** 打开卸载确认弹窗（不再立即弹确认，避免两步确认 + 误删数据） */
+function openUninstall(rec: any): void {
   if (uninstallingId.value) return;
+  uninstallTarget.value = rec;
+  clearDataChecked.value = true;
+  uninstallDialogVisible.value = true;
+}
+
+/** 关闭弹窗并复位展示态 */
+function closeUninstallDialog(): void {
+  uninstallDialogVisible.value = false;
+  uninstallTarget.value = null;
+  clearDataChecked.value = true;
+}
+
+/** 弹窗「卸载」：按勾选框决定要不要清理数据 */
+async function confirmUninstall(): Promise<void> {
+  const rec = uninstallTarget.value;
+  if (!rec || uninstallingId.value) return;
+  const deleteData = clearDataChecked.value;
+  closeUninstallDialog();
+
   if (isBuiltin(rec.id)) {
-    if (!(await props.confirm(uninstallConfirmText(rec, `「${rec.name}」是内置插件，卸载后将不再随版本升级自动安装。确定卸载？`)))) return;
-    const deleteData = await props.confirm("是否同时删除插件保存的数据？", { cancelText: "保留" });
     uninstallingId.value = rec.id;
     try {
       await rt.uninstall(rec.id, deleteData);
       await builtinMarkRemoved(rec.id);
       await refreshBuiltins();
       forgetIconCache(rec.id);
-      props.notify(`已卸载内置插件 ${rec.name}（升级不再自动安装）`, "ok");
+      props.notify(`已卸载内置插件 ${rec.name}${deleteData ? "（含数据）" : "（升级不再自动安装）"}`, "ok");
     } catch (e) {
       props.notify(`卸载失败: ${String((e as Error)?.message ?? e)}`, "error");
     } finally {
@@ -487,14 +584,12 @@ async function uninstallPlugin(rec: any): Promise<void> {
     }
     return;
   }
-  if (!(await props.confirm(uninstallConfirmText(rec, `确定卸载「${rec.name}」v${rec.version}？`)))) return;
-  const deleteData = await props.confirm("是否同时删除插件保存的数据？", { cancelText: "保留" });
+
   uninstallingId.value = rec.id;
   try {
     await rt.uninstall(rec.id, deleteData);
-    // 清掉图标缓存里的残留键（重新安装时会再读一次）
     forgetIconCache(rec.id);
-    props.notify(`已卸载 ${rec.name}`, "ok");
+    props.notify(`已卸载 ${rec.name}${deleteData ? "（含数据已清理）" : ""}`, "ok");
   } catch (e) {
     props.notify(`卸载失败: ${String((e as Error)?.message ?? e)}`, "error");
   } finally {
@@ -505,6 +600,8 @@ async function uninstallPlugin(rec: any): Promise<void> {
 // ===================== 安装 =====================
 // 插件安装确认弹窗（标题「插件安装」，展示 logo / 名称 / 版本 / 权限分组 / 警告）
 const installDialogVisible = ref(false);
+/** 弹窗来源：file = 本地文件安装（本面板落盘）；market = 市场更新（host.ts 落盘，本面板仅确认） */
+let installDialogMode: "file" | "market" = "file";
 const installDialogManifest = ref<PluginManifest | null>(null);
 const installDialogIcon = ref<string | null>(null);
 const installDialogPerms = ref<PermissionGroupBlock[]>([]);
@@ -564,6 +661,15 @@ async function installFromPath(path: string): Promise<void> {
 
 /** 安装确认弹窗：用户点击「安装」 */
 async function onInstallConfirm(): Promise<void> {
+  // 市场更新路径：落盘由 host.ts 的 updatePluginFromMarket 负责，本面板只回传确认；
+  // 先把弹窗隐藏并复位展示态，再 resolve（避免调用方在 await 后读到旧值）。
+  if (marketUpdateResolver) {
+    const resolve = marketUpdateResolver;
+    marketUpdateResolver = null;
+    closeInstallDialogState();
+    resolve(true);
+    return;
+  }
   installDialogVisible.value = false;
   if (!pendingPrepared) return;
   const prepared = pendingPrepared;
@@ -601,6 +707,14 @@ async function onInstallConfirm(): Promise<void> {
 
 /** 安装确认弹窗：用户点击「取消」 */
 function onInstallCancel(): void {
+  // 市场更新路径：只回传取消（落盘由 host.ts 负责，本面板不参与）
+  if (marketUpdateResolver) {
+    const resolve = marketUpdateResolver;
+    marketUpdateResolver = null;
+    closeInstallDialogState();
+    resolve(false);
+    return;
+  }
   installDialogVisible.value = false;
   pendingPrepared = null;
   pendingInstallPath = "";
@@ -608,6 +722,16 @@ function onInstallCancel(): void {
   installDialogIcon.value = null;
   installDialogInstalledVersion.value = null;
   installDialogRunning.value = false;
+}
+
+/** 复位安装确认弹窗的展示态（市场更新与文件安装共用，避免四处重复） */
+function closeInstallDialogState(): void {
+  installDialogVisible.value = false;
+  installDialogManifest.value = null;
+  installDialogIcon.value = null;
+  installDialogInstalledVersion.value = null;
+  installDialogRunning.value = false;
+  installDialogMode = "file";
 }
 
 async function installFromFile(): Promise<void> {
@@ -839,6 +963,9 @@ function durFrom(ts: number | null): string {
       >{{ f.label }}
         <span v-if="f.value === 'running' && runningCount > 0" class="badge">{{ runningCount }}</span>
       </button>
+      <button class="btn-filter" :class="{ on: checkingUpdates }" :disabled="checkingUpdates" @click="checkUpdates">
+        {{ checkingUpdates ? '检查中…' : '检查更新' }}
+      </button>
     </div>
 
     <div class="cfg-card plugins-list" v-if="displayList.length > 0">
@@ -861,6 +988,20 @@ function durFrom(ts: number | null): string {
           <div class="plugin-state">
             <span v-if="record.manifest.backend" class="plugin-dot" :class="rt.runtimeOf(record.id).status" :title="statusParts(record.id).join(' · ')"></span>
             <span class="plugin-version">v{{ record.version }}</span>
+            <span
+              v-if="record.updateAvailable"
+              class="btn-update-link"
+              :class="{ updating: updatingId === record.id }"
+              role="button"
+              tabindex="0"
+              :title="`有可用更新 v${record.updateAvailable}，点击更新`"
+              @click.stop="updatePlugin(record)"
+              @keydown.enter.prevent.stop="updatePlugin(record)"
+              @keydown.space.prevent.stop="updatePlugin(record)"
+            >
+              <span class="arrow">→</span>
+              <span class="new-ver">{{ updatingId === record.id ? '更新中…' : `v${record.updateAvailable}` }}</span>
+            </span>
           </div>
           <div class="plugin-arrow">{{ expanded[record.id] ? '▼' : '▶' }}</div>
         </div>
@@ -1016,7 +1157,7 @@ function durFrom(ts: number | null): string {
             <button
               class="btn-sm btn-warn"
               :disabled="uninstallingId === record.id"
-              @click.stop="uninstallPlugin(record)"
+              @click.stop="openUninstall(record)"
             >{{ uninstallingId === record.id ? '卸载中…' : '卸载' }}</button>
           </div>
         </div>
@@ -1088,5 +1229,28 @@ function durFrom(ts: number | null): string {
       @confirm="onInstallConfirm"
       @cancel="onInstallCancel"
     />
+
+    <!-- 卸载确认：含「清理数据」勾选框，复用安装确认弹窗的样式。默认勾选=一并清理数据。 -->
+    <div v-if="uninstallDialogVisible" class="plugin-install-overlay" @click.self="closeUninstallDialog">
+      <div class="plugin-install-dialog">
+        <div class="plugin-install-title">卸载「{{ uninstallTarget?.name }}」</div>
+        <p style="font-size: 13px; line-height: 1.6; color: var(--muted); margin: 0 0 14px;">
+          确定要卸载该插件吗？
+          <template v-if="uninstallTarget && isRunning(uninstallTarget.id)">
+            该插件正在后台运行，卸载前将自动停止其进程。
+          </template>
+        </p>
+        <label style="display: flex; align-items: flex-start; gap: 8px; font-size: 13px; line-height: 1.5; color: var(--text); cursor: pointer; user-select: none;">
+          <input type="checkbox" v-model="clearDataChecked" style="margin-top: 2px; width: 15px; height: 15px; cursor: pointer;" />
+          <span style="color: #e03131;">将数据清理</span>
+        </label>
+        <div class="plugin-install-actions">
+          <button class="cfg-btn ghost" @click="closeUninstallDialog">取消</button>
+          <button class="cfg-btn primary" :disabled="uninstallingId === uninstallTarget?.id" @click="confirmUninstall">
+            {{ uninstallingId === uninstallTarget?.id ? '卸载中…' : '卸载' }}
+          </button>
+        </div>
+      </div>
+    </div>
   </section>
 </template>

@@ -67,6 +67,20 @@ export function usePluginRuntime() {
     saveRegistry({ version: registry.version, plugins: [...registry.plugins] });
   }
 
+  /**
+   * 从 localStorage 重新载入注册表到响应式快照。
+   *
+   * 插件市场更新/安装走 `updatePluginFromMarket`，它直接写 localStorage 而**不**
+   * 经过本 runtime（不走 installFromFiles），因此更新后内存里的 `registry` 仍是
+   * 旧记录——版本号、`updateAvailable` 等都不会刷新，面板会一直显示「有新版本」。
+   * 这里整块替换插件数组，让面板随新数据重渲染。
+   */
+  function reloadRegistry(): void {
+    const fresh = loadRegistry();
+    registry.version = fresh.version;
+    registry.plugins.splice(0, registry.plugins.length, ...fresh.plugins);
+  }
+
   /** 取记录（未装返回 undefined） */
   function get(pluginId: string): PluginRecord | undefined {
     return findPlugin(registry, pluginId);
@@ -605,6 +619,8 @@ export function usePluginRuntime() {
     lastError,
     /** 持久化注册表到 localStorage */
     persist: () => persist(),
+    /** 从 localStorage 重新载入注册表（市场更新/安装后刷新内存快照） */
+    reloadRegistry,
     // 查询
     get,
     withBackend,

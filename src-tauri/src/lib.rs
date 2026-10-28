@@ -2295,8 +2295,12 @@ type ReleaseInfo = (String, String, Vec<ReleaseAsset>);
 /// 客户端却检测为最新」的根因。现在失败会显式上报（`check_failed`），
 /// 且只要 Atom / jsDelivr 任一可达仍能发现新版本。
 #[tauri::command]
-async fn check_update() -> Result<UpdateInfo, String> {
-    let current = env!("CARGO_PKG_VERSION").to_string();
+async fn check_update(app: tauri::AppHandle) -> Result<UpdateInfo, String> {
+    // 当前版本取 tauri.conf.json 的版本（app.package_info()），而**不是**
+    // CARGO_PKG_VERSION：两者可能漂移（发版只升 package.json + tauri.conf.json、
+    // 忘了 Cargo.toml 时，更新检查会拿旧版本去比 → 永远提示「有新版本」，
+    // 且更新后也不消失）。tauri.conf.json 才是安装包与关于页展示的权威版本。
+    let current = app.package_info().version.to_string();
     let owner = "My-Search";
     let repo = "my-search-desktop";
     let mut errors: Vec<String> = Vec::new();
@@ -3691,6 +3695,8 @@ pub fn run() {
             clipboard_history::clipboard_history_copy,
             // 收藏 / 取消收藏（收藏条目永久保留，不参与上限淘汰与默认清空）
             clipboard_history::clipboard_history_set_favorite,
+            // 修改一条文本历史的内容（插件「编辑」按钮；「仅收藏可编辑」是 UI 门禁）
+            clipboard_history::clipboard_history_update,
             // 插件侧：读/改「剪贴板历史」快捷键
             clipboard_history::clipboard_history_get_shortcut,
             clipboard_history::clipboard_history_set_shortcut,
@@ -4399,6 +4405,44 @@ mod tests {
         for good in ["a.txt", "plugins/com.a.b/plugin.json", "plugin-data/com.a.b/db.sqlite"] {
             assert!(is_safe_relative_public(good), "应接受: {good}");
         }
+    }
+
+    /// 备份归档：派生缓存（可再下载的工具二进制）必须被排除，不进备份。
+    ///
+    /// 这是磁盘占用膨胀的根因修复：录屏插件下载的 ffmpeg/ffprobe 两个共 ~320MB
+    /// 曾被整份打进每个 `.msbackup`，而 `KEEP_BACKUPS = 12` 份上限下最坏能攒到
+    /// ~1.6GB。删掉它们不丢任何用户数据（下次用到会重新下载）。
+    #[test]
+    fn backup_excludes_reconstructible_plugin_data() {
+        use super::backup::is_reconstructible_plugin_data_public as is_recon;
+
+        // ffmpeg 工具缓存：目录名命中即排除（不区分大小写、任意层级）
+        assert!(is_recon("com.mysearch.recorder/ffmpeg/ffmpeg.exe"));
+        assert!(is_recon("com.mysearch.recorder/ffmpeg/ffprobe.exe"));
+        assert!(is_recon("com.mysearch.recorder/ffmpeg/bin/ffmpeg"));
+        assert!(is_recon("com.mysearch.recorder/FFmpeg/ffmpeg.exe"));
+        assert!(is_recon("com.other.plugin/ffmpeg"), "空目录也要挡");
+
+        // 可执行/原生扩展名：下载或编译产物
+        assert!(is_recon("com.mysearch.recorder/helper.exe"));
+        assert!(is_recon("com.mysearch.recorder/lib/avcodec-61.dll"));
+        assert!(is_recon("com.mysearch.recorder/native.node"));
+        assert!(is_recon("com.mysearch.recorder/lib/foo.so"));
+        assert!(is_recon("com.mysearch.recorder/lib/foo.dylib"));
+
+        // **用户态数据必须保留**——录屏产出是用户亲手录的，删了就真没了
+        assert!(!is_recon("com.mysearch.recorder/recordings/rec-20260930.mp4"));
+        assert!(!is_recon("com.mysearch.recorder/config.json"));
+        assert!(!is_recon("com.mysearch.recorder/probe/metadata.json"));
+        assert!(!is_recon("com.mysearch.clipboard/clipboard/index.json"));
+        assert!(!is_recon("com.mysearch.clipboard/clipboard/1791439498744-54.png"));
+        assert!(!is_recon("com.zhuangjie.screenshot/shots/shot-1.png"));
+
+        // 不是「工具」的同名文件不该被误伤
+        assert!(!is_recon("com.demo.data/notes/about-ffmpeg.txt"));
+        assert!(!is_recon("com.demo.data/docs/ffmpeg.md"));
+        // 反过来：文件名里带 ffmpeg 但扩展名是可执行文件的仍要挡
+        assert!(is_recon("com.demo.data/bin/my-ffmpeg.exe"));
     }
 
     /// 归档往返：打包 → 预览 → 条目内容一致（不依赖 AppHandle 的部分）

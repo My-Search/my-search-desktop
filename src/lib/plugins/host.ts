@@ -29,6 +29,7 @@ import { iconDataUrl, isInlineIconRef } from "./icon.ts";
 import type { PluginManifest } from "./manifest.ts";
 import type { PluginRecord, PluginRegistryFile } from "./registry.ts";
 import {
+  createPluginRecord,
   findPlugin,
   isGranted,
   loadRegistry,
@@ -38,6 +39,7 @@ import {
   pluginDataRemove,
   resolvePluginTheme,
   saveRegistry,
+  upsertPlugin,
 } from "./registry.ts";
 import { loadEnvVars } from "./env-store.ts";
 import {
@@ -186,6 +188,8 @@ export interface PluginHostContext {
   clipboardHistoryCopy?: (id: string) => Promise<void>;
   /** 收藏 / 取消收藏一条剪贴板历史 */
   clipboardHistorySetFavorite?: (id: string, favorite: boolean) => Promise<void>;
+  /** 修改一条文本剪贴板历史的内容（只改 text/size，元数据保留） */
+  clipboardHistoryUpdate?: (id: string, text: string) => Promise<void>;
   /** 读「剪贴板历史」动作当前绑的全局快捷键（空串 = 未绑） */
   clipboardHistoryGetShortcut?: () => Promise<string>;
   /** 给「剪贴板历史」动作改绑全局快捷键（空串 = 解绑），返回实际生效的键 */
@@ -705,8 +709,12 @@ const themeProviders = new Map<string, () => "light" | "dark" | "inherit">();
  *
  * 走仓库文件而非 Release 的原因：发布只需 git push，不需要额外的跨仓库 token。
  */
-const MARKET_CATALOG_URL =
+/** 插件市场目录地址（多个入口函数共享：ms.market.* / 宿主触发的「检查更新」「逐插件更新」） */
+export const MARKET_CATALOG_URL =
   "https://raw.githubusercontent.com/My-Search/my-search-plugin-market/main/index.dist.json";
+
+/** 市场插件自身的 id（下载目录/包时用作网关 key，其网关已声明 plugin.install 授权） */
+const MARKET_PLUGIN_ID = "com.mysearch.market";
 
 /**
  * 取某插件自报的主题偏好（无 provider / provider 抛错 → null，由调用方回落到
@@ -1720,6 +1728,25 @@ export function createHostApi(pluginId: string, ctx: PluginHostContext): Record<
             Promise.reject(new Error("当前版本不支持收藏剪贴板历史")),
         }),
       /**
+       * 修改一条文本剪贴板历史的内容（插件「编辑」按钮）。
+       *
+       * 与 `setFavorite` 同属「用户显式触发的写入性操作」，因此同样走
+       * `clipboard.write`——该权限已在剪贴板插件清单里声明且已授权，
+       * 不会触发重新授权弹窗。
+       *
+       * 「只有收藏项能编辑」是**纯 UI 门禁**（按钮只在收藏项上渲染），
+       * 不在这里校验：见 Rust 侧 `clipboard_history_update` 的注释。
+       */
+      update: (id: string, text: string) =>
+        call({
+          api: "clipboard.update",
+          permission: "clipboard.write",
+          detail: String(id ?? ""),
+          run: () =>
+            ctx.clipboardHistoryUpdate?.(String(id ?? ""), String(text ?? "")) ??
+            Promise.reject(new Error("当前版本不支持编辑剪贴板历史")),
+        }),
+      /**
        * 读当前「剪贴板历史」全局快捷键（空串 = 未绑）。
        * 不申请额外权限：读的是本动作的键，权威在宿主 settings.json。
        */
@@ -1953,99 +1980,38 @@ function createMarketApi(
    * 不动。宿主未注入该能力时**直接拒绝**（fail-closed）——静默安装是对用户系统
    * 影响最大的动作，不能有绕过确认的路径。
    */
-  async function installOrUpdate(id: string, action: "install" | "update") {
-    if (!ctx.confirmPluginInstall) {
-      return { ok: false as const, error: "当前窗口不支持安装确认，已取消安装" };
-    }
-    const { marketFetchRaw, installPluginPackage } = await import("./ipc.ts");
-    const { loadRegistry, saveRegistry, createPluginRecord, upsertPlugin, findPlugin } = await import("./registry.ts");
-    const { parseCatalog } = await import("./market-types.ts");
-    const catalogRaw = await marketFetchRaw(pluginId, MARKET_CATALOG_URL, "");
-    const parsed = parseCatalog(new TextDecoder("utf-8").decode(catalogRaw));
-    const entry = parsed.ok ? parsed.catalog.plugins.find((e) => e.id === id) : null;
-    if (!entry) return { ok: false as const, error: `市场中未找到插件: ${id}` };
-    // 下载地址以目录条目为准：插件包可能托管在开发者自己的仓库（见 sources.json
-    // 准入名单），因此不能再按固定模板拼 URL。Rust 侧会按 host 白名单再判一次。
-    const pkgUrl = entry.downloadUrl;
-    const b64 = await marketFetchRaw(pluginId, pkgUrl, entry.sha256);
-    const { preparePackage } = await import("./install.ts");
-    const prepared = await preparePackage(b64, {
-      hostVersion: typeof __APP_VERSION__ !== "undefined" ? __APP_VERSION__ : null,
-      checkPermissions: isKnownPermission,
-    });
-
-    // 落盘前先问用户：展示清单、权限分组、校验警告与已装版本。
-    const mf = prepared.manifest;
-    const installedVersion = findPlugin(loadRegistry(), mf.id)?.version ?? null;
-    // 覆盖安装时后台是否在跑：在弹窗里提前告知「会先停止再安装」（真停由 Rust 侧做）
-    let running = false;
-    if (installedVersion) {
-      try {
-        const { listPluginBackends } = await import("./ipc.ts");
-        const st = (await listPluginBackends()).find((s) => s.pluginId === mf.id)?.status;
-        running = st === "running" || st === "starting";
-      } catch (e) {
-        /* 查询不到按未运行处理（浏览器调试 / 无 Rust 侧） */
+  /**
+   * 从市场下载并安装/更新某插件（install 与 update 共用）。
+   *
+   * 抽出为**模块级 / 可导出**函数，供两处复用：
+   *   - 市场插件的 `ms.market.install` / `ms.market.update`（经 `guarded` 权限门）；
+   *   - 宿主 UI 直接触发：搜索框里「当前打开的插件可更新」时的升级图标、
+   *     设置面板「检查更新」后的逐插件「更新」按钮。
+   *
+   * **必经用户确认**：下载并解包后、落盘前，交给 `confirmPluginInstall` 弹安装确认框；
+   * 用户取消即返回 `{ ok:false, cancelled:true }`，磁盘与注册表都不动（fail-closed）。
+   * `confirmPluginInstall` 未提供时直接拒绝——静默安装是对用户系统影响最大的动作，
+   * 不能有绕过确认的路径。
+   *
+   * 下载用**市场插件 id**（`com.mysearch.market`）作网关 key：市场插件的目录/包
+   * 下载本就是它发起的能力，网关里已声明 `plugin.install` 授权；`ctx.pluginId`
+   * 是「调用方插件」、未必是市场插件，用它去取网关会漏授权。
+   */
+  self.install = (id: string) =>
+    guarded("install", () => {
+      if (!ctx.confirmPluginInstall) {
+        return Promise.resolve({ ok: false as const, error: "当前窗口不支持安装确认，已取消安装" });
       }
-    }
-    const confirmed = await ctx.confirmPluginInstall({
-      manifest: mf,
-      iconUrl: iconUrlOf(prepared),
-      permBlocks: groupPermissions([...(mf.permissions ?? []), ...(mf.optionalPermissions ?? [])]),
-      warnings: prepared.warnings,
-      installedVersion,
-      action,
-      running,
+      return updatePluginFromMarket(id, "install", ctx.confirmPluginInstall);
     });
-    if (!confirmed) return { ok: false as const, cancelled: true };
-
-    const allPerms = [...(mf.permissions ?? []), ...(mf.optionalPermissions ?? [])];
-    await installPluginPackage(id, prepared.files);
-    const reg = loadRegistry();
-    const record = createPluginRecord({
-      manifest: mf,
-      dir: `plugins/${id}`,
-      // ref 记录实际下载地址，便于排障与「来源仓库」展示
-      source: { kind: "market", ref: pkgUrl },
-      grants: allPerms,
-      integrity: { sha256: prepared.sha256, signed: false },
-    });
-    upsertPlugin(reg, record, { preserveUserChoices: false });
-    saveRegistry(reg);
-    // 覆盖安装（action="update"）：该插件若在后台运行，Rust 侧的 plugin_install
-    // 会先强制停进程再落盘、随后用新版本拉回；这里补充两件事——
-    //   1) 下发新网关（新清单可能改了后台入口 / 权限）；
-    //   2) 写前端重启标记，让搜索窗口丢掉保活中的旧界面会话，下次打开重新挂载。
-    if (action === "update") {
-      try {
-        const { markPluginFrontendRestart } = await import("./restart.ts");
-        markPluginFrontendRestart(id);
-      } catch (e) {
-        console.warn("[插件市场] 写前端重启标记失败:", e);
+  self.update = (id: string) =>
+    guarded("update", async () => {
+      if (!ctx.confirmPluginInstall) {
+        return { ok: false as const, error: "当前窗口不支持安装确认，已取消更新" };
       }
-    }
-    try {
-      const { syncRecordGateway } = await import("./gateway.ts");
-      const merged = findPlugin(loadRegistry(), id);
-      if (merged) await syncRecordGateway(merged);
-    } catch (e) {
-      console.warn("[插件市场] 安装后网关同步失败:", e);
-    }
-    // 市场里可能装了提供快捷键动作的插件（如剪贴板历史）：立刻把可用动作下发给宿主
-    try {
-      const { syncShortcutActions } = await import("./gateway.ts");
-      await syncShortcutActions(reg);
-    } catch (e) {
-      console.warn("[插件市场] 快捷键动作同步失败:", e);
-    }
-    return { ok: true as const, version: mf.version };
-  }
-
-  self.install = (id: string) => guarded("install", () => installOrUpdate(id, "install"));
-  self.update = (id: string) => guarded("update", async () => {
-    const result = await installOrUpdate(id, "update");
-    return result.ok ? { ok: true as const, updatedTo: result.version } : result;
-  });
+      const result = await updatePluginFromMarket(id, "update", ctx.confirmPluginInstall);
+      return result.ok ? { ok: true as const, updatedTo: result.version } : result;
+    });
   self.uninstall = (id: string) => guarded("uninstall", async () => {
     const { removePluginDir, stopPluginBackend } = await import("./ipc.ts");
     const { loadRegistry, saveRegistry, removePlugin } = await import("./registry.ts");
@@ -2086,6 +2052,115 @@ function createMarketApi(
   });
 
   return self;
+}
+
+/**
+ * 从市场下载并安装/更新某插件（install 与 update 共用）。
+ *
+ * 抽出为**模块级 / 可导出**函数，供两处复用：
+ *   - 市场插件的 `ms.market.install` / `ms.market.update`（经 `guarded` 权限门）；
+ *   - 宿主 UI 直接触发：搜索框里「当前打开的插件可更新」时的升级图标、
+ *     设置面板「检查更新」后的逐插件「更新」按钮。
+ *
+ * **必经用户确认**：下载并解包后、落盘前，交给 `confirmPluginInstall` 弹安装确认框；
+ * 用户取消即返回 `{ ok:false, cancelled:true }`，磁盘与注册表都不动（fail-closed）。
+ * `confirmPluginInstall` 未提供时调用方应先判空再调用——本函数不内置兜底，
+ * 因为不同入口的「不支持」文案不同（见 createMarketApi 里的 self.install/update）。
+ *
+ * 下载用**市场插件 id**（`com.mysearch.market`）作网关 key：市场插件的目录/包
+ * 下载本就是它发起的能力，网关里已声明 `plugin.install` 授权；`ctx.pluginId`
+ * 是「调用方插件」、未必是市场插件，用它去取网关会漏授权。
+ */
+export async function updatePluginFromMarket(
+  id: string,
+  action: "install" | "update",
+  confirmPluginInstall: NonNullable<PluginHostContext["confirmPluginInstall"]>
+): Promise<{ ok: true; version: string } | { ok: false; error?: string; cancelled?: boolean }> {
+  const { marketFetchRaw, installPluginPackage } = await import("./ipc.ts");
+  const { parseCatalog } = await import("./market-types.ts");
+  const { clearUpdateAvailable } = await import("./market.ts");
+  const catalogRaw = await marketFetchRaw(MARKET_PLUGIN_ID, MARKET_CATALOG_URL, "");
+  const parsed = parseCatalog(new TextDecoder("utf-8").decode(catalogRaw));
+  const entry = parsed.ok ? parsed.catalog.plugins.find((e) => e.id === id) : null;
+  if (!entry) return { ok: false as const, error: `市场中未找到插件: ${id}` };
+  // 下载地址以目录条目为准：插件包可能托管在开发者自己的仓库（见 sources.json
+  // 准入名单），因此不能再按固定模板拼 URL。Rust 侧会按 host 白名单再判一次。
+  const pkgUrl = entry.downloadUrl;
+  const b64 = await marketFetchRaw(MARKET_PLUGIN_ID, pkgUrl, entry.sha256);
+  const { preparePackage } = await import("./install.ts");
+  const prepared = await preparePackage(b64, {
+    hostVersion: typeof __APP_VERSION__ !== "undefined" ? __APP_VERSION__ : null,
+    checkPermissions: isKnownPermission,
+  });
+
+  // 落盘前先问用户：展示清单、权限分组、校验警告与已装版本。
+  const mf = prepared.manifest;
+  const installedVersion = findPlugin(loadRegistry(), mf.id)?.version ?? null;
+  // 覆盖安装时后台是否在跑：在弹窗里提前告知「会先停止再安装」（真停由 Rust 侧做）
+  let running = false;
+  if (installedVersion) {
+    try {
+      const { listPluginBackends } = await import("./ipc.ts");
+      const st = (await listPluginBackends()).find((s) => s.pluginId === mf.id)?.status;
+      running = st === "running" || st === "starting";
+    } catch (e) {
+      /* 查询不到按未运行处理（浏览器调试 / 无 Rust 侧） */
+    }
+  }
+  const confirmed = await confirmPluginInstall({
+    manifest: mf,
+    iconUrl: iconUrlOf(prepared),
+    permBlocks: groupPermissions([...(mf.permissions ?? []), ...(mf.optionalPermissions ?? [])]),
+    warnings: prepared.warnings,
+    installedVersion,
+    action,
+    running,
+  });
+  if (!confirmed) return { ok: false as const, cancelled: true };
+
+  const allPerms = [...(mf.permissions ?? []), ...(mf.optionalPermissions ?? [])];
+  await installPluginPackage(id, prepared.files);
+  const reg = loadRegistry();
+  const record = createPluginRecord({
+    manifest: mf,
+    dir: `plugins/${id}`,
+    // ref 记录实际下载地址，便于排障与「来源仓库」展示
+    source: { kind: "market", ref: pkgUrl },
+    grants: allPerms,
+    integrity: { sha256: prepared.sha256, signed: false },
+  });
+  upsertPlugin(reg, record, { preserveUserChoices: false });
+  // 更新已生效：清掉「可更新」标记，否则面板仍会显示旧的新版本提示，
+  // 直到下一次「检查更新」重写 registry 才消失。
+  clearUpdateAvailable(reg, id);
+  saveRegistry(reg);
+  // 覆盖安装（action="update"）：该插件若在后台运行，Rust 侧的 plugin_install
+  // 会先强制停进程再落盘、随后用新版本拉回；这里补充两件事——
+  //   1) 下发新网关（新清单可能改了后台入口 / 权限）；
+  //   2) 写前端重启标记，让搜索窗口丢掉保活中的旧界面会话，下次打开重新挂载。
+  if (action === "update") {
+    try {
+      const { markPluginFrontendRestart } = await import("./restart.ts");
+      markPluginFrontendRestart(id);
+    } catch (e) {
+      console.warn("[插件市场] 写前端重启标记失败:", e);
+    }
+  }
+  try {
+    const { syncRecordGateway } = await import("./gateway.ts");
+    const merged = findPlugin(loadRegistry(), id);
+    if (merged) await syncRecordGateway(merged);
+  } catch (e) {
+    console.warn("[插件市场] 安装后网关同步失败:", e);
+  }
+  // 市场里可能装了提供快捷键动作的插件（如剪贴板历史）：立刻把可用动作下发给宿主
+  try {
+    const { syncShortcutActions } = await import("./gateway.ts");
+    await syncShortcutActions(reg);
+  } catch (e) {
+    console.warn("[插件市场] 快捷键动作同步失败:", e);
+  }
+  return { ok: true as const, version: mf.version };
 }
 
 /* ========================================================

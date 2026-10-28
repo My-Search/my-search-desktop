@@ -134,6 +134,50 @@ fn is_safe_relative(rel: &str) -> bool {
     !normalized.split('/').any(|seg| seg == "..")
 }
 
+/// 这条 `plugin-data` 相对路径是否属于**可再生成的派生缓存**（不进备份）。
+///
+/// ## 为什么要有这条规则
+///
+/// 备份归档的设计目标是「一份归档 = 整个用户态」，但**用户态 ≠ 插件目录下的
+/// 每个字节**。有些文件是插件在运行时下载/生成的工具与缓存，删掉不会丢任何
+/// 用户数据——下次用到时会重新拿到：
+///
+///   - `*/ffmpeg/`：录屏插件首次使用时从 GitHub Release 下载的 ffmpeg/ffprobe
+///     静态构建（Windows 上单个 ~160MB，两个共 ~320MB）。见
+///     `plugins/recorder/backend/downloader.mjs`——它明写「首次使用时下载到
+///     插件私有目录」，因为宿主单文件 64MB 上限装不进 `.mspp`。
+///     备份它是纯浪费：一份归档就多 300MB，`KEEP_BACKUPS = 12` 份上限下
+///     最坏可攒到 ~1.6GB。
+///   - `*.exe` / `*.dll` / `*.dylib` / `*.so` / `*.node`：同类下载/编译产物。
+///
+/// ## 为什么只对 `plugin-data/` 生效
+///
+/// `plugins/` 装的是**插件安装包**，里面可能合法地带着小体积辅助可执行文件
+/// （宿主 `MAX_FILE_BYTES = 64MB` 允许），排除掉会让还原后的插件缺文件。
+/// 而 `plugin-data/` 是插件私有运行数据，工具二进制只可能来自运行时下载。
+///
+/// ## 这条规则**故意不动**的东西
+///
+/// `recordings/`（录屏产出的 mp4）是用户亲手录的、不可再生成的媒体，属于
+/// 真正的用户态——留在备份里是对的。它们体积大是另一个话题（保留策略），
+/// 不该用「静默丢数据」的方式解决。
+fn is_reconstructible_plugin_data(rel: &str) -> bool {
+    let normalized = rel.replace('\\', "/");
+    // 任意一级目录名为 ffmpeg（不区分大小写）→ 工具缓存，可重新下载
+    if normalized
+        .split('/')
+        .any(|seg| seg.eq_ignore_ascii_case("ffmpeg"))
+    {
+        return true;
+    }
+    // 可执行/原生扩展名 → 下载或编译产物
+    if let Some((_, ext)) = normalized.rsplit_once('.') {
+        let ext = ext.to_ascii_lowercase();
+        return matches!(ext.as_str(), "exe" | "dll" | "dylib" | "so" | "node");
+    }
+    false
+}
+
 /// 递归收集目录下的文件（相对路径用正斜杠），跳过点开头的条目。
 ///
 /// 为什么要跳过 `.dev-source` 这类点文件：它们是本机开发挂载标记，
@@ -228,6 +272,11 @@ fn collect_plugin_files(app: &AppHandle, out: &mut Vec<(String, PathBuf)>) -> Re
         let mut files = Vec::new();
         collect_files(&data, "", &mut files)?;
         for (rel, path) in files {
+            // 派生缓存不进备份：ffmpeg 这类运行时下载的工具二进制删了不丢数据，
+            // 备份它只会把归档撑大几百 MB（见 is_reconstructible_plugin_data）。
+            if is_reconstructible_plugin_data(&rel) {
+                continue;
+            }
             out.push((format!("{PLUGIN_DATA_DIR}/{rel}"), path));
         }
     }
@@ -742,6 +791,12 @@ pub fn file_stamp_public() -> String {
 #[allow(dead_code)]
 pub fn is_safe_relative_public(rel: &str) -> bool {
     is_safe_relative(rel)
+}
+
+/// 派生缓存判定（测试用）——见 `is_reconstructible_plugin_data` 的规则说明
+#[allow(dead_code)]
+pub fn is_reconstructible_plugin_data_public(rel: &str) -> bool {
+    is_reconstructible_plugin_data(rel)
 }
 
 /// 解压归档（测试用）

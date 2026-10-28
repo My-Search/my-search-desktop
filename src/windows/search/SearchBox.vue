@@ -397,7 +397,7 @@ function onLogoContextMenu(e: MouseEvent) {
       @paste="onPaste"
     />
     <div class="logo-wrapper">
-      <!-- 叶子 logo：**始终显示**（更新提示不再顶掉它，只是叠一个小箭头） -->
+      <!-- 叶子 logo：**始终显示**（搜索框的身份按钮：点击呼起设置/关于等） -->
       <button
         id="logoButton"
         :title="logoTitle"
