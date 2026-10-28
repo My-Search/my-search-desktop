@@ -518,7 +518,7 @@ html, body {
   animation: badge-pop 0.3s ease-out;
 }
 .plugin-upgrade-btn:hover {
-  background: rgba(18, 150, 219, 0.14);
+  background: rgba(255, 0, 0, 0.12);
   border-radius: 6px;
 }
 .plugin-upgrade-btn svg {
