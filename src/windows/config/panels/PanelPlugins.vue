@@ -960,16 +960,20 @@ function durFrom(ts: number | null): string {
           <div class="plugin-state">
             <span v-if="record.manifest.backend" class="plugin-dot" :class="rt.runtimeOf(record.id).status" :title="statusParts(record.id).join(' · ')"></span>
             <span class="plugin-version">v{{ record.version }}</span>
-            <button
+            <span
               v-if="record.updateAvailable"
-              class="btn-update-badge"
-              :disabled="updatingId === record.id"
+              class="btn-update-link"
+              :class="{ updating: updatingId === record.id }"
+              role="button"
+              tabindex="0"
               :title="`有可用更新 v${record.updateAvailable}，点击更新`"
               @click.stop="updatePlugin(record)"
+              @keydown.enter.prevent.stop="updatePlugin(record)"
+              @keydown.space.prevent.stop="updatePlugin(record)"
             >
-              <span class="btn-update-dot"></span>
-              {{ updatingId === record.id ? '更新中…' : `更新 v${record.updateAvailable}` }}
-            </button>
+              <span class="arrow">→</span>
+              <span class="new-ver">{{ updatingId === record.id ? '更新中…' : `v${record.updateAvailable}` }}</span>
+            </span>
           </div>
           <div class="plugin-arrow">{{ expanded[record.id] ? '▼' : '▶' }}</div>
         </div>
