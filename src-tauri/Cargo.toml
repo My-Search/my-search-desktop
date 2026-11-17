@@ -1,6 +1,6 @@
 [package]
 name = "my-search-desktop"
-version = "7.9.33"
+version = "7.9.34"
 description = "我的搜索桌面版 - 订阅式搜索工具"
 authors = ["zhuangjie"]
 edition = "2021"
@@ -74,6 +74,7 @@ windows = { version = "0.61", features = [
 ] }
 windows-sys = { version = "0.60", features = [
   "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_Input_KeyboardAndMouse", # 鼠标手势：GetAsyncKeyState / VK_CONTROL（触发键检测）
   "Win32_Foundation",
   "Win32_Security",
   "Win32_System_JobObjects",

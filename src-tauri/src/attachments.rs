@@ -493,6 +493,14 @@ impl WalkCtx<'_> {
 
 /// 深度优先列举：目录本身也入列（用户也能按文件夹名搜），符号链接不跟随（防环）。
 /// `gen` 用于取消：命中时与「到深/到量」一样立即 Ok 返回，已收集的部分保留。
+///
+/// **权限容错（真实踩到过的故障）**：子目录 `read_dir` 失败（C 盘根的
+/// `$Recycle.Bin` / `System Volume Information` / `Recovery`、其他盘的受保护
+/// 目录、ACL 拒绝的用户目录……）时**跳过该目录继续扫描**，不让整根报废——
+/// 附加 `C:\` 的场景里这些目录按文件名排序还在最前（`$` < 字母），一进递归
+/// 就会把整个扫描打成「拒绝访问」一行错，表现为「无法搜索C盘」。目录条目
+/// 本身已随父层列举入列（名字仍可搜），只是进不去内部。只有 `depth == 0`
+/// （用户显式附加的根）自身读不了才算真错误向上报——那确实没有任何可扫内容。
 fn walk(
     dir: &Path,
     rel_base: &str,
@@ -502,7 +510,18 @@ fn walk(
     if depth > MAX_WALK_DEPTH || ctx.stop() {
         return Ok(());
     }
-    let rd = std::fs::read_dir(dir).map_err(|e| err(&format!("读取目录失败: {e}")))?;
+    let rd = match std::fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(e) if depth == 0 => {
+            // 根目录（用户显式附加的那个）自身读不了：真错误，向上报。
+            return Err(err(&format!("读取目录失败: {e}")));
+        }
+        Err(e) => {
+            // 子目录读不了：跳过继续（不拖垮整根）。eprintln 进宿主日志便于排障。
+            eprintln!("[附件列举] 跳过无法读取的目录 {}: {e}", dir.display());
+            return Ok(());
+        }
+    };
     let mut children: Vec<_> = rd.filter_map(|e| e.ok()).collect();
     children.sort_by_key(|e| e.file_name());
     for child in children {
@@ -1186,5 +1205,88 @@ mod tests {
         assert_eq!(got.len(), c.out.len(), "推送总数应等于完整结果数（无重复无遗漏）");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 用 icacls 拒绝 Everyone（S-1-1-0，与系统区域设置无关）对一个目录的所有
+    /// 访问；返回是否真的拒绝成功（icacls 缺失 / 异常环境时返回 false）。
+    #[cfg(windows)]
+    fn deny_read(dir: &std::path::Path) -> bool {
+        let ok = std::process::Command::new("icacls")
+            .arg(dir)
+            .args(["/deny", "*S-1-1-0:(OI)(CI)F"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        ok && std::fs::read_dir(dir).is_err()
+    }
+
+    /// 摘掉测试留下的拒绝 ACE（拒绝 ACE 连删除都会挡，清理前必须先摘）。
+    #[cfg(windows)]
+    fn undeny_read(dir: &std::path::Path) {
+        std::process::Command::new("icacls")
+            .arg(dir)
+            .args(["/remove:d", "*S-1-1-0"])
+            .status()
+            .ok();
+    }
+
+    /// C 盘根必踩的「子目录拒绝访问」（$Recycle.Bin / System Volume Information…）：
+    /// walk 必须**跳过继续**——整根扫描成功、可读区域全部收集、不可读目录的名字
+    /// 本身仍入列（可按名搜）；而**根目录自身**读不了仍要报错（真失败要提示用户）。
+    /// 拒绝用 icacls 模拟；环境没有 icacls / 拒绝未生效时优雅跳过本测试。
+    #[test]
+    fn walk_tolerates_unreadable_subdirs_but_root_error_stays() {
+        let dir = std::env::temp_dir().join(format!("ms-att-denied-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("ok/deep")).unwrap();
+        std::fs::write(dir.join("ok/a.txt"), b"x").unwrap();
+        std::fs::write(dir.join("ok/deep/b.txt"), b"x").unwrap();
+        std::fs::write(dir.join("top.txt"), b"x").unwrap();
+        std::fs::create_dir_all(dir.join("denied")).unwrap();
+
+        #[cfg(windows)]
+        {
+            if !deny_read(&dir.join("denied")) {
+                eprintln!("icacls 不可用或拒绝未生效，跳过拒绝访问场景");
+                undeny_read(&dir.join("denied"));
+                std::fs::remove_dir_all(&dir).ok();
+                return;
+            }
+        }
+
+        // 1) 子目录不可读：walk 整体成功；可读区域全收集；denied 的名字仍入列
+        let mut c = ctx(usize::MAX, None);
+        let root_err = walk(&dir, "", 0, &mut c);
+        let rels: Vec<String> = c.out.iter().map(|e| e.rel_path.clone()).collect();
+        let names: Vec<String> = c.out.iter().map(|e| e.name.clone()).collect();
+
+        #[cfg(windows)]
+        undeny_read(&dir.join("denied"));
+        std::fs::remove_dir_all(&dir).ok();
+
+        root_err.expect("子目录读不了不应让整根扫描失败");
+        assert!(names.iter().any(|n| n == "denied"), "不可读目录本身应入列（名字可搜）");
+        assert!(rels.iter().any(|r| r == "top.txt"), "根下文件应收集");
+        assert!(rels.iter().any(|r| r == "ok/a.txt"), "可读子树应收集");
+        assert!(rels.iter().any(|r| r == "ok/deep/b.txt"), "深层文件应收集");
+
+        // 2) 根目录自身不可读：walk 仍必须报错（真实失败要提示用户）
+        #[cfg(windows)]
+        {
+            let denied_dir = std::env::temp_dir().join(format!("ms-att-denied-root-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&denied_dir);
+            std::fs::create_dir_all(&denied_dir).unwrap();
+            if deny_read(&denied_dir) {
+                let mut c2 = ctx(usize::MAX, None);
+                assert!(
+                    walk(&denied_dir, "", 0, &mut c2).is_err(),
+                    "根自身不可读仍应报错（没有任何可扫内容）"
+                );
+                undeny_read(&denied_dir);
+            } else {
+                eprintln!("icacls 不可用，跳过根不可读场景");
+            }
+            std::fs::remove_dir_all(&denied_dir).ok();
+        }
     }
 }

@@ -1,0 +1,139 @@
+/* 鼠标手势插件面板样式（跟随宿主主题变量；无变量时回退内置深浅两套） */
+
+.mg {
+  font-family: inherit;
+  color: var(--mg-text, #26292e);
+  /* 主题 token 对齐宿主真实变量名（style.css「插件共享主题变量」）：
+   * --line / --surface / --text / --muted，随宿主浅/深主题同步；
+   * 旧值 --ms-border/--ms-surface/--ms-text-2 在宿主里不存在，
+   * 恒走兜底浅色 → 深色主题下深底深字。兜底值取浅色外观。 */
+  --mg-line: var(--line, #e3e6ea);
+  --mg-card: var(--surface, #ffffff);
+  --mg-muted: var(--muted, #7a8087);
+  --mg-text: var(--text, #26292e);
+  --mg-accent: #5b57c2;
+  /* 宿主未注入变量时兜底纯色底（深色下由 --surface 透传覆盖） */
+  background: var(--surface, transparent);
+}
+
+/* ===== 头部 ===== */
+.mg-header { padding: 14px 16px 10px; }
+.mg-title-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.mg-title { margin: 0; font-size: 16px; font-weight: 600; }
+
+/* 开关 */
+.mg-switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+.mg-switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+.mg-slider {
+  width: 36px; height: 20px; border-radius: 999px;
+  background: #c9cdd3; position: relative; transition: background .15s;
+  flex: none;
+}
+.mg-slider::after {
+  content: ""; position: absolute; top: 2px; left: 2px;
+  width: 16px; height: 16px; border-radius: 50%;
+  background: #fff; transition: left .15s;
+  box-shadow: 0 1px 3px rgba(0,0,0,.25);
+}
+.mg-switch input:checked + .mg-slider { background: var(--mg-accent); }
+.mg-switch input:checked + .mg-slider::after { left: 18px; }
+.mg-switch-text { font-size: 13px; color: var(--mg-muted); }
+
+.mg-usage { margin: 8px 0 0; font-size: 12.5px; line-height: 1.7; color: var(--mg-muted); }
+.mg-usage b { color: var(--mg-text); }
+
+/* ===== 列表 ===== */
+.mg-list-wrap { padding: 0 16px 8px; }
+.mg-list-head, .mg-row {
+  display: grid;
+  grid-template-columns: 130px 1fr 84px;
+  gap: 10px;
+  align-items: center;
+}
+.mg-list-head {
+  padding: 6px 8px; font-size: 11.5px; color: var(--mg-muted);
+  border-bottom: 1px solid var(--mg-line);
+}
+.mg-list { min-height: 40px; }
+.mg-row { padding: 7px 8px; border-bottom: 1px dashed var(--mg-line); }
+.mg-row input, .mg-row select {
+  font: inherit; font-size: 12.5px; color: inherit;
+  background: var(--mg-card);
+  border: 1px solid var(--mg-line); border-radius: 6px;
+  padding: 5px 8px; width: 100%; box-sizing: border-box;
+}
+.mg-row input:focus, .mg-row select:focus { outline: 2px solid color-mix(in srgb, var(--mg-accent) 35%, transparent); border-color: var(--mg-accent); }
+.mg-pattern-input { letter-spacing: 2px; text-transform: uppercase; }
+.mg-open-target { margin-top: 6px; display: none; }
+.mg-row.is-open .mg-open-target { display: block; }
+
+/* 呼出程序：进程下拉 + 手动 exe 路径 */
+.mg-focus-fields { margin-top: 6px; }
+.mg-process-select { margin-bottom: 4px; }
+.mg-exe-input { font-size: 12px !important; }
+
+/* 轻量刷新按钮（运行中进程是动态的） */
+.mg-list-wrap .mg-btn-mini {
+  margin-top: 6px; padding: 4px 10px; font-size: 12px;
+  border-color: transparent; color: var(--mg-muted);
+}
+.mg-list-wrap .mg-btn-mini:hover { border-color: var(--mg-accent); color: var(--mg-accent); }
+
+/* 方向预览按钮 */
+.mg-pattern-visual {
+  font-size: 15px; letter-spacing: 3px; color: var(--mg-accent);
+  min-width: 56px; text-align: center; user-select: none;
+}
+
+/* 行内操作：重录 / 删除 */
+.mg-row-ops { display: flex; gap: 2px; justify-content: flex-end; }
+.mg-row.is-recording { background: color-mix(in srgb, var(--mg-accent) 8%, transparent); }
+.mg-record-row {
+  border: none; background: transparent; color: var(--mg-muted);
+  font-size: 14px; cursor: pointer; padding: 4px 6px; border-radius: 6px;
+}
+.mg-record-row:hover { color: var(--mg-accent); background: color-mix(in srgb, var(--mg-accent) 10%, transparent); }
+.mg-record-row.active { color: var(--mg-accent); background: color-mix(in srgb, var(--mg-accent) 16%, transparent); }
+
+/* 删除按钮 */
+.mg-del {
+  border: none; background: transparent; color: var(--mg-muted);
+  font-size: 16px; cursor: pointer; padding: 4px 6px; border-radius: 6px;
+}
+.mg-del:hover { color: #c0392b; background: rgba(192,57,43,.08); }
+
+/* ===== 按钮 ===== */
+.mg-btn {
+  font: inherit; font-size: 12.5px; cursor: pointer;
+  border-radius: 7px; padding: 6px 14px; border: 1px solid var(--mg-line);
+  background: var(--mg-card); color: inherit;
+}
+.mg-btn-primary { background: var(--mg-accent); border-color: var(--mg-accent); color: #fff; }
+.mg-btn-primary:disabled { opacity: .45; cursor: not-allowed; }
+.mg-btn-ghost { background: transparent; }
+.mg-btn-ghost:hover { border-color: var(--mg-accent); color: var(--mg-accent); }
+.mg-list-wrap .mg-btn-ghost { width: 100%; margin-top: 10px; border-style: dashed; }
+
+/* ===== 底部保存条 ===== */
+.mg-footer {
+  display: flex; align-items: center; justify-content: flex-end; gap: 10px;
+  padding: 10px 16px 14px;
+}
+.mg-dirty-hint { font-size: 12px; color: #b8860b; }
+/* 录制按钮（列表尾部 / 录制中的激活态） */
+.mg-list-wrap .mg-btn-ghost { width: 100%; margin-top: 10px; border-style: dashed; }
+.mg-list-wrap #mg-record { margin-top: 6px; }
+.mg-list-wrap #mg-record.active {
+  border-color: var(--mg-accent);
+  color: var(--mg-accent);
+  border-style: solid;
+  background: color-mix(in srgb, var(--mg-accent) 10%, transparent);
+}
+
+/* ===== 提示条 ===== */
+.mg-toast {
+  margin: 0 16px 10px; padding: 7px 12px; border-radius: 7px;
+  font-size: 12.5px; background: color-mix(in srgb, var(--mg-accent) 12%, transparent);
+  color: var(--mg-accent); display: none;
+}
+.mg-toast.err { background: rgba(192,57,43,.1); color: #c0392b; }

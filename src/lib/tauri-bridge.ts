@@ -388,6 +388,21 @@ export async function onClipboardUpdated(handler: () => void): Promise<UnlistenF
 }
 
 /**
+ * 监听「贴图无图」事件（用户按贴图热键但剪贴板里没有位图时，Rust 广播）。
+ * 主窗口据此唤起自己并给一句提示——热键按下不该毫无反应。
+ */
+export async function onPinNoImage(handler: () => void): Promise<UnlistenFn | null> {
+  if (!isTauri) return null;
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    return await listen("my-search://pin-no-image", () => handler());
+  } catch (e) {
+    console.warn("监听贴图无图事件失败:", e);
+    return null;
+  }
+}
+
+/**
  * 监听「Alt+点击文件带入」事件（Rust 端在资源管理器/桌面检测到
  * Alt+点击文件时广播，此时窗口已显示并完成复位）。主窗口据此把路径
  * 并入附件——与粘贴/拖入走同一条管线（attachByPaths）。

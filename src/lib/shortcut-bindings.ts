@@ -28,10 +28,11 @@ export type BuiltinShortcutAction =
 
 /**
  * **宿主原生的插件动作**：由插件清单声明、但由**宿主**执行。
- * 截图（开原生遮罩）/ 剪贴板历史（广播事件让前端开插件视图）都属于这类。
+ * 截图（开原生遮罩）/ 贴图（光标处钉住剪贴板图片的独立小窗）/ 剪贴板历史
+ * （广播事件让前端开插件视图）都属于这类。
  * 只有对应插件**已安装**时才可用，卸载即移除（见 `availableShortcutActions`）。
  */
-export type HostNativePluginShortcutAction = "screenshot" | "clipboard";
+export type HostNativePluginShortcutAction = "screenshot" | "clipboard" | "pin";
 
 /**
  * **插件自定义动作**：`plugin:<插件id>:<动作名>`。
@@ -55,6 +56,7 @@ export const PLUGIN_ACTION_PREFIX = "plugin:";
 export const HOST_NATIVE_PLUGIN_ACTIONS: readonly HostNativePluginShortcutAction[] = [
   "screenshot",
   "clipboard",
+  "pin",
 ];
 
 /**
@@ -142,6 +144,7 @@ export const SHORTCUT_ACTION_LABELS: Record<
   "quick-open": "快捷打开项",
   screenshot: "截图（框选 + 标注）",
   clipboard: "剪贴板历史",
+  pin: "贴图（钉住剪贴板图片）",
 };
 
 /**

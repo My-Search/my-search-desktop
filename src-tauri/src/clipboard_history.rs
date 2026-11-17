@@ -120,6 +120,13 @@ pub struct ClipItem {
     /// 旧版 `index.json` 没有此字段时靠 `#[serde(default)]` 平滑升级。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub favorite: bool,
+    /// 用户给这条历史打的分类名（如「工作」「代码」），未分类为 `None`。
+    ///
+    /// 与收藏同属「用户显式整理」的动作，因此**按同样的规则永久保留**：
+    /// 分类后的条目不参与 `prune_index` 的上限淘汰，默认「清空」也会保留。
+    /// 旧版 `index.json` 没有此字段时靠 `#[serde(default)]` 平滑升级。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
 }
 
 /// 内存中的索引（与磁盘 index.json 同步）
@@ -248,6 +255,7 @@ fn push_text(app: &AppHandle, text: String) {
             created_at: ms,
             source: None,
             favorite: false,
+            category: None,
         };
         idx.items.insert(0, item);
         prune_index(app, &mut idx);
@@ -295,6 +303,7 @@ fn push_files(app: &AppHandle, paths: Vec<String>) {
             created_at: ms,
             source: Some(format!("文件：{display}")),
             favorite: false,
+            category: None,
         };
         idx.items.insert(0, item);
         prune_index(app, &mut idx);
@@ -354,6 +363,7 @@ fn push_image(app: &AppHandle, width: u32, height: u32, rgba: Vec<u8>) {
             created_at: ms,
             source: None,
             favorite: false,
+            category: None,
         };
         idx.items.insert(0, item);
         prune_index(app, &mut idx);
@@ -364,12 +374,20 @@ fn push_image(app: &AppHandle, width: u32, height: u32, rgba: Vec<u8>) {
     bump_seq_and_notify(app);
 }
 
+/// 是否为「永久保留」条目：收藏 或 已分类。
+///
+/// 两者都是用户显式整理的结果，必须同等待遇——否则「分类后永久保留」只是
+/// 一句空话：分类的图片仍会被后来的图挤掉、清空时一并消失。
+fn is_pinned(item: &ClipItem) -> bool {
+    item.favorite || item.category.as_deref().map(|c| !c.trim().is_empty()).unwrap_or(false)
+}
+
 /// 按上限裁剪索引：文本/图片各自计数，超出则从**尾部（最旧）**删除；
 /// 被删的图片连同磁盘文件一并删除。
 ///
-/// **收藏条目豁免**：`favorite == true` 的一律保留，且不计入上限，
-/// 这样「收藏」才真的等于永久保存——否则收藏的图片仍会被后来的图挤掉。
-/// 换言之上限只约束「非收藏」条目。
+/// **收藏 / 已分类条目豁免**：`is_pinned` 为真的一律保留，且不计入上限，
+/// 这样「收藏 / 分类」才真的等于永久保存——否则收藏的图片仍会被后来的图挤掉。
+/// 换言之上限只约束「未收藏且未分类」的临时条目。
 fn prune_index(app: &AppHandle, idx: &mut ClipIndex) {
     let mut text_seen = 0usize;
     let mut image_seen = 0usize;
@@ -377,8 +395,8 @@ fn prune_index(app: &AppHandle, idx: &mut ClipIndex) {
     let mut to_delete: Vec<String> = Vec::new();
 
     for item in idx.items.drain(..) {
-        // 收藏：无条件保留，不占上限配额
-        if item.favorite {
+        // 收藏 / 已分类：无条件保留，不占上限配额
+        if is_pinned(&item) {
             keep.push(item);
             continue;
         }
@@ -541,6 +559,28 @@ mod platform {
             return Ok(());
         }
         Ok(())
+    }
+
+    /// 读取**当前**剪贴板位图（供贴图功能用；独立于监听入库链路）。
+    ///
+    /// 打开 → 只读 CF_DIB → 关闭，全程不写不 Empty（只读铁律同监听路径）。
+    /// 打开带重试：剪贴板可能正被写入方占用（同 `read_and_store` 的策略）。
+    pub(super) unsafe fn read_image_now() -> Result<Option<(u32, u32, Vec<u8>)>, String> {
+        let mut opened = false;
+        for _ in 0..8 {
+            if OpenClipboard(std::ptr::null_mut()) != 0 {
+                opened = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if !opened {
+            return Err("剪贴板被其它程序占用".to_string());
+        }
+        let result = read_dib();
+        // 无论成败都关闭
+        CloseClipboard();
+        result
     }
 
     /// 复制出某个剪贴板格式的原始字节（GlobalLock → 拷贝 → GlobalUnlock）。
@@ -852,6 +892,27 @@ pub fn uninstall() {}
 // ===================== tauri 命令（前端 / 插件调用） =====================
 
 /// 列出剪贴板历史（从新到旧）。可选 `query` 做前端文本过滤前的粗筛。
+
+// ===================== 当前剪贴板（贴图用，独立于历史入库） =====================
+
+/// 读取**当前**剪贴板里的位图（若有）→ (宽, 高, RGBA8 自顶向下)。
+///
+/// 贴图功能（`pin_image.rs`）用：按热键时直接读当前剪贴板，而不是查历史
+/// 索引——历史可能被清空 / 被上限淘汰 / 在监听开启前就有旧图，都不该作为
+/// 贴图来源。只读不写（铁律同监听路径：全程无 Empty/SetClipboardData）。
+#[cfg(windows)]
+pub fn current_clipboard_image() -> Result<Option<(u32, u32, Vec<u8>)>, String> {
+    unsafe { platform::read_image_now() }
+}
+
+/// 非 Windows：贴图取不到图（功能静默缺席，与监听同策略，不影响编译）。
+#[cfg(not(windows))]
+pub fn current_clipboard_image() -> Result<Option<(u32, u32, Vec<u8>)>, String> {
+    Ok(None)
+}
+
+// ===================== tauri 命令（前端 / 插件调用） =====================
+
 ///
 /// 列表在索引里已是「从新到旧」，这里原样返回；文本内容一并带上，
 /// 前端可据此渲染预览与做关键词过滤。
@@ -899,40 +960,70 @@ pub struct ClipPage {
 /// 参数：
 ///   - `query`：非空时按文本 / 来源做不区分大小写的包含匹配（与 `list` 同口径）；
 ///   - `favorite_only`：为真时只返回收藏条目（供「收藏」标签分页）；
+///   - `category`：非空时只返回该分类下的条目（供「全部」标签下的分类筛选）；
 ///   - `offset`：从过滤结果的第几条开始（0 起）；
 ///   - `limit`：本页最多取几条（前端传每页大小；Rust 侧再夹紧上限）。
 ///
 /// 过滤在**分页之前**完成，因此总数与切片都建立在同一结果集上，
-/// 「全部 / 收藏 / 搜索」三种视图都能各自正确翻页。
+/// 「全部 / 收藏 / 分类 / 搜索」四种视图都能各自正确翻页。
 #[tauri::command]
 pub fn clipboard_history_page(
     app: tauri::AppHandle,
     query: Option<String>,
     favorite_only: Option<bool>,
+    category: Option<String>,
     offset: Option<usize>,
     limit: Option<usize>,
 ) -> Result<ClipPage, String> {
     let q = query.unwrap_or_default().trim().to_lowercase();
     let fav_only = favorite_only.unwrap_or(false);
+    let category = normalize_category(category.as_deref().unwrap_or(""));
     let offset = offset.unwrap_or(0);
     // 夹紧每页大小：默认 30，硬上限 200，杜绝一次拉爆前端
     let limit = limit.unwrap_or(30).clamp(1, MAX_PAGE_LIMIT);
 
     let idx = load_index(&app);
-    let filtered = filter_items(idx.items, &q, fav_only);
+    let filtered = filter_items(idx.items, &q, fav_only, category.as_deref());
     Ok(paginate(filtered, offset, limit))
 }
 
-/// 按「关键词 + 仅收藏」过滤条目（分页前的纯函数，便于单测）。
+/// 归一化分类名：去首尾空白、把连续空白压成一个空格、按字符截断到 24 字；
+/// 空串 / 纯空白返回 `None`（= 未分类）。`set_category` 与分页过滤共用同一口径，
+/// 否则「写了分类却筛不出来」这类不一致会很难排查。
+fn normalize_category(raw: &str) -> Option<String> {
+    let mut out = String::new();
+    for word in raw.split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.extend(word.chars());
+    }
+    if out.is_empty() {
+        return None;
+    }
+    Some(out.chars().take(24).collect())
+}
+
+/// 按「关键词 + 仅收藏 + 分类」过滤条目（分页前的纯函数，便于单测）。
 ///
-/// 关键词为空串时只按收藏过滤；匹配口径与 `clipboard_history_list` 完全一致：
-/// 有文本按文本匹配，图片（无文本）退回按来源描述匹配。
-fn filter_items(items: Vec<ClipItem>, q: &str, fav_only: bool) -> Vec<ClipItem> {
+/// 关键词为空串时只按收藏 / 分类过滤；匹配口径与 `clipboard_history_list`
+/// 完全一致：有文本按文本匹配，图片（无文本）退回按来源描述匹配。
+fn filter_items(
+    items: Vec<ClipItem>,
+    q: &str,
+    fav_only: bool,
+    category: Option<&str>,
+) -> Vec<ClipItem> {
     items
         .into_iter()
         .filter(|it| {
             if fav_only && !it.favorite {
                 return false;
+            }
+            if let Some(cat) = category {
+                if it.category.as_deref() != Some(cat) {
+                    return false;
+                }
             }
             if q.is_empty() {
                 return true;
@@ -1056,6 +1147,29 @@ pub fn clipboard_history_set_favorite(
     Ok(())
 }
 
+/// 设置 / 清除一条历史的分类。
+///
+/// `category` 为空串或纯空白表示**取消分类**（恢复为可被上限淘汰的临时条目）。
+/// 分类后的条目与收藏同等待遇：不参与上限淘汰，默认「清空」也保留。
+/// 只改分类位并落盘，随后广播更新事件，打开中的视图会自动重拉列表。
+#[tauri::command]
+pub fn clipboard_history_set_category(
+    app: tauri::AppHandle,
+    id: String,
+    category: Option<String>,
+) -> Result<(), String> {
+    let mut idx = load_index(&app);
+    let item = idx
+        .items
+        .iter_mut()
+        .find(|it| it.id == id)
+        .ok_or_else(|| "该历史已不存在".to_string())?;
+    item.category = normalize_category(category.as_deref().unwrap_or(""));
+    save_index(&app, &idx)?;
+    let _ = app.emit(EVENT_CLIPBOARD_UPDATED, ());
+    Ok(())
+}
+
 /// 把编辑提交的原始文本归一成可入库的文本；空内容返回 `None`（调用方据此拒绝）。
 ///
 /// 与 `push_text` 的口径**逐字一致**（剥尾部 `\r\n`、按 `chars()` 而非字节截断到
@@ -1115,9 +1229,9 @@ pub fn clipboard_history_update(
 
 /// 清空历史。
 ///
-/// `keep_favorites` 为 `true`（默认）时**保留收藏条目**，只清掉未收藏的；
-/// 传 `false` 则连同收藏一起清空（前端「清空」弹窗里由用户显式选择）。
-/// 图片文件按「哪些条目被真正移除」来删，避免误删仍在引用的收藏图片。
+/// `keep_favorites` 为 `true`（默认）时**保留收藏与已分类条目**，只清掉
+/// 两者都不是的临时条目；传 `false` 则全部清空（前端「清空」弹窗里由用户
+/// 显式选择）。图片文件按「哪些条目被真正移除」来删，避免误删仍在引用的图片。
 #[tauri::command]
 pub fn clipboard_history_clear(
     app: tauri::AppHandle,
@@ -1127,10 +1241,10 @@ pub fn clipboard_history_clear(
     let mut idx = load_index(&app);
 
     if keep {
-        // 保留收藏：删掉未收藏的条目，并收集其图片文件待删除
+        // 保留收藏 / 已分类：删掉其余条目，并收集其图片文件待删除
         let mut to_delete: Vec<String> = Vec::new();
         idx.items.retain(|it| {
-            if it.favorite {
+            if is_pinned(it) {
                 true
             } else {
                 if let Some(rel) = it.rel_path.clone() {
@@ -1293,6 +1407,7 @@ mod tests {
                 created_at: (1000 - i) as u64,
                 source: None,
                 favorite: false,
+                category: None,
             })
             .collect();
         let mut idx = ClipIndex { items };
@@ -1336,6 +1451,7 @@ mod tests {
             created_at: (1000 - i) as u64,
             source: None,
             favorite: fav,
+            category: None,
         };
 
         // 顺序（从新到旧）：收藏#0, 普通#1, 普通#2, 收藏#3, 普通#4；上限 2 条普通
@@ -1421,34 +1537,109 @@ mod tests {
             created_at: (1000 - id) as u64,
             source: source.map(|s| s.to_string()),
             favorite: fav,
+            category: None,
         }
     }
 
-    /// 过滤：`favorite_only` 只留收藏；关键词按文本匹配、图片退回按来源匹配。
+    /// 过滤：`favorite_only` 只留收藏；`category` 只留该分类；
+    /// 关键词按文本匹配、图片退回按来源匹配。
     #[test]
-    fn filter_items_by_favorite_and_query() {
+    fn filter_items_by_favorite_query_and_category() {
+        let mut work = mk_item(4, Some("工作笔记"), None, false);
+        work.category = Some("工作".into());
+        let mut code = mk_item(5, Some("hello code"), None, false);
+        code.category = Some("代码".into());
         let items = vec![
             mk_item(0, Some("Hello World"), None, true),
             mk_item(1, Some("rust lang"), None, false),
             mk_item(2, None, Some("文件：a.txt"), false),
             mk_item(3, Some("hello again"), None, false),
+            work,
+            code,
         ];
         // 仅收藏
-        let favs = filter_items(items.clone(), "", true);
+        let favs = filter_items(items.clone(), "", true, None);
         assert_eq!(favs.len(), 1);
         assert_eq!(favs[0].id, "t-0");
-        // 关键词不区分大小写命中文本（t-0/t-3）
-        let hello = filter_items(items.clone(), "hello", false);
+        // 关键词不区分大小写命中文本（t-0/t-3/t-5）
+        let hello = filter_items(items.clone(), "hello", false, None);
         let ids: Vec<&str> = hello.iter().map(|i| i.id.as_str()).collect();
-        assert_eq!(ids, vec!["t-0", "t-3"]);
+        assert_eq!(ids, vec!["t-0", "t-3", "t-5"]);
         // 无文本的图片按来源匹配
-        let files = filter_items(items.clone(), "文件", false);
+        let files = filter_items(items.clone(), "文件", false, None);
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].id, "t-2");
         // 收藏 + 关键词同时生效
-        let fh = filter_items(items, "hello", true);
+        let fh = filter_items(items.clone(), "hello", true, None);
         assert_eq!(fh.len(), 1);
         assert_eq!(fh[0].id, "t-0");
+        // 分类过滤：只留该类
+        let cat = filter_items(items.clone(), "", false, Some("工作"));
+        assert_eq!(cat.len(), 1);
+        assert_eq!(cat[0].id, "t-4");
+        // 分类 + 关键词同时生效（命中分类内的文本）
+        let cat_q = filter_items(items, "hello", false, Some("代码"));
+        assert_eq!(cat_q.len(), 1);
+        assert_eq!(cat_q[0].id, "t-5");
+    }
+
+    /// 已分类条目必须和收藏一样免于上限淘汰，且不占用临时条目配额。
+    #[test]
+    fn categorized_items_survive_prune_and_do_not_consume_quota() {
+        let mut categorized_old = mk_item(4, Some("旧但已分类"), None, false);
+        categorized_old.category = Some("工作".into());
+        let items = vec![
+            mk_item(0, Some("普通0"), None, false),
+            categorized_old,
+            mk_item(1, Some("普通1"), None, false),
+            mk_item(2, Some("普通2"), None, false),
+        ];
+        // 复刻 prune_index 的计数语义：收藏/分类免淘汰、不占配额
+        let mut seen = 0usize;
+        let mut kept = Vec::new();
+        for it in items {
+            if is_pinned(&it) {
+                kept.push(it);
+                continue;
+            }
+            if seen < 2 {
+                seen += 1;
+                kept.push(it);
+            }
+        }
+        let ids: Vec<&str> = kept.iter().map(|it| it.id.as_str()).collect();
+        assert!(ids.contains(&"t-4"), "已分类条目必须保留");
+        assert!(ids.contains(&"t-0") && ids.contains(&"t-1"));
+        assert!(!ids.contains(&"t-2"), "最旧的临时条目应被淘汰");
+        assert_eq!(kept.len(), 3);
+    }
+
+    /// 分类名归一化：空白折叠、空串视为未分类、超长按字符截断。
+    #[test]
+    fn normalize_category_trims_and_limits_by_chars() {
+        assert_eq!(normalize_category(""), None);
+        assert_eq!(normalize_category("   \t  "), None);
+        assert_eq!(normalize_category("  工作  ").as_deref(), Some("工作"));
+        assert_eq!(normalize_category("工作   紧急").as_deref(), Some("工作 紧急"));
+        let long: String = "中".repeat(30);
+        let out = normalize_category(&long).unwrap();
+        assert_eq!(out.chars().count(), 24);
+        assert!(out.chars().all(|c| c == '中'));
+    }
+
+    /// `category` 字段：缺省 None、序列化时 None 被跳过、Some 正常写入。
+    #[test]
+    fn category_defaults_none_and_is_skipped_when_none() {
+        let legacy = r#"{"id":"t-1","kind":"text","text":"hi","size":2,"createdAt":1}"#;
+        let mut it: ClipItem = serde_json::from_str(legacy).expect("旧格式应能反序列化");
+        assert!(it.category.is_none());
+
+        let s = serde_json::to_string(&it).unwrap();
+        assert!(!s.contains("category"), "None 不应被序列化: {s}");
+
+        it.category = Some("工作".into());
+        let s = serde_json::to_string(&it).unwrap();
+        assert!(s.contains("\"category\":\"工作\""), "Some 必须被序列化: {s}");
     }
 
     /// 分页：total 是过滤后全集长度；切片与 has_more 正确。

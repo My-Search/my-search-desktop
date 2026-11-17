@@ -53,7 +53,8 @@
   var dom = {};
   ["cb-status", "cb-meta", "cb-list", "cb-empty", "cb-empty-text", "cb-empty-key",
    "cb-search", "cb-refresh", "cb-clear", "cb-hotkey-btn", "cb-hotkey-clear",
-   "cb-viewer", "cb-viewer-img", "cb-viewer-name", "cb-tabs", "cb-fav-count"].forEach(function (id) {
+   "cb-viewer", "cb-viewer-img", "cb-viewer-name", "cb-tabs", "cb-fav-count",
+   "cb-cats", "cb-cat-options"].forEach(function (id) {
     dom[id] = document.getElementById(id);
   });
   /** 本实例根节点：会话被宿主「保活」后旧实例仍在内存里，靠它判活（别打扰新实例） */
@@ -75,9 +76,17 @@
   var query = "";
   /** 当前标签："all" = 全部历史，"fav" = 只看收藏 */
   var filter = "all";
+  /** 当前选中的分类（null = 不按分类筛选；只在「全部」标签下生效） */
+  var activeCategory = null;
+  /** 现有分类及各自条目数（由宿主 list() 聚合；只用于分类栏展示） */
+  var categories = [];
   /** 正在行内编辑的条目 id（null = 无）。编辑态在 render() 里体现：
    *  该行换成 textarea + 保存/取消，其余行照旧。 */
   var editingId = null;
+  /** 正在编辑分类的条目 id（null = 无）。与 editingId 互斥。 */
+  var categorizingId = null;
+  /** 分类编辑草稿：与 editDraft 同理，宿主事件重建列表时回填，避免冲掉输入。 */
+  var categoryDraft = "";
   /** 编辑中的草稿文本。render() 会用 innerHTML 重建列表、textarea 随之失效，
    *  所以把当前输入暂存到这里，重建后回填——否则宿主每广播一次
    *  clipboard-updated（复制任何东西都会）就会冲掉用户正敲的字。 */
@@ -190,6 +199,72 @@
     }
   }
 
+  /**
+   * 渲染「全部」标签下方的分类栏。
+   *
+   * 只在 filter === "all" 且有分类时出现；切换标签后分类栏隐藏（收藏视图里
+   * 再露一排分类会让人误以为分类与收藏是同一维度）。
+   * 点当前分类可取消筛选（再点一次 = 返回全部）。
+   */
+  function renderCategories() {
+    var box = dom["cb-cats"];
+    if (!box) return;
+    if (filter !== "all" || !categories.length) {
+      box.hidden = true;
+      box.innerHTML = "";
+      return;
+    }
+    var html = '<span class="cb-cats-label">分类</span>';
+    for (var i = 0; i < categories.length; i++) {
+      var c = categories[i];
+      var on = activeCategory === c.name;
+      html += '<button class="cb-cat' + (on ? " active" : "") + '" type="button" data-cat="' +
+        escapeHtml(c.name) + '" title="' + (on ? "再次点击显示全部分类" : "只看「" + escapeHtml(c.name) + "」分类") + '">' +
+        escapeHtml(c.name) + '<span class="cb-cat-num">' + c.count + "</span></button>";
+    }
+    if (activeCategory) {
+      html += '<button class="cb-cat cb-cat-clear" type="button" data-act="cat-clear" title="取消分类筛选">显示全部</button>';
+    }
+    box.innerHTML = html;
+    box.hidden = false;
+
+    // 分类输入框的候选（datalist 必须挂在文档里，各编辑框用 list= 引用）
+    if (dom["cb-cat-options"]) {
+      dom["cb-cat-options"].innerHTML = categories.map(function (c) {
+        return '<option value="' + escapeHtml(c.name) + '"></option>';
+      }).join("");
+    }
+  }
+
+  /**
+   * 从宿主全量列表聚合分类（名称 + 条数）。
+   *
+   * 只读、失败静默：分类栏是锦上添花，读不到也不该影响主列表。
+   * 分类数据在 Rust 索引里，因此这里用 list() 一次拿全（最多几百条，可接受）。
+   */
+  function refreshCategories() {
+    if (typeof ms.clipboard?.list !== "function") {
+      categories = [];
+      renderCategories();
+      return Promise.resolve();
+    }
+    return Promise.resolve(ms.clipboard.list())
+      .then(function (list) {
+        if (!alive()) return;
+        var map = Object.create(null);
+        (Array.isArray(list) ? list : []).forEach(function (it) {
+          var name = it && typeof it.category === "string" ? it.category.trim() : "";
+          if (!name) return;
+          if (!map[name]) map[name] = { name: name, count: 0 };
+          map[name].count++;
+        });
+        categories = Object.keys(map).map(function (k) { return map[k]; });
+        categories.sort(function (a, b) { return a.name.localeCompare(b.name, "zh-Hans-CN"); });
+        renderCategories();
+      })
+      .catch(function () { /* 分类栏读失败不影响列表 */ });
+  }
+
   /** 渲染整个列表 */
   function render() {
     var list = dom["cb-list"];
@@ -197,6 +272,7 @@
     if (!list) return;
 
     renderTabs();
+    renderCategories();
 
     var shown = visibleItems();
 
@@ -205,7 +281,7 @@
         dom["cb-meta"].textContent = "";
       } else {
         // 显示「已加载 / 总数」，让用户知道还有多少没滚出来
-        var prefix = filter === "fav" ? "收藏 " : "共 ";
+        var prefix = filter === "fav" ? "收藏 " : (activeCategory ? "分类「" + activeCategory + "」 " : "共 ");
         var text = prefix + total + " 条";
         if (shown.length < total) text += "（已显示 " + shown.length + "）";
         dom["cb-meta"].textContent = text + (query ? "（匹配「" + query + "」）" : "");
@@ -219,6 +295,7 @@
         if (dom["cb-empty-text"]) {
           if (query) dom["cb-empty-text"].textContent = "没有匹配「" + query + "」的历史。";
           else if (filter === "fav") dom["cb-empty-text"].textContent = "还没有收藏任何内容。";
+          else if (activeCategory) dom["cb-empty-text"].textContent = "分类「" + activeCategory + "」下还没有内容。";
           else dom["cb-empty-text"].textContent = "还没有剪贴板历史。";
         }
       }
@@ -250,6 +327,16 @@
       }
     }
 
+    // 分类编辑中：同上，重建后补聚焦，否则宿主广播一次刷新就得重点
+    if (categorizingId) {
+      var catBox = catBoxOf(categorizingId);
+      if (catBox) {
+        var cend = catBox.value.length;
+        catBox.focus();
+        catBox.setSelectionRange(cend, cend);
+      }
+    }
+
     // 图片缩略图懒加载（并发受限）
     loadVisibleThumbs();
 
@@ -260,13 +347,15 @@
   /**
    * 单条目的 HTML。
    *
-   * 两种形态：
+   * 三种形态：
    *   1) **编辑态**（`editingId === it.id`）：该行换成 textarea + 保存/取消，
    *      不再显示「★/复制/删除」——避免编辑中误触其它动作把行删了。
-   *   2) **普通态**：原样展示，动作按钮 `★  复制  [编辑]  删除`。
+   *   2) **分类态**（`categorizingId === it.id`）：换成分类输入框 + 保存/取消。
+   *   3) **普通态**：原样展示，动作按钮 `★  复制  [编辑]  分类  删除`。
    *
    * 「编辑」按钮只在**已收藏的文本**上出现：图片没有可编辑的文本形态，
    * 未收藏条目是临时噪音、按产品定义不值得整理（见 3c 的 startEdit 注释）。
+   * 「分类」按钮对所有条目开放（文本/图片、收藏/未收藏都能分类）。
    */
   function itemHtml(it) {
     var isImg = it.kind === "image";
@@ -275,12 +364,20 @@
     if (editingId === it.id) {
       return editRowHtml(it, isImg);
     }
+    if (categorizingId === it.id) {
+      return categoryRowHtml(it, isImg);
+    }
 
     var preview = isImg
       ? ""
       : '<div class="cb-item-text">' + escapeHtml(it.text || "") + "</div>";
     var sourceLine = it.source
       ? '<div class="cb-item-sub">' + escapeHtml(it.source) + "</div>"
+      : "";
+    // 分类徽标：分类是宿主索引里的字段，重渲染后仍在
+    var catLine = it.category
+      ? '<div class="cb-item-sub"><span class="cb-item-cat" title="已分类（永久保留）">分类：' +
+        escapeHtml(it.category) + "</span></div>"
       : "";
     // 「编辑」只在收藏的文本条目上出现
     var editBtn = (!isImg && isFav)
@@ -298,6 +395,7 @@
         '<div class="cb-item-body">' +
           preview +
           sourceLine +
+          catLine +
           '<div class="cb-item-sub">' + escapeHtml(itemSubline(it)) + "</div>" +
         "</div>" +
         '<div class="cb-item-actions">' +
@@ -305,7 +403,33 @@
             (isFav ? "取消收藏" : "收藏") + '">' + (isFav ? "★" : "☆") + "</button>" +
           '<button class="cb-item-btn" data-act="copy" title="复制到剪贴板">复制</button>' +
           editBtn +
+          '<button class="cb-item-btn" data-act="category" title="设置分类（分类后永久保留）">分类</button>' +
           '<button class="cb-item-btn del" data-act="del" title="删除这条">删除</button>' +
+        "</div>" +
+      "</div>");
+  }
+
+  /**
+   * 分类编辑态那一行的 HTML：输入框 + 保存/取消。
+   *
+   * 与编辑态同理：内容回填 `categoryDraft`，宿主事件重写列表时不会冲掉输入。
+   * 留空并保存 = 取消分类（该条恢复成可被上限淘汰的临时条目）。
+   */
+  function categoryRowHtml(it, isImg) {
+    return (
+      '<div class="cb-item cb-item-categorizing" data-id="' + escapeHtml(it.id) + '"' +
+        ' data-kind="' + escapeHtml(it.kind) + '"' +
+        (it.relPath ? ' data-rel-path="' + escapeHtml(it.relPath) + '"' : "") + ">" +
+        '<div class="cb-item-kind">' + (isImg ? "图片" : "文本") + "</div>" +
+        '<div class="cb-item-body">' +
+          '<input class="cb-item-cat-input" type="text" list="cb-cat-options" maxlength="24" ' +
+            'data-cat-input="' + escapeHtml(it.id) + '" value="' + escapeHtml(categoryDraft) + '" ' +
+            'placeholder="输入分类名（留空 = 取消分类）" spellcheck="false">' +
+          '<div class="cb-item-sub">分类后的条目永久保留，不会被上限淘汰或清空。</div>' +
+        "</div>" +
+        '<div class="cb-item-actions">' +
+          '<button class="cb-item-btn primary" data-act="cat-save" title="保存分类（Enter）">保存</button>' +
+          '<button class="cb-item-btn" data-act="cat-cancel" title="放弃修改（Esc）">取消</button>' +
         "</div>" +
       "</div>");
   }
@@ -464,6 +588,7 @@
       return Promise.resolve(ms.clipboard.page({
         query: query,
         favoriteOnly: filter === "fav",
+        category: activeCategory || undefined,
         offset: offset,
         limit: limit,
       })).then(function (p) {
@@ -479,6 +604,9 @@
     return Promise.resolve(ms.clipboard.list(query)).then(function (list) {
       var all = Array.isArray(list) ? list : [];
       if (filter === "fav") all = all.filter(function (it) { return it.favorite === true; });
+      if (activeCategory) {
+        all = all.filter(function (it) { return (it.category || "") === activeCategory; });
+      }
       var page = all.slice(offset, offset + limit);
       return {
         items: page,
@@ -495,7 +623,7 @@
     loading = true;
     if (showStatus) setStatus("正在刷新…");
 
-    Promise.all([fetchPage(0, PAGE_SIZE), fetchFavoriteTotal()])
+    Promise.all([fetchPage(0, PAGE_SIZE), fetchFavoriteTotal(), refreshCategories()])
       .then(function (res) {
         if (!alive()) return;
         var page = res[0];
@@ -586,7 +714,8 @@
       .then(function (r) {
         if (r === null) return; // 用户取消
         if (viewerItem && viewerItem.id === it.id) closeViewer();
-        // 删掉的正是正在编辑的那行：清掉编辑态，别让 render() 找不到目标行
+        // 删掉的正是正在编辑的那行：清掉行内编辑态，别让 render() 找不到目标行
+        if (categorizingId === it.id) categorizingId = null;
         if (editingId === it.id) editingId = null;
         reload(false);
       })
@@ -651,6 +780,8 @@
   function startEdit(it) {
     if (editingId === it.id) return;                 // 已在编辑这一行：不重渲染（会打断输入）
     if (it.kind !== "text" || it.favorite !== true) return;
+    categorizingId = null;                            // 与分类编辑互斥
+    categoryDraft = "";
     editingId = it.id;
     editDraft = it.text || "";
     render();
@@ -740,6 +871,98 @@
     return list.querySelector('[data-edit-input="' + cssEscape(id) + '"]');
   }
 
+  /** 按 id 取当前列表里的分类输入框（同上，整块重建后只能现查） */
+  function catBoxOf(id) {
+    var list = dom["cb-list"];
+    if (!list) return null;
+    return list.querySelector('[data-cat-input="' + cssEscape(id) + '"]');
+  }
+
+  /* ======================= 条目分类 ======================= */
+
+  /**
+   * 进入某条的分类编辑态。文本 / 图片、收藏 / 未收藏都可以分类。
+   * 与内容编辑互斥：同时开两个输入框会让「保存」语义变得不可预期。
+   */
+  function startCategorize(it) {
+    if (categorizingId === it.id) return;
+    editingId = null;
+    editDraft = "";
+    categorizingId = it.id;
+    categoryDraft = it.category || "";
+    render();
+    var input = catBoxOf(it.id);
+    if (!input) return;
+    input.focus();
+    input.select();
+    if (typeof input.scrollIntoView === "function") input.scrollIntoView({ block: "nearest" });
+  }
+
+  /** 退出分类编辑态（不保存）。 */
+  function cancelCategorize() {
+    if (categorizingId === null) return;
+    categorizingId = null;
+    categoryDraft = "";
+    render();
+  }
+
+  /**
+   * 保存分类。
+   *
+   * - 空串 = 取消分类（`null` 交给宿主，条目恢复成临时条目）；
+   * - 与当前值相同 → 不发 IPC；
+   * - 乐观更新 + 失败回滚（与 toggleFavorite / saveEdit 同手法）；
+   * - 正在按分类筛选且改到了别的分类 → 先从当前列表移除该条，
+   *   否则会出现「列表里躺着一条不属于当前分类的内容」。
+   */
+  function saveCategory(id) {
+    var it = findItem(id);
+    var input = catBoxOf(id);
+    if (!it || !input) { cancelCategorize(); return; }
+
+    if (typeof ms.clipboard?.setCategory !== "function") {
+      setStatus("当前宿主版本不支持分类，请升级", true);
+      return;
+    }
+
+    var next = String(input.value || "").replace(/\s+/g, " ").trim().slice(0, 24) || null;
+    var prev = it.category || null;
+    if (next === prev) {
+      cancelCategorize();
+      setStatus("分类未变化");
+      setTimeout(function () { if (alive()) setStatus(""); }, 1600);
+      return;
+    }
+
+    // 乐观更新
+    if (next) it.category = next;
+    else delete it.category;
+    categorizingId = null;
+    categoryDraft = "";
+    if (activeCategory && next !== activeCategory) {
+      items = items.filter(function (x) { return x.id !== it.id; });
+      total = Math.max(0, total - 1);
+    }
+    render();
+    refreshCategories();
+
+    Promise.resolve(ms.clipboard.setCategory(it.id, next))
+      .then(function () {
+        if (!alive()) return;
+        setStatus(next ? "已分类到「" + next + "」" : "已取消分类");
+        setTimeout(function () { if (alive()) setStatus(""); }, 2000);
+      })
+      .catch(function (e) {
+        if (!alive()) return;
+        // 回滚，避免界面与磁盘不一致
+        if (prev) it.category = prev;
+        else delete it.category;
+        loadFirstPageQuiet();
+        refreshCategories();
+        setStatus("分类保存失败：" + errorText(e), true);
+      });
+  }
+
   /** 按内容自适应 textarea 高度（长文本不会把整个视图撑爆，有 max-height 兜底） */
   function growEditBox(ta) {
     if (!ta || !ta.style) return;
@@ -782,12 +1005,16 @@
       .then(function () { loading = false; });
   }
 
-  /** 清空历史（保留收藏条目；确认框里讲清楚）。 */
+  /** 清空历史（保留收藏与已分类条目；确认框里讲清楚）。 */
   function clearAll() {
     var favCount = favTotal;
-    var msg = favCount
-      ? "清空未收藏的剪贴板历史？\n\n已收藏的 " + favCount + " 条会保留。此操作不可撤销。"
-      : "清空全部剪贴板历史？此操作不可撤销。";
+    var catCount = categories.reduce(function (n, c) { return n + c.count; }, 0);
+    var msg;
+    if (favCount || catCount) {
+      msg = "清空未收藏、未分类的剪贴板历史？\n\n已收藏与已分类的条目会永久保留。此操作不可撤销。";
+    } else {
+      msg = "清空全部剪贴板历史？此操作不可撤销。";
+    }
     Promise.resolve(ms.ui && ms.ui.confirm ? ms.ui.confirm(msg) : true)
       .then(function (ok) {
         if (ok === false) return null;
@@ -985,11 +1212,33 @@
       if (tab !== "all" && tab !== "fav") return;
       if (tab === filter) return;
       filter = tab;
+      // 分类筛选只在「全部」下有意义；切到收藏时清掉，避免切回来还停在某个分类上
+      activeCategory = null;
       persistFilter(tab);
       // 过滤条件变了：正在编辑的那行可能不在新列表里，先退出编辑态，
       // 否则 render() 后 textarea 消失、用户敲的字凭空丢了
       cancelEdit();
       // 从头拉：避免把另一个标签的已加载页混进当前列表
+      cancelCategorize();
+      reload(false);
+    });
+
+    // 分类栏（只在「全部」标签下显示）：点分类筛选 / 再点取消
+    dom["cb-cats"]?.addEventListener("click", function (e) {
+      var clear = e.target.closest('[data-act="cat-clear"]');
+      if (clear) {
+        if (!activeCategory) return;
+        activeCategory = null;
+      } else {
+        var btn = e.target.closest(".cb-cat[data-cat]");
+        if (!btn) return;
+        var cat = btn.getAttribute("data-cat") || "";
+        if (!cat) return;
+        activeCategory = activeCategory === cat ? null : cat;
+      }
+      // 分类变化会换掉整页数据，先退出两种行内编辑
+      cancelEdit();
+      cancelCategorize();
       reload(false);
     });
 
@@ -1001,7 +1250,8 @@
       searchTimer = setTimeout(function () {
         if (!alive()) return;
         persistQuery(v);
-        // 同切标签：搜索会重拉列表，先退出编辑态（原因见 tab handler）
+        // 同切标签：搜索会重拉列表，先退出行内编辑（原因见 tab handler）
+        cancelCategorize();
         cancelEdit();
         reload(false, v);
       }, 200);
@@ -1024,6 +1274,9 @@
         else if (act === "edit") startEdit(it);
         else if (act === "edit-save") saveEdit(it.id);
         else if (act === "edit-cancel") cancelEdit();
+        else if (act === "category") startCategorize(it);
+        else if (act === "cat-save") saveCategory(it.id);
+        else if (act === "cat-cancel") cancelCategorize();
         return;
       }
       // 点条目本身：图片看大图，文本直接复制
@@ -1036,7 +1289,22 @@
     // `isComposing`：中文输入法选字期间的回车不能当保存，否则选不字。
     dom["cb-list"]?.addEventListener("keydown", function (e) {
       var ta = e.target;
-      if (!ta || !ta.getAttribute || !ta.getAttribute("data-edit-input")) return;
+      if (!ta || !ta.getAttribute) return;
+
+      // 分类输入框：Enter 保存、Esc 取消（单行输入框，不必区分 Shift）
+      var catId = ta.getAttribute("data-cat-input");
+      if (catId) {
+        if (e.key === "Enter" && !e.isComposing) {
+          e.preventDefault();
+          saveCategory(catId);
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          cancelCategorize();
+        }
+        return;
+      }
+
+      if (!ta.getAttribute("data-edit-input")) return;
       var id = ta.getAttribute("data-edit-input");
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
         e.preventDefault();
@@ -1051,7 +1319,12 @@
     // 供列表被外部重建时回填
     dom["cb-list"]?.addEventListener("input", function (e) {
       var ta = e.target;
-      if (!ta || !ta.getAttribute || !ta.getAttribute("data-edit-input")) return;
+      if (!ta || !ta.getAttribute) return;
+      if (ta.getAttribute("data-cat-input")) {
+        categoryDraft = ta.value;
+        return;
+      }
+      if (!ta.getAttribute("data-edit-input")) return;
       growEditBox(ta);
       editDraft = ta.value;
     });

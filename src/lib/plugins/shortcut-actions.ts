@@ -76,7 +76,9 @@ const LEGACY_ACTION_OWNERS: Record<string, Omit<AvailableShortcutAction, "plugin
   "com.mysearch.clipboard": {
     action: "clipboard",
     title: "剪贴板历史",
-    defaultShortcut: "ctrl+alt+v",
+    // 7.9.34 起默认键从 ctrl+alt+v 迁到 ctrl+alt+b（V 让给「贴图」）；
+    // 已存过绑定的老用户由 Rust `migrate_pin_shortcut` 一次性迁移，不依赖这里。
+    defaultShortcut: "ctrl+alt+b",
   },
 };
 

@@ -473,9 +473,14 @@ check(
 // ---- 插件动作：isPluginShortcutAction / describeBinding 的标题解析 ----
 check("截图是插件动作", isPluginShortcutAction("screenshot"), true);
 check("剪贴板历史是插件动作", isPluginShortcutAction("clipboard"), true);
+check("贴图是插件动作", isPluginShortcutAction("pin"), true);
 check("呼出/隐藏不是插件动作", isPluginShortcutAction("toggle-window"), false);
 check("打开插件不是插件动作", isPluginShortcutAction("open-plugin"), false);
-check("PLUGIN_SHORTCUT_ACTIONS 收录两个动作", [...PLUGIN_SHORTCUT_ACTIONS], ["screenshot", "clipboard"]);
+check(
+  "PLUGIN_SHORTCUT_ACTIONS 收录三个动作",
+  [...PLUGIN_SHORTCUT_ACTIONS],
+  ["screenshot", "clipboard", "pin"]
+);
 check(
   "插件动作标题解析优先于内置兜底",
   describeBinding({ shortcut: "ctrl+alt+x", action: "screenshot", target: null }, undefined, () => "截图（自定义标题）"),

@@ -50,6 +50,8 @@ const PLUGINS = [
   { dir: "com.zhuangjie.github-upload", id: "com.zhuangjie.github-upload" },
   { dir: "com.zhuangjie.todo-list", id: "com.zhuangjie.todo-list" },
   { dir: "resource-monitor", id: "com.zhuangjie.resource-monitor" },
+  { dir: "com.zhuangjie.app-uninstaller", id: "com.zhuangjie.app-uninstaller" },
+  { dir: "com.zhuangjie.mouse-gesture", id: "com.zhuangjie.mouse-gesture" },
 ];
 
 const pkgsDir = path.join(root, "dist", "market-pkgs");

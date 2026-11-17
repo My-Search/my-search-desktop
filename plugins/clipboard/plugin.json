@@ -1,12 +1,12 @@
 {
   "id": "com.mysearch.clipboard",
   "name": "剪贴板历史",
-  "version": "1.4.3",
+  "version": "1.5.1",
   "apiVersion": 1,
   "minAppVersion": "7.9.15",
   "author": "zhuangjie",
-  "description": "自动记录你复制过的文本与图片，按快捷键呼出即可搜索、复制、删除、收藏。收藏的条目永久保留、不会被上限淘汰或清空，还可就地编辑内容。监听在后台原生完成，不干扰系统剪贴板。",
-  "changelog": "修复列表图片缩略图在重渲染（复制/切标签/刷新）后被清回占位文字的问题：重渲染后会回填已缓存的预览图。",
+  "description": "自动记录你复制过的文本与图片，按快捷键呼出即可搜索、复制、删除、收藏、分类。收藏与已分类的条目永久保留、不会被上限淘汰或清空；「全部」标签下可按分类筛选查看，分类条目还可就地编辑内容。监听在后台原生完成，不干扰系统剪贴板。",
+  "changelog": "默认快捷键从 Ctrl+Alt+V 调整为 Ctrl+Alt+B：Ctrl+Alt+V 让给新的「贴图」功能；老用户升级后自动迁移（自定义过热键的不受影响）。",
   "repository": "https://github.com/My-Search/my-search-desktop/tree/master/plugins/clipboard",
   "icon": "icon.svg",
   "permissions": [
@@ -34,7 +34,7 @@
     "shortcut": {
       "action": "clipboard",
       "title": "剪贴板历史",
-      "defaultShortcut": "ctrl+alt+v"
+      "defaultShortcut": "ctrl+alt+b"
     }
   }
 }

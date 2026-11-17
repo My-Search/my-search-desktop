@@ -1,0 +1,7 @@
+{
+  "name": "app-uninstaller-backend",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "description": "软件卸载器插件后端（纯 Node 内置模块 + Windows PowerShell，零依赖）"
+}

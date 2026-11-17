@@ -68,3 +68,8 @@ plugins/*/.data/
 /test/_patch*.mjs
 /test/_chrome_probe*/
 /test/_diag-tags*
+
+# 其他临时/运行期产物
+.agentswork/
+docs/media/
+test/_tmp*.txt

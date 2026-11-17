@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN" class="ms-gesture-root">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
+    <title>手势</title>
+    <!-- 手势轨迹 HUD：宿主常驻隐藏的透明置顶小窗（鼠标穿透），
+         手势期间由 Rust 广播 my-search://gesture-trail 驱动画线 -->
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <style>
+      /* 必须在任何脚本前生效：整窗透明、无滚动、禁选中（HUD 不是网页） */
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+        user-select: none;
+        pointer-events: none; /* 双保险：Rust 侧已 set_ignore_cursor_events */
+      }
+      #app {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+      }
+      canvas {
+        position: absolute;
+        inset: 0;
+      }
+      .gesture-tip {
+        position: absolute;
+        transform: translate(14px, 14px);
+        padding: 4px 10px;
+        border-radius: 999px;
+        background: rgba(28, 30, 34, 0.82);
+        color: #fff;
+        font: 12px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+        white-space: nowrap;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+        display: none;
+      }
+      .gesture-tip.warn {
+        background: rgba(160, 60, 50, 0.9);
+      }
+    </style>
+  </head>
+  <body class="ms-gesture-body">
+    <div id="app">
+      <canvas id="trail"></canvas>
+      <div id="tip" class="gesture-tip"></div>
+    </div>
+    <script type="module" src="/src/gesture.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>软件卸载器</title>
+  <link rel="stylesheet" href="detail.css">
+</head>
+<body>
+  <!--
+    软件卸载器前台。列表/残留面板都由 index.js 用 innerHTML 重建，
+    因此事件全部委托在 #app 上（节点会被整体替换）。
+    颜色一律走宿主主题变量 `var(--token, 兜底)`，深浅色自动适配。
+  -->
+  <div id="app" class="un-app">
+    <header class="un-header">
+      <div class="un-title-row">
+        <h2 class="un-title">软件卸载器</h2>
+        <button id="un-refresh" class="un-btn" type="button" title="重新读取已安装软件">刷新</button>
+      </div>
+      <p id="un-stats" class="un-stats">正在读取已安装软件…</p>
+    </header>
+
+    <div class="un-toolbar">
+      <input id="un-search" class="un-search" type="search" autocomplete="off"
+             placeholder="搜索软件：名称 / 发布者 / 版本 / 安装位置…">
+      <span id="un-platform" class="un-platform"></span>
+    </div>
+
+    <!-- 过程/异常消息：正常时清空并整行隐藏 -->
+    <p id="un-status" class="un-status" hidden></p>
+
+    <div id="un-list" class="un-list"></div>
+
+    <div id="un-empty" class="un-empty" hidden>
+      <span class="un-empty-icon" aria-hidden="true">📦</span>
+      <p id="un-empty-text" class="un-empty-text">没有找到已安装软件。</p>
+    </div>
+
+    <!-- 残留扫描结果：用户勾选后清理 -->
+    <section id="un-residue" class="un-residue" hidden>
+      <header class="un-residue-head">
+        <h3 id="un-residue-title" class="un-residue-title">残留</h3>
+        <button id="un-residue-close" class="un-mini" type="button" title="关闭残留面板">关闭</button>
+      </header>
+      <div class="un-residue-tools">
+        <label class="un-check-all">
+          <input id="un-check-all" type="checkbox" checked> 全选
+        </label>
+        <span id="un-residue-meta" class="un-residue-meta"></span>
+        <span class="un-residue-gap"></span>
+        <button id="un-clean" class="un-btn un-btn-danger" type="button">清理选中</button>
+      </div>
+      <div id="un-residue-list" class="un-residue-list"></div>
+    </section>
+
+    <footer class="un-foot">
+      <span>卸载由软件自带的卸载程序完成 · 残留清理不可撤销，请逐项确认</span>
+    </footer>
+  </div>
+  <script src="index.js"></script>
+</body>
+</html>

@@ -165,6 +165,7 @@ check(
 const IN_REPO_PLUGINS = [
   "baidu-translate",
   "clipboard",
+  "com.zhuangjie.app-uninstaller",
   "com.zhuangjie.github-upload",
   "com.zhuangjie.todo-list",
   "file-search",

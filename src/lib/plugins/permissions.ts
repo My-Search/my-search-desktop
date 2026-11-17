@@ -242,6 +242,15 @@ export const PERMISSION_CATALOG: readonly PermissionSpec[] = [
     runtime: "backend",
   },
   {
+    id: "gesture.exec",
+    group: "danger",
+    title: "执行手势动作",
+    desc: "按住 Ctrl+右键拖拽画手势后，由宿主执行映射的系统动作（休眠/关机/重启/打开程序/强杀前台进程等）。授予后拖出手势即执行，请仅对可信映射保持授权",
+    risk: "critical",
+    runtime: "both",
+    revokeImpact: "手势仍会识别（HUD 有轨迹反馈），但任何动作都不会被执行",
+  },
+  {
     id: "plugin.install",
     group: "danger",
     title: "安装与更新插件",

@@ -772,6 +772,73 @@ export async function screenshotSetShortcut(shortcut: string): Promise<string> {
 }
 
 /* ============================================================
+ * 鼠标手势（宿主原生钩子 + 插件面板配置）
+ * ============================================================ */
+
+/** 读取手势功能总开关（面板展示；权威在 Rust settings.json） */
+export async function gestureGetEnabled(): Promise<boolean> {
+  if (!isTauri) return false;
+  return await invoke<boolean>("gesture_get_enabled");
+}
+
+/** 写手势功能总开关（面板开关；置位即生效） */
+export async function gestureSetEnabled(enabled: boolean): Promise<void> {
+  if (!isTauri) throw new Error("仅桌面端可用");
+  await invoke("gesture_set_enabled", { enabled });
+}
+
+/** 一条手势映射（与 Rust GestureBinding 一一对应） */
+export interface GestureBindingIpc {
+  /** 方向串（U/D/L/R 组合） */
+  pattern: string;
+  /** 动作（serde tag = "type"） */
+  action: Record<string, unknown>;
+  /** 展示名（可空） */
+  label: string | null;
+}
+
+/** 读取手势映射表（面板打开时拉取；权威在 Rust + 快照文件） */
+export async function gestureBindingsList(): Promise<GestureBindingIpc[]> {
+  if (!isTauri) return [];
+  return await invoke<GestureBindingIpc[]>("gesture_bindings_list");
+}
+
+/** 全量覆盖手势映射表（面板保存；Rust 清洗 + 落盘 + 即刻生效） */
+export async function gestureBindingsSync(bindings: GestureBindingIpc[]): Promise<void> {
+  if (!isTauri) throw new Error("仅桌面端可用");
+  await invoke("gesture_bindings_sync", { bindings });
+}
+
+/** 运行中的窗口进程（「呼出程序」动作下拉数据源；与 Rust RunningProcessDto 对应） */
+export interface RunningProcessIpc {
+  pid: number;
+  /** exe 文件名 */
+  name: string;
+  /** exe 绝对路径（持久化标识） */
+  exePath: string;
+  /** 窗口标题 */
+  title: string;
+}
+
+/** 列出当前有可见窗口的运行中进程（按 exe 路径去重） */
+export async function gestureListProcesses(): Promise<RunningProcessIpc[]> {
+  if (!isTauri) return [];
+  return await invoke<RunningProcessIpc[]>("gesture_list_processes");
+}
+
+/** 进入画手势录制模式（下一次 Ctrl+右键手势只识别不执行；结果走录制事件） */
+export async function gestureRecordStart(): Promise<void> {
+  if (!isTauri) throw new Error("仅桌面端可用");
+  await invoke("gesture_record_start");
+}
+
+/** 退出画手势录制模式 */
+export async function gestureRecordCancel(): Promise<void> {
+  if (!isTauri) throw new Error("仅桌面端可用");
+  await invoke("gesture_record_cancel");
+}
+
+/* ============================================================
  * 剪贴板历史（宿主原生监听 + 插件私有目录）
  * ============================================================ */
 
@@ -797,6 +864,8 @@ export interface ClipboardItemIpc {
   source?: string;
   /** 是否已收藏（收藏条目永久保留，不参与上限淘汰与默认清空） */
   favorite?: boolean;
+  /** 分类名（已分类条目同样永久保留；空/缺省 = 未分类） */
+  category?: string;
 }
 
 /** 列出剪贴板历史（从新到旧）。`query` 非空时由 Rust 侧先做一次文本粗筛。 */
@@ -820,13 +889,14 @@ export interface ClipboardPageIpc {
 /**
  * 分页列出剪贴板历史（从新到旧）。
  *
- * 过滤（关键词 / 仅收藏）在 Rust 侧**分页之前**完成，因此 `total` 与
- * `hasMore` 都建立在过滤后的结果集上，「全部 / 收藏 / 搜索」都能正确翻页。
+ * 过滤（关键词 / 仅收藏 / 分类）在 Rust 侧**分页之前**完成，因此 `total` 与
+ * `hasMore` 都建立在过滤后的结果集上，「全部 / 收藏 / 分类 / 搜索」都能正确翻页。
  * 浏览器调试环境返回空页。
  */
 export async function clipboardHistoryPage(opts: {
   query?: string;
   favoriteOnly?: boolean;
+  category?: string;
   offset?: number;
   limit?: number;
 }): Promise<ClipboardPageIpc> {
@@ -835,6 +905,7 @@ export async function clipboardHistoryPage(opts: {
   return await invoke<ClipboardPageIpc>("clipboard_history_page", {
     query: opts.query && opts.query.trim() ? String(opts.query) : null,
     favoriteOnly: !!opts.favoriteOnly,
+    category: opts.category && opts.category.trim() ? String(opts.category) : null,
     offset: Math.max(0, Math.floor(Number(opts.offset) || 0)),
     limit: Math.max(1, Math.floor(Number(opts.limit) || 30)),
   });
@@ -873,6 +944,24 @@ export async function clipboardHistorySetFavorite(id: string, favorite: boolean)
   await invoke("clipboard_history_set_favorite", {
     id: String(id ?? ""),
     favorite: !!favorite,
+  });
+}
+
+/**
+ * 设置 / 清除一条剪贴板历史的分类（空串 = 取消分类）。
+ *
+ * 分类后的条目与收藏同等待遇：不参与上限淘汰，默认清空也保留；
+ * 落盘后宿主广播 `clipboard-updated`，打开中的视图自动刷新。
+ */
+export async function clipboardHistorySetCategory(
+  id: string,
+  category: string | null,
+): Promise<void> {
+  if (!isTauri) return;
+  const cat = category == null ? "" : String(category).trim();
+  await invoke("clipboard_history_set_category", {
+    id: String(id ?? ""),
+    category: cat ? cat : null,
   });
 }
 

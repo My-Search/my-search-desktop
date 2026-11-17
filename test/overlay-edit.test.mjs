@@ -90,10 +90,19 @@ const ok = (cond, name, extra = "") => {
   const pb = strokeBounds(pen);
   ok(pb.x === 100 && pb.y === 100 && pb.w === 20 && pb.h === 30, "画笔包围盒 = 路径极值", JSON.stringify(pb));
 
-  // 文字：按字号与字数估算
+  // 文字：高度 = 字号 × 1.3（textBaseline="top" 的字形墨迹含降部 + 输入框视觉高）；
+  // 宽度在无 DOM 的单测环境走估算：CJK/全角 1.0em、ASCII 0.55em（浏览器里是
+  // measureText 实测，与 fillText 渲染严格一致——旧版一律 0.8em 会把中文宽度
+  // 低估 20%，点文字右端落空 → 文字工具误判为空白处又开一条新输入框叠上去）。
   const text = { id: 3, kind: "text", x: 10, y: 20, w: 0, h: 0, text: "abcd", fontSize: 20, color: "#f00", lineWidth: 3 };
   const tb = strokeBounds(text);
-  ok(tb.x === 10 && tb.y === 20 && tb.h === 20 && tb.w > 0, "文字包围盒高度 = 字号", JSON.stringify(tb));
+  ok(tb.x === 10 && tb.y === 20 && tb.h === 26 && tb.w === 44, "文字包围盒：ASCII 0.55em、高 1.3em", JSON.stringify(tb));
+  const cn = { id: 4, kind: "text", x: 0, y: 0, w: 0, h: 0, text: "中文", fontSize: 20, color: "#f00", lineWidth: 3 };
+  const cb = strokeBounds(cn);
+  ok(cb.w === 40, "中文按 1.0em 估宽（旧 0.8em 低估 → 点右端落空）", JSON.stringify(cb));
+  // 旧包围盒（2 × 20 × 0.8 + 容差 4 = 36）下点 x=38 会落空；新包围盒（40 + 4 = 44）命中
+  ok(hitStroke(cn, 38, 10) === true, "点中文文字右端（旧包围盒之外）→ 命中");
+  ok(hitStroke(cn, 45, 10) === false, "文字右侧空白 → 不命中");
 }
 
 /* ============ 5. 命中测试（含容差） ============ */
@@ -123,6 +132,41 @@ const ok = (cond, name, extra = "") => {
   ok(pick(100, 100) === 2, "重叠处选中最上层（后画的）", String(pick(100, 100)));
   ok(pick(10, 10) === 1, "只被下层覆盖处选中下层", String(pick(10, 10)));
   ok(pick(500, 500) === null, "空白处不选中任何标注");
+}
+
+/* ============ 6b. pickTextStroke：文字优先于框线、被马赛克盖住时不穿透 ============ */
+{
+  // pickTextStroke 依赖模块内部状态，这里按同样规则复刻语义做纯函数级验证。
+  const strokes = [
+    { id: 1, kind: "text", x: 0, y: 0, w: 0, h: 0, text: "甲乙", fontSize: 20, color: "#f00", lineWidth: 3 },
+    { id: 2, kind: "rect", x: -20, y: -20, w: 120, h: 80, color: "#0f0", lineWidth: 3 },
+    { id: 3, kind: "text", x: 200, y: 0, w: 0, h: 0, text: "丙", fontSize: 20, color: "#f00", lineWidth: 3 },
+    { id: 4, kind: "mosaic", x: 190, y: -10, w: 80, h: 60, color: "#000", lineWidth: 3 },
+  ];
+  const hitOf = (s, x, y, tol = 4) => {
+    const b = strokeBounds(s);
+    const pad = Math.max(tol, s.lineWidth);
+    return x >= b.x - pad && x <= b.x + b.w + pad && y >= b.y - pad && y <= b.y + b.h + pad;
+  };
+  const pickText = (x, y) => {
+    let ti = -1;
+    for (let i = strokes.length - 1; i >= 0; i--) {
+      if (strokes[i].kind === "text" && hitOf(strokes[i], x, y)) { ti = i; break; }
+    }
+    if (ti < 0) return null;
+    for (let i = strokes.length - 1; i > ti; i--) {
+      if ((strokes[i].kind === "mosaic" || strokes[i].kind === "blur") && hitOf(strokes[i], x, y)) return null;
+    }
+    return strokes[ti];
+  };
+  // 文字被后画的矩形框住：点框内文字 → 命中的是**文字**（旧 pickStroke 会命中矩形）
+  ok(pickText(10, 10)?.id === 1, "框内点文字 → 编辑文字而不是框线", String(pickText(10, 10)?.id));
+  // 上方无任何笔盖住的文字 → 正常命中
+  ok(pickText(5, 5)?.id === 1, "裸文字 → 直接命中");
+  // 文字上方有不透明笔（马赛克）：视觉上字已被涂掉 → 当空白处（开新输入）
+  ok(pickText(205, 10) === null, "被马赛克盖住的文字 → 不命中（不隔涂鸦编辑）");
+  // 空白处 → null
+  ok(pickText(400, 400) === null, "空白处 → null（开新输入）");
 }
 
 console.log("");

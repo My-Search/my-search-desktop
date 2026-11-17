@@ -195,7 +195,8 @@ fn capture_virtual_screen() -> Result<(i32, i32, u32, u32, Vec<u8>), String> {
 }
 
 /// 读显示器列表（含物理矩形与缩放），供遮罩选址与抓屏裁切。
-fn list_monitors(app: &tauri::AppHandle) -> Vec<MonitorRect> {
+/// 列出所有显示器的物理矩形（供贴图按光标定位窗口）
+pub(crate) fn list_monitors(app: &tauri::AppHandle) -> Vec<MonitorRect> {
     let primary = app.primary_monitor().ok().flatten();
     let primary_name = primary.as_ref().and_then(|m| m.name().map(|s| s.to_string()));
     let mut out: Vec<MonitorRect> = app

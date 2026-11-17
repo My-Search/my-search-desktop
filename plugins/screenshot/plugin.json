@@ -1,11 +1,12 @@
 {
   "id": "com.zhuangjie.screenshot",
   "name": "截图",
-  "version": "1.3.1",
+  "version": "1.4.0",
   "apiVersion": 1,
   "minAppVersion": "7.9.15",
   "author": "zhuangjie",
-  "description": "全局快捷键截图：框选区域、标注后复制到剪贴板，并在前台查看最近 7 天的截图",
+  "description": "全局快捷键截图：框选区域、标注后复制到剪贴板，并可把剪贴板图片贴在屏幕上，前台查看最近 7 天的截图",
+  "changelog": "新增「贴图」：把剪贴板里的图片钉在屏幕上（默认 Ctrl+Alt+V，可贴多张）；双击贴图关闭，右键贴图可显示编辑工具 / 关闭 / 复制。",
   "homepage": "https://github.com/zhuangjie/screenshot",
   "repository": "https://github.com/My-Search/my-search-desktop/tree/master/plugins/screenshot",
   "icon": "icon.svg",
@@ -13,6 +14,7 @@
     "ui.inlay",
     "ui.notify",
     "store",
+    "clipboard.read",
     "clipboard.write",
     "screenshot.capture",
     "screenshot.overlay",
@@ -25,7 +27,7 @@
   "contributes": {
     "searchItem": {
       "title": "截图",
-      "desc": "按快捷键框选截图、标注后复制；查看最近 7 天的截图",
+      "desc": "按快捷键框选截图、标注后复制；把剪贴板图片贴在屏幕上；查看最近 7 天的截图",
       "keyword": "截图",
       "icon": "icon.svg",
       "subSearch": false
@@ -37,11 +39,18 @@
       "closeBehavior": "exit",
       "theme": "inherit"
     },
-    "shortcut": {
-      "action": "screenshot",
-      "title": "截图（框选 + 标注）",
-      "defaultShortcut": "ctrl+alt+x"
-    }
+    "shortcut": [
+      {
+        "action": "screenshot",
+        "title": "截图（框选 + 标注）",
+        "defaultShortcut": "ctrl+alt+x"
+      },
+      {
+        "action": "pin",
+        "title": "贴图（钉住剪贴板图片）",
+        "defaultShortcut": "ctrl+alt+v"
+      }
+    ]
   },
   "backend": {
     "entry": "backend/run.cmd",

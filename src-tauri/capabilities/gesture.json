@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "gesture",
+  "description": "鼠标手势轨迹 HUD：常驻隐藏透明窗口（鼠标穿透），手势期间画轨迹与动作反馈；只需事件监听与自隐藏权限，不授予任何插件/网络/存储权限",
+  "windows": ["gesture-*"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-hide",
+    "core:window:allow-scale-factor",
+    "core:event:default"
+  ]
+}

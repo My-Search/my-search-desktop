@@ -29,8 +29,10 @@ import {
   endStroke,
   commitText,
   beginEditText,
+  closeTextInput,
   textFontSize,
   pickStroke,
+  pickTextStroke,
   selectStroke,
   beginStrokeMove,
   updateStrokeMove,
@@ -39,6 +41,7 @@ import {
   updateStrokeResize,
   endStrokeResize,
   strokeBounds,
+  drawStroke,
   beginSelEdit,
   updateSelEdit,
   endSelEdit,
@@ -53,7 +56,9 @@ import {
   mutableState,
   type ResizeCorner,
   type Stroke,
-} from "./useOverlay";
+  type Tool,
+} from "./useOverlay.ts";
+import MarkerToolbar from "../../components/MarkerToolbar.vue";
 
 const st = mutableState();
 
@@ -297,358 +302,24 @@ function drawStrokes(): void {
   const ox = s ? Math.min(s.x, s.x + s.w) : 0;
   const oy = s ? Math.min(s.y, s.y + s.h) : 0;
   ctx.translate(-ox, -oy);
-  for (const stroke of st.strokes) drawStroke(ctx, stroke);
+  // 编辑中的原文字**不画**：输入框里就是它的内容（beginEditText 预填原文），
+  // 画布上仍画着会与输入框叠出重影（用户反馈：编辑时原来贴上的还在）。
+  // hiddenTextId 由 beginEditText 置位、closeTextInput（提交/取消）复位。
+  const hiddenTextId = st.hiddenTextId;
+  // 绘制引擎在 src/lib/annotation.ts（与贴图窗口共用同一份渲染逻辑）
+  const env = { scale: view.scale, originX: ox, originY: oy, base: baseCanvasRef.value };
+  for (const stroke of st.strokes) {
+    if (hiddenTextId != null && stroke.id === hiddenTextId) continue;
+    drawStroke(ctx, stroke, env);
+  }
   // 正在画的那一笔也画上：拖动过程中就能看到，而不是松手才出现。
   // 它用的是同一个 drawStroke，所以「拖动时看到的」与「松手后的」必然一致。
-  if (st.activeStroke) drawStroke(ctx, st.activeStroke);
+  if (st.activeStroke) drawStroke(ctx, st.activeStroke, env);
   ctx.restore();
-}
-
-function drawStroke(ctx: CanvasRenderingContext2D, s: Stroke): void {
-  ctx.strokeStyle = s.color;
-  ctx.fillStyle = s.color;
-  ctx.lineWidth = s.lineWidth;
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  switch (s.kind) {
-    case "rect": {
-      // 拖动中 w/h 可能为负：strokeRect 能画负宽高，但这里统一成正矩形，
-      // 让「拖动中」与「松手后」（endStroke 会规整）渲染完全一致。
-      const x0 = Math.min(s.x, s.x + s.w);
-      const y0 = Math.min(s.y, s.y + s.h);
-      ctx.strokeRect(x0, y0, Math.abs(s.w), Math.abs(s.h));
-      break;
-    }
-    case "ellipse": {
-      const x0 = Math.min(s.x, s.x + s.w);
-      const y0 = Math.min(s.y, s.y + s.h);
-      ctx.beginPath();
-      ctx.ellipse(
-        x0 + Math.abs(s.w) / 2,
-        y0 + Math.abs(s.h) / 2,
-        Math.abs(s.w) / 2,
-        Math.abs(s.h) / 2,
-        0,
-        0,
-        Math.PI * 2
-      );
-      ctx.stroke();
-      break;
-    }
-    case "arrow": {
-      const x1 = s.x, y1 = s.y, x2 = s.x + s.w, y2 = s.y + s.h;
-      const angle = Math.atan2(y2 - y1, x2 - x1);
-      const head = Math.max(10, s.lineWidth * 4);
-      // 箭杆收笔处往回缩一个线宽：lineCap=round 的圆头如果正好落在箭尖上，
-      // 会在尖端鼓出一个直径=线宽的圆点。回缩后整颗圆头恰好与三角两侧相切、
-      // 完全被头部盖住，尖端恢复尖锐；尾端的圆头不受影响（仍在起点）。
-      const back = Math.min(s.lineWidth, Math.hypot(s.w, s.h) / 2);
-      ctx.beginPath();
-      ctx.moveTo(x1, y1);
-      ctx.lineTo(x2 - back * Math.cos(angle), y2 - back * Math.sin(angle));
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.moveTo(x2, y2);
-      ctx.lineTo(x2 - head * Math.cos(angle - Math.PI / 6), y2 - head * Math.sin(angle - Math.PI / 6));
-      ctx.lineTo(x2 - head * Math.cos(angle + Math.PI / 6), y2 - head * Math.sin(angle + Math.PI / 6));
-      ctx.closePath();
-      ctx.fill();
-      break;
-    }
-    case "pen": {
-      const pts = s.points ?? [];
-      if (pts.length < 2) break;
-      ctx.beginPath();
-      ctx.moveTo(s.x + pts[0].x, s.y + pts[0].y);
-      for (let i = 1; i < pts.length; i++) ctx.lineTo(s.x + pts[i].x, s.y + pts[i].y);
-      ctx.stroke();
-      break;
-    }
-    case "text": {
-      // 基线在 y + 字号处，因此文字**顶边**就落在点击位置 —— 与输入框的位置一致，
-      // 不会出现「框在这、字画到别处」。
-      const fs = s.fontSize ?? 16;
-      ctx.font = `${fs}px sans-serif`;
-      ctx.textBaseline = "top";
-      ctx.fillText(s.text ?? "", s.x, s.y);
-      break;
-    }
-    case "mosaic":
-      drawMosaic(ctx, s);
-      break;
-    case "blur":
-      drawBlur(ctx, s);
-      break;
-  }
-}
-
-/** 马赛克取样缓存：笔对象 → 格子颜色（key 变了才重算）。 */
-const mosaicCache = new WeakMap<Stroke, { key: string; colors: string[] }>();
-
-/**
- * 一次性读回一块区域，按格取样点算出全部格子颜色。
- * 替代原先「每格一次 getImageData」——那是上千次同步 GPU 读回，改范围时
- * 每个 mousemove 都来一遍，就是「范围改变卡顿」的主因。
- */
-function sampleMosaicColors(
-  bctx: CanvasRenderingContext2D,
-  base: HTMLCanvasElement,
-  x0: number,
-  y0: number,
-  w: number,
-  h: number,
-  cell: number,
-  ox: number,
-  oy: number
-): string[] {
-  const pts: number[] = [];
-  let minX = 0;
-  let minY = 0;
-  let maxX = 0;
-  let maxY = 0;
-  let n = 0;
-  for (let yy = y0; yy < y0 + h; yy += cell) {
-    for (let xx = x0; xx < x0 + w; xx += cell) {
-      const px = Math.min(base.width - 1, Math.max(0, Math.round((xx - ox + cell / 2) * view.scale)));
-      const py = Math.min(base.height - 1, Math.max(0, Math.round((yy - oy + cell / 2) * view.scale)));
-      if (n === 0) {
-        minX = maxX = px;
-        minY = maxY = py;
-      } else {
-        if (px < minX) minX = px;
-        if (px > maxX) maxX = px;
-        if (py < minY) minY = py;
-        if (py > maxY) maxY = py;
-      }
-      pts.push(px, py);
-      n++;
-    }
-  }
-  if (n === 0) return [];
-  const rw = maxX - minX + 1;
-  const rh = maxY - minY + 1;
-  const data = bctx.getImageData(minX, minY, rw, rh).data;
-  const colors: string[] = new Array(n);
-  for (let i = 0; i < n; i++) {
-    const o = ((pts[2 * i + 1] - minY) * rw + (pts[2 * i] - minX)) * 4;
-    colors[i] = `rgb(${data[o]},${data[o + 1]},${data[o + 2]})`;
-  }
-  return colors;
-}
-
-/**
- * 马赛克：取选区底图像素打散成色块。
- *
- * 底图是**冻结帧**：同一格子的颜色整场不变，所以按笔缓存——拖动范围全程
- * 命中缓存零读回；只有笔自身（位置/大小/格距）变了才重算，且重算也是
- * 「一次区域读回」而不是「每格一次」。
- *
- * 底图是「选区裁片」，原点在选区左上角；而 s.x/s.y 是**窗口**坐标，
- * 采样前必须减掉选区原点，否则取到的是裁片另一处（选区离屏幕左上角越远
- * 偏得越多），表现为「马赛克打出来的是别处的内容」。
- */
-function drawMosaic(ctx: CanvasRenderingContext2D, s: Stroke): void {
-  const base = baseCanvasRef.value;
-  if (!base) return;
-  const bctx = base.getContext("2d");
-  if (!bctx) return;
-  const sel = st.sel;
-  const ox = sel ? Math.min(sel.x, sel.x + sel.w) : 0;
-  const oy = sel ? Math.min(sel.y, sel.y + sel.h) : 0;
-  // 拖动过程中 w/h 可能是负的（还没松手、没被规整），先取正矩形再铺格子，
-  // 否则循环一次都不执行，马赛克要等松手才出现（「实时看到效果」的又一处）。
-  const x0 = Math.min(s.x, s.x + s.w);
-  const y0 = Math.min(s.y, s.y + s.h);
-  const w = Math.abs(s.w);
-  const h = Math.abs(s.h);
-  const cell = Math.max(6, s.lineWidth * 4);
-  // 缓存键只含**笔的窗口坐标**（拖动选区时笔不动，选区原点虽变，但冻结帧
-  // 里「该窗口坐标下的像素」是同一处——键不含原点，拖动全程命中）。
-  const key = `${x0},${y0},${w},${h},${cell},${view.scale}`;
-  let entry = mosaicCache.get(s);
-  if (!entry || entry.key !== key) {
-    entry = { key, colors: sampleMosaicColors(bctx, base, x0, y0, w, h, cell, ox, oy) };
-    mosaicCache.set(s, entry);
-  }
-  const colors = entry.colors;
-  let i = 0;
-  for (let yy = y0; yy < y0 + h; yy += cell) {
-    for (let xx = x0; xx < x0 + w; xx += cell, i++) {
-      ctx.fillStyle = colors[i] ?? "#000";
-      ctx.fillRect(xx, yy, cell, cell);
-    }
-  }
-}
-
-/* ---------------- 模糊（自由涂抹） ---------------- */
-
-/**
- * 模糊笔的渲染缓存：笔对象 → 已经糊好的那张「蒙版裁片」画布。
- * key 含轨迹 + 半径 + 缩放，笔自身变了才重算。
- */
-const blurCache = new WeakMap<
-  Stroke,
-  { key: string; canvas: HTMLCanvasElement; px0: number; py0: number }
->();
-
-/** 模糊半径：随线宽走（默认 3 → 6px）。刷子越粗，糊得越狠。 */
-function blurRadius(lineWidth: number): number {
-  return Math.max(6, lineWidth * 2);
-}
-
-/**
- * 模糊**刷子**的宽度（CSS 像素）：刻意做得比普通画笔粗很多——
- * 用户要的是「大画笔一抹就糊一片」，而不是像铅笔那样只糊一条细线。
- * 默认线宽 3 时刷宽 = 36px（≈ 12 倍），最大线宽 20 时到 240px。
- */
-function blurBrushWidth(lineWidth: number): number {
-  return Math.max(28, lineWidth * 12);
-}
-
-/**
- * 模糊：像大画笔一样把**涂过的地方**糊掉。
- *
- * 做法是「蒙版 + 一次区域高斯模糊」，而不是 `ctx.filter`：
- * 先把轨迹描成一张**只在笔迹处不透明**的蒙版，再对「底图整块」做模糊，
- * 用 destination-in 把模糊结果裁进蒙版里，最后贴回主画布。这样：
- *   - 只有涂过的地方糊，其余一动不动（不会误伤旁边的内容）；
- *   - 模糊源是**冻结底图**（拍下来那帧），所以糊的永远是原始画面，
- *     不会出现「反复糊同一处越糊越花」的累积效应。
- *
- * 与马赛克同源地做缓存：底图是冻结帧，同一笔的模糊结果整场不变；
- * 拖选区/改范围时命中缓存零重算——否则每个 mousemove 都全场模糊一次会卡。
- */
-function drawBlur(ctx: CanvasRenderingContext2D, s: Stroke): void {
-  const base = baseCanvasRef.value;
-  if (!base) return;
-  const pts = s.points ?? [];
-  if (pts.length < 1) return;
-  const sf = view.scale;
-  const r = blurRadius(s.lineWidth);
-  const brush = blurBrushWidth(s.lineWidth);
-  // 键：轨迹点 + 线宽（决定刷子粗细）+ 半径 + 缩放。底图未变时同键必同图。
-  const key = `${s.x},${s.y},${s.lineWidth},${r},${sf}|${pts.map((p) => `${p.x},${p.y}`).join(";")}`;
-  let entry = blurCache.get(s);
-  if (!entry || entry.key !== key) {
-    const rendered = renderBlurPatch(base, s, pts, r, brush, sf);
-    entry = { key, canvas: rendered.canvas, px0: rendered.px0, py0: rendered.py0 };
-    blurCache.set(s, entry);
-  }
-  // 贴回主画布。
-  //
-  // 关键：此刻 ctx 已被 scale(sf) + translate(-ox,-oy) 变换过（见 drawStrokes），
-  // 而 entry.canvas 是**物理像素**尺寸的裁片。若直接 drawImage(canvas, cssX, cssY)，
-  // 裁片会被再乘一次 sf（又放大又跑位），正是「模糊涂抹与真实效果不一致、位置偏移」
-  // 的根因。所以这里先把变换复位到设备空间，按裁片的**真实设备像素原点** 1:1 贴上去
-  // （用 renderBlurPatch 里算出的 px0/py0，而不是再乘一次 sf，避免取整差 1px）。
-  ctx.save();
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.drawImage(entry.canvas, entry.px0, entry.py0);
-  ctx.restore();
-}
-
-/**
- * 生成一张「只含模糊笔迹」的裁片（物理像素），并返回它在底图里的设备像素原点。
- *
- * 裁片只覆盖笔迹包围盒 + 一圈「刷子半宽 + 半径」余量，不必整屏——涂抹一小块却要
- * 模糊整张全屏画布的话，每次重算都是全幅 drawImage，那才是性能杀手。
- */
-function renderBlurPatch(
-  base: HTMLCanvasElement,
-  s: Stroke,
-  pts: Array<{ x: number; y: number }>,
-  r: number,
-  brush: number,
-  sf: number
-): { canvas: HTMLCanvasElement; px0: number; py0: number } {
-  // 轨迹包围盒（相对 s.x,s.y），再外扩「刷子半宽 + 模糊半径」
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const p of pts) {
-    if (p.x < minX) minX = p.x;
-    if (p.y < minY) minY = p.y;
-    if (p.x > maxX) maxX = p.x;
-    if (p.y > maxY) maxY = p.y;
-  }
-  const pad = brush / 2 + r;
-  // 物理像素下的裁剪矩形（对齐底图：窗口坐标 − 选区原点 → ×sf；原点已在
-  // base 画布内部，这里直接用相对底图坐标）
-  const sel = st.sel;
-  const ox = sel ? Math.min(sel.x, sel.x + sel.w) : 0;
-  const oy = sel ? Math.min(sel.y, sel.y + sel.h) : 0;
-  const relX = s.x + minX - pad - ox;
-  const relY = s.y + minY - pad - oy;
-  const wCss = maxX - minX + pad * 2;
-  const hCss = maxY - minY + pad * 2;
-  const px0 = Math.max(0, Math.floor(relX * sf));
-  const py0 = Math.max(0, Math.floor(relY * sf));
-  const pw = Math.max(1, Math.min(base.width - px0, Math.ceil(wCss * sf)));
-  const ph = Math.max(1, Math.min(base.height - py0, Math.ceil(hCss * sf)));
-
-  const out = document.createElement("canvas");
-  out.width = pw;
-  out.height = ph;
-  const octx = out.getContext("2d");
-  if (!octx) return { canvas: out, px0, py0 };
-
-  // 1) 模糊底图对应区域：优先 ctx.filter（真高斯），不支持则用降采样近似
-  const canFilter = typeof octx.filter === "string";
-  if (canFilter) {
-    octx.filter = `blur(${(r * sf).toFixed(2)}px)`;
-    // 模糊会向外扩散，源区域要外扩一个半径，否则边缘发虚/露白边
-    const ex = Math.round(r * sf);
-    const sx0 = Math.max(0, px0 - ex);
-    const sy0 = Math.max(0, py0 - ex);
-    const ex1 = Math.min(base.width, px0 + pw + ex);
-    const ey1 = Math.min(base.height, py0 + ph + ex);
-    octx.drawImage(base, sx0, sy0, ex1 - sx0, ey1 - sy0, sx0 - px0, sy0 - py0, ex1 - sx0, ey1 - sy0);
-    octx.filter = "none";
-  } else {
-    // 近似：缩小 → 放大（双线性插值自带的低通），等效一次粗模糊
-    const k = Math.max(2, Math.round((r * sf) / 2));
-    const tmp = document.createElement("canvas");
-    tmp.width = Math.max(1, Math.round(pw / k));
-    tmp.height = Math.max(1, Math.round(ph / k));
-    const tctx = tmp.getContext("2d");
-    if (tctx) {
-      tctx.imageSmoothingEnabled = true;
-      tctx.drawImage(base, px0, py0, pw, ph, 0, 0, tmp.width, tmp.height);
-      octx.imageSmoothingEnabled = true;
-      octx.drawImage(tmp, 0, 0, tmp.width, tmp.height, 0, 0, pw, ph);
-    } else {
-      octx.drawImage(base, px0, py0, pw, ph, 0, 0, pw, ph);
-    }
-  }
-
-  // 2) 蒙版：把轨迹描成一条**粗线**（刷子），只在笔迹处保留模糊结果
-  const mask = document.createElement("canvas");
-  mask.width = pw;
-  mask.height = ph;
-  const mctx = mask.getContext("2d");
-  if (!mctx) return { canvas: out, px0, py0 };
-  mctx.strokeStyle = "#fff";
-  mctx.fillStyle = "#fff";
-  mctx.lineWidth = Math.max(1, brush * sf);
-  mctx.lineCap = "round";
-  mctx.lineJoin = "round";
-  const mx = (i: number) => (s.x + pts[i].x - ox) * sf - px0;
-  const my = (i: number) => (s.y + pts[i].y - oy) * sf - py0;
-  if (pts.length === 1) {
-    mctx.beginPath();
-    mctx.arc(mx(0), my(0), Math.max(1, (brush * sf) / 2), 0, Math.PI * 2);
-    mctx.fill();
-  } else {
-    mctx.beginPath();
-    mctx.moveTo(mx(0), my(0));
-    for (let i = 1; i < pts.length; i++) mctx.lineTo(mx(i), my(i));
-    mctx.stroke();
-  }
-  octx.globalCompositeOperation = "destination-in";
-  octx.drawImage(mask, 0, 0);
-  octx.globalCompositeOperation = "source-over";
-  return { canvas: out, px0, py0 };
 }
 
 /* ---------------- 标注交互 ---------------- */
+
 let drawing = false;
 /** 本次按下是否在「移动已有标注」（决定 mouseup 时走哪条收尾逻辑） */
 let movingStroke = false;
@@ -664,6 +335,11 @@ let resizingStroke = false;
  *
  * 注意必须只有一个入口：先前把「移动选区」单独绑到另一个 handler 上，结果工具
  * 不是「选择」时那次 mousedown 谁也没接（画不出任何东西）——测试立刻抓到了。
+ *
+ * 文字标注的新交互（用户需求）：**单击拖动移位、双击才编辑**。
+ *   - 文字工具下点在已有文字上 → 不再直接开编辑框，而是选中并开始拖动；
+ *     真正的编辑入口收敛为「双击文字」与「✎T 按钮」（见 onCanvasDblClick）。
+ *   - 命中判断用 pickTextStroke（文字优先于框线），与双击编辑同一条规则。
  */
 function selMouseDown(e: MouseEvent): void {
   if (!st.active) return;
@@ -692,6 +368,19 @@ function selMouseDown(e: MouseEvent): void {
     );
     drawStrokes();
     return;
+  }
+  if (st.tool === "text") {
+    // 文字工具点在**已有文字**上 → 拖动移位（不是编辑）。空白处才开新输入框。
+    // 命中用 pickTextStroke（文字优先）：文字被矩形框住时，点框内文字拖的是字
+    // 而不是被框的包围盒抢走（与双击编辑同一条规则）。
+    const textHit = pickTextStroke(e.clientX, e.clientY);
+    if (textHit) {
+      movingStroke = beginStrokeMove(textHit.id, e.clientX, e.clientY);
+      if (movingStroke) {
+        drawStrokes();
+        return;
+      }
+    }
   }
   drawing = true;
   beginStroke(e.clientX, e.clientY);
@@ -741,8 +430,10 @@ function onWinMouseMove(e: MouseEvent): void {
   updateSelCursor(e);
 }
 
+/* ---------------- 标注交互 ---------------- */
+
 /**
- * 拖动选区的渲染合并到每帧一次。
+ * 调整选区的渲染合并到每帧一次。
  * 鼠标 move 事件远多于屏幕刷新率；拖动期间所有事件都只排一个 rAF，
  * 帧回调里用「当时的最新选区」渲染一次——高频拖动不再逐事件全量重绘。
  */
@@ -868,17 +559,16 @@ function handleMouseDown(e: MouseEvent, dir: (typeof HANDLES)[number]): void {
 }
 
 /**
- * 文字取消标记：Esc 主动放弃时置位，防止随后那次 blur 又把它提交上去。
- * （Esc 会关掉输入框 → 触发 blur → 若不加守卫就变成「取消反而落笔」。）
+ * （旧版这里有个 textCanceled 布尔守卫，已删——它是真实回归的来源：
+ * Esc 关掉输入框后 Vue 卸载了 <input>，随后的 blur 事件不再发生，守卫标记
+ * 无人消费，残留到下一次编辑会话，把下一次的正常提交吞掉（onCommitText
+ * 直接 return，hiddenTextId 都没复位，画布上原文字一直隐藏）。
+ * closeTextInput 已把 showTextInput=false、draft 清空：卸载触发的那次 blur
+ * 走 onCommitText 会被 `!st.showTextInput` 拦下，双保险本来就在。）
+ *
+ * 确认文字标注（回车或**失去焦点**）：入栈后立刻重绘。
  */
-let textCanceled = false;
-
-/** 确认文字标注（回车或**失去焦点**）：入栈后立刻重绘。 */
 function onCommitText(): void {
-  if (textCanceled) {
-    textCanceled = false;
-    return;
-  }
   if (!st.showTextInput) return;
   commitText(st.textDraft);
   drawStrokes();
@@ -886,11 +576,11 @@ function onCommitText(): void {
 
 /** Esc 取消文字输入（不落笔）。 */
 function cancelText(): void {
-  textCanceled = true;
-  st.showTextInput = false;
-  st.textDraft = "";
-  st.textPos = null;
-  st.editingTextId = null;
+  // closeTextInput 复位全部文字输入状态（含 hiddenTextId）：编辑中取消时
+  // 原文会原样恢复显示——必须跟着重绘一次，否则画布上还停在「已隐藏」。
+  // （卸载 <input> 触发的那次 blur 由 `!st.showTextInput` 拦下，不会误提交。）
+  closeTextInput();
+  drawStrokes();
 }
 
 /** 选中文字标注后点「编辑文字」：重开输入框、填入原文，提交时替换该条。 */
@@ -901,11 +591,24 @@ function onEditText(): void {
   drawStrokes();
 }
 
-/** 双击画布上的文字标注 → 直接进入编辑。 */
+/** 双击画布上的文字标注 → 直接进入编辑。
+ *
+ * 交互约定（用户需求）：文字**单击拖动移位、双击才编辑**——单击在文字上现在
+ * 是「选中并开始拖动」（selMouseDown 文字分支），编辑入口只有：
+ *   1. 双击文字（本函数）；
+ *   2. 选中后点工具条的「✎T」按钮。
+ *
+ * 命中用 pickTextStroke（文字优先）：文字被矩形框住时，双击框内文字应编辑文字
+ * 而不是被矩形的包围盒抢走（与单击拖动同一条规则）。
+ */
 function onCanvasDblClick(e: MouseEvent): void {
   if (!st.active) return;
-  const hit = pickStroke(e.clientX, e.clientY);
-  if (hit && hit.kind === "text") onEditText();
+  if (st.showTextInput) return; // 输入框开着时双击属于输入框内部交互，别抢
+  const hit = pickTextStroke(e.clientX, e.clientY);
+  if (hit) {
+    beginEditText(hit.id);
+    drawStrokes();
+  }
 }
 
 /* ---------------- 完成 / 取消 ---------------- */
@@ -1229,6 +932,11 @@ onBeforeUnmount(() => {
 });
 
 /* ---------------- 工具配置 ---------------- */
+/**
+ * 工具条改为共享组件 MarkerToolbar.vue（截图与贴图同一套 UI，用户需求：
+ * 贴图显示工具栏应跟截图时一样）。TOOLS/COLORS 与回调经 props/emit 传入，
+ * 这里只保留「切工具前先提交文字」的截图特有收尾。
+ */
 const TOOLS = [
   { id: "select", icon: "➤", label: "选择" },
   { id: "rect", icon: "▭", label: "矩形" },
@@ -1248,6 +956,22 @@ const COLORS = ["#ff5555", "#ffaa00", "#33cc55", "#3399ff", "#ffffff", "#000000"
 function onPickTool(id: (typeof TOOLS)[number]["id"]): void {
   if (st.showTextInput && st.tool === "text") onCommitText();
   setTool(id);
+  drawStrokes();
+}
+
+/** 工具条回调：改色可能作用在已选中的那一笔上，必须立刻重绘 */
+function onPickColor(c: string): void {
+  setColor(c);
+  drawStrokes();
+}
+
+/** 工具条回调：撤销 / 重做后立刻重绘 */
+function onUndo(): void {
+  undo();
+  drawStrokes();
+}
+function onRedo(): void {
+  redo();
   drawStrokes();
 }
 
@@ -1429,7 +1153,7 @@ function handleStyle(dir: (typeof HANDLES)[number]): Record<string, string> {
       ></div>
 
       <div class="ov-tip" :style="{ left: st.sel.x + 'px', top: st.sel.y + st.sel.h + 6 + 'px' }">
-        拖拽标注 · 拖边缘可改范围 · 点标注可移动/改色 ·「复制」或「保存」（保存会弹出另存为对话框）
+        拖标注移动 · 拖边缘改范围 · 双击文字编辑 ·「复制」或「保存」（保存会弹出另存为对话框）
       </div>
 
       <!--
@@ -1458,40 +1182,40 @@ function handleStyle(dir: (typeof HANDLES)[number]): Record<string, string> {
         />
       </div>
 
-      <div class="ov-toolbar" @mousedown.stop>
-        <button v-for="t in TOOLS" :key="t.id" class="ov-tool" :class="{ on: st.tool === t.id }" :title="t.label" @click="onPickTool(t.id)">
-          {{ t.icon }}
-        </button>
-        <span class="ov-sep"></span>
-        <!-- 改色可能作用在**已选中的那一笔**上，必须立刻重绘，否则要等下一次交互才变色 -->
-        <button v-for="c in COLORS" :key="c" class="ov-color" :class="{ on: st.color === c }" :style="{ background: c }" @click="setColor(c); drawStrokes()" />
-        <span class="ov-sep"></span>
-        <!-- 粗细：未选中改「下一笔」，选中时同时改这一笔（文字同步字号）。加个「A」提示它也是字号。 -->
-        <button class="ov-tool ov-w" title="细一点（字号也变小）" @click="bumpLineWidth(-2)">−</button>
-        <span class="ov-wval" :title="'当前粗细 ' + st.lineWidth">{{ st.lineWidth }}</span>
-        <button class="ov-tool ov-w" title="粗一点（字号也变大）" @click="bumpLineWidth(2)">＋</button>
-        <span class="ov-sep"></span>
-        <!-- 选中文字标注时才出现：重新编辑它的内容 -->
-        <button v-if="selectedIsText" class="ov-tool" title="编辑文字" @click="onEditText()">✎T</button>
-        <span class="ov-sep"></span>
-        <button class="ov-tool" title="撤销 (Ctrl+Z)" :disabled="!st.undoStack.length" @click="undo(); drawStrokes()">↶</button>
-        <button class="ov-tool" title="重做 (Ctrl+Shift+Z)" :disabled="!st.redoStack.length" @click="redo(); drawStrokes()">↷</button>
-        <span class="ov-sep"></span>
+      <MarkerToolbar
+        :tools="TOOLS"
+        :colors="COLORS"
+        :tool="st.tool"
+        :color="st.color"
+        :line-width="st.lineWidth"
+        :show-text-edit="selectedIsText"
+        :can-undo="st.undoStack.length > 0"
+        :can-redo="st.redoStack.length > 0"
+        @pick-tool="onPickTool"
+        @pick-color="onPickColor"
+        @bump-line-width="bumpLineWidth"
+        @edit-text="onEditText"
+        @undo="onUndo"
+        @redo="onRedo"
+      >
         <!--
-          确认区：三个按钮 + 保存失败提示。
+          确认区：三个按钮 + 保存失败提示（截图特有，经 actions 插槽拼进同一条工具栏）。
           `.ov-actions`（nowrap + 不收缩）单独成组，保证「复制/保存/取消」三个按钮
           **永远在同一行**——工具条本身允许换行（窄屏时工具区先折行），但这三个
           是「拍板」动作，折行会让「取消」跑到下一行、和「保存」贴不到一起，
           很容易点错。
         -->
-        <div class="ov-actions">
-          <!-- 保存失败（如目标目录被删、磁盘只读）在按钮正上方飘一条，不挤动布局 -->
-          <div v-if="saveError" class="ov-save-err" :title="saveError">{{ saveError }}</div>
-          <button class="ov-btn primary" :disabled="busy" @click="doCopy">复制</button>
-          <button class="ov-btn" :disabled="busy" title="另存为…（选择保存位置）" @click="doSave">保存</button>
-          <button class="ov-btn danger" @click="doCancel">取消 (Esc)</button>
-        </div>
-      </div>
+        <template #actions>
+          <span class="ov-sep"></span>
+          <div class="ov-actions">
+            <!-- 保存失败（如目标目录被删、磁盘只读）在按钮正上方飘一条，不挤动布局 -->
+            <div v-if="saveError" class="ov-save-err" :title="saveError">{{ saveError }}</div>
+            <button class="ov-btn primary" :disabled="busy" @click="doCopy">复制</button>
+            <button class="ov-btn" :disabled="busy" title="另存为…（选择保存位置）" @click="doSave">保存</button>
+            <button class="ov-btn danger" @click="doCancel">取消 (Esc)</button>
+          </div>
+        </template>
+      </MarkerToolbar>
     </template>
 
     <!--
@@ -1676,69 +1400,17 @@ function handleStyle(dir: (typeof HANDLES)[number]): Record<string, string> {
 .ov-error p {
   margin: 0 0 10px;
 }
-.ov-toolbar {
-  position: absolute;
-  left: 50%;
-  bottom: 28px;
-  transform: translateX(-50%);
-  display: flex;
-  flex-wrap: nowrap;
-  justify-content: center;
-  align-items: center;
-  gap: 6px;
-  /* 工具条整体不许超出屏幕：极窄屏时宁可缩小间距，也不能让按钮折行 */
-  max-width: calc(100vw - 24px);
-  background: rgba(28, 30, 34, 0.92);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 10px;
-  padding: 8px 12px;
-  z-index: 10;
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
-}
-.ov-tool {
-  width: 32px;
-  height: 32px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: #cfd3da;
-  font-size: 16px;
-  cursor: pointer;
-  display: grid;
-  place-items: center;
-}
-.ov-tool:hover {
-  background: rgba(255, 255, 255, 0.1);
-}
-.ov-tool.on {
-  background: #4da3ff;
-  color: #fff;
-}
-.ov-tool:disabled {
-  opacity: 0.35;
-  cursor: default;
-}
-.ov-color {
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  border: 2px solid transparent;
-  cursor: pointer;
-}
-.ov-color.on {
-  border-color: #fff;
-  box-shadow: 0 0 0 1px #4da3ff;
-}
+/* 分隔线：actions 插槽里的这条在宿主作用域渲染，样式归 App.vue（组件内另有一份同款） */
 .ov-sep {
   width: 1px;
   height: 20px;
   background: rgba(255, 255, 255, 0.15);
   margin: 0 4px;
-  /* 分隔线是纯装饰：工具条折行时别把它单独留在某一行，也别被压扁 */
   flex: none;
 }
 /*
  * 确认区（复制 / 保存 / 取消）：整组不许换行、不许收缩。
+ * 它经 actions 插槽拼进共享工具条（MarkerToolbar），自己不再定位；
  * `flex: none` 让它在工具条（可换行）里作为一个整体参与折行，
  * `white-space: nowrap` 兜住「文字比按钮宽」的极端情况——不然窄屏上
  * 「取消 (Esc)」会折成两行，看起来像坏掉了。
@@ -1855,16 +1527,5 @@ function handleStyle(dir: (typeof HANDLES)[number]): Record<string, string> {
 .ov-astub-ne,
 .ov-astub-sw {
   cursor: nesw-resize;
-}
-/* 线宽显示：夹在 − / ＋ 之间的小数字 */
-.ov-wval {
-  min-width: 18px;
-  text-align: center;
-  color: #e8e8e8;
-  font-size: 12px;
-  font-family: ui-monospace, Consolas, monospace;
-}
-.ov-tool.ov-w {
-  font-weight: 700;
 }
 </style>

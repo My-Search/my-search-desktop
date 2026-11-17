@@ -22,6 +22,10 @@ export default defineConfig({
         config: fileURLToPath(new URL("./config.html", import.meta.url)),
         // 截图框选/标注遮罩（宿主用 WebviewWindowBuilder 按显示器开「overlay-N」窗口）
         overlay: fileURLToPath(new URL("./overlay.html", import.meta.url)),
+        // 贴图窗口（宿主把剪贴板图片钉成无边框置顶小窗「pin-<ms>-<seq>」）
+        pin: fileURLToPath(new URL("./pin.html", import.meta.url)),
+        // 鼠标手势轨迹 HUD（宿主常驻隐藏窗口「gesture-hud」，手势期间画轨迹）
+        gesture: fileURLToPath(new URL("./gesture.html", import.meta.url)),
       },
     },
   },

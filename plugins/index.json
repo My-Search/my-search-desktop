@@ -21,8 +21,8 @@
     {
       "plugin": "official-plugins/com.mysearch.market",
       "createTime": "2026-09-24T12:41:35.894Z",
-      "latestVersionUpdateTime": "2026-10-02T03:43:12.460Z",
-      "lastVersion": "1.1.1"
+      "latestVersionUpdateTime": "2026-11-17T12:24:04.200Z",
+      "lastVersion": "1.1.2"
     },
     {
       "plugin": "official-plugins/com.mysearch.baidu-translate",
@@ -41,8 +41,8 @@
       "plugin": "official-plugins/com.mysearch.clipboard",
       "official": false,
       "createTime": "2026-09-27T01:37:42.029Z",
-      "latestVersionUpdateTime": "2026-10-28T13:56:47.908Z",
-      "lastVersion": "1.4.3"
+      "latestVersionUpdateTime": "2026-11-17T12:24:04.224Z",
+      "lastVersion": "1.5.1"
     },
     {
       "plugin": "official-plugins/com.mysearch.recorder",
@@ -55,15 +55,15 @@
       "plugin": "official-plugins/com.zhuangjie.screenshot",
       "official": false,
       "createTime": "2026-09-27T01:37:46.031Z",
-      "latestVersionUpdateTime": "2026-10-13T06:06:35.648Z",
-      "lastVersion": "1.3.1"
+      "latestVersionUpdateTime": "2026-11-17T12:24:04.249Z",
+      "lastVersion": "1.4.0"
     },
     {
       "plugin": "official-plugins/com.zhuangjie.todo-list",
       "official": false,
       "createTime": "2026-09-27T01:37:47.876Z",
-      "latestVersionUpdateTime": "2026-09-27T01:37:47.876Z",
-      "lastVersion": "1.0.0"
+      "latestVersionUpdateTime": "2026-11-17T12:24:04.255Z",
+      "lastVersion": "1.2.2"
     },
     {
       "plugin": "official-plugins/com.zhuangjie.resource-monitor",
@@ -71,6 +71,20 @@
       "createTime": "2026-09-30T14:05:49.846Z",
       "latestVersionUpdateTime": "2026-10-13T06:06:35.662Z",
       "lastVersion": "1.0.2"
+    },
+    {
+      "plugin": "official-plugins/com.zhuangjie.app-uninstaller",
+      "official": false,
+      "createTime": "2026-11-17T12:24:04.281Z",
+      "latestVersionUpdateTime": "2026-11-17T12:24:04.281Z",
+      "lastVersion": "1.1.0"
+    },
+    {
+      "plugin": "official-plugins/com.zhuangjie.mouse-gesture",
+      "official": false,
+      "createTime": "2026-11-17T12:24:04.286Z",
+      "latestVersionUpdateTime": "2026-11-17T12:24:04.286Z",
+      "lastVersion": "1.1.1"
     }
   ],
   "three-parties": [

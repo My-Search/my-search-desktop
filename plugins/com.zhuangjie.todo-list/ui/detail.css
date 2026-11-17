@@ -21,6 +21,11 @@
 
 *, *::before, *::after { box-sizing: border-box; }
 
+/* hidden 属性必须真正隐藏：本容器里 .todo-empty 等元素自带 display:flex，
+ * 会把 UA 样式表的 [hidden]{display:none} 顶掉——「列表明明有数据，底部
+ * 却仍显示空态提示」就是这个原因（clipboard 插件同款坑，勿删）。 */
+#app.todo [hidden] { display: none !important; }
+
 #app.todo {
   --todo-accent: #2868f5;
   --todo-accent-soft: color-mix(in srgb, var(--todo-accent) 12%, var(--surface, #f5f6f8));
@@ -140,6 +145,35 @@
   outline: none;
   border-color: var(--todo-accent);
   box-shadow: 0 0 0 3px var(--todo-accent-soft);
+}
+
+/* 详情输入（新增区，可折叠）：与输入框同一套描边/背景 */
+.todo-note-input {
+  width: 100%;
+  min-height: 56px;
+  max-height: 140px;
+  border: 1px solid var(--line, #e6e8ec);
+  background: var(--card, #ffffff);
+  color: var(--text, #172b4d);
+  border-radius: 8px;
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
+}
+.todo-note-input::placeholder { color: var(--text-secondary, #6b7a90); opacity: .8; }
+.todo-note-input:focus {
+  outline: none;
+  border-color: var(--todo-accent);
+  box-shadow: 0 0 0 3px var(--todo-accent-soft);
+}
+
+/* 「详情」开关的展开态 */
+.todo-btn.active {
+  border-color: var(--todo-accent-line);
+  background: var(--todo-accent-soft);
+  color: var(--todo-accent);
 }
 
 /* 输入提示：仅在解析出 #标签 / !优先级 / 日期 时出现 */
@@ -274,13 +308,38 @@
 }
 .todo-item:hover { border-color: var(--todo-accent-line); }
 
-/* 左缘优先级色条：语义色，不随主题变（同徽章做法） */
-.todo-item[data-priority="high"] { box-shadow: inset 3px 0 0 var(--todo-high); }
-.todo-item[data-priority="mid"]  { box-shadow: inset 3px 0 0 var(--todo-mid); }
-.todo-item[data-priority="low"]  { box-shadow: inset 3px 0 0 var(--todo-low); }
+/* 行底色统一：所有待办共用同一张卡片底，背景 / 边框不再随紧急等级变化
+ *（用户界面契约：一眼扫过去是整齐的列表，紧急与否只认标题前的圆点）。
+ * 优先级的行内表达演进：左缘色条 → 整行淡色底 → 标题前状态圆点，
+ * 每一代都有对应测试钉住，勿随意回退。 */
+.todo-item.todo-item-done {
+  background: color-mix(in srgb, var(--text, #172b4d) 3%, var(--card, #ffffff));
+  border-color: var(--line, #e6e8ec);
+}
 
-.todo-item.todo-item-done { background: color-mix(in srgb, var(--text, #172b4d) 3%, var(--card, #ffffff)); }
+/* 逾期：仅边框换警示色（底色保持统一卡片底） */
 .todo-item.todo-item-overdue { border-color: color-mix(in srgb, var(--todo-danger) 40%, var(--line, #e6e8ec)); }
+
+/* 标题前的状态圆点：优先级的**唯一**行内可视化。
+ * 紧急=红、普通=黄、低=绿、未设置=中性灰；已完成行把圆点一并灰化。
+ * 颜色全部走主题变量（深浅主题自动适配，绝不用 JS 打类切色，见文件头注释）。 */
+.todo-dot {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  margin-top: 6px; /* 与标题首行文字垂直居中（14px × 行高 1.6） */
+  border-radius: 50%;
+  background: var(--text-secondary, #6b7a90);
+}
+.todo-item[data-priority="high"] .todo-dot { background: var(--todo-high, #d7263d); }
+.todo-item[data-priority="mid"]  .todo-dot { background: var(--todo-mid,  #d98600); }
+.todo-item[data-priority="low"]  .todo-dot { background: var(--todo-low,  #2f9e6b); }
+.todo-item.todo-item-done .todo-dot { background: var(--text-secondary, #6b7a90); }
+
+/* 圆点 + 标题一行；备注 / 元信息缩进到与标题文字对齐 */
+.todo-title-line { display: flex; align-items: flex-start; gap: 7px; min-width: 0; }
+.todo-title-line ~ .todo-note,
+.todo-title-line ~ .todo-meta { margin-left: 16px; }
 
 .todo-check {
   flex: none;
@@ -315,6 +374,36 @@
 }
 .todo-edit-input:focus { outline: none; box-shadow: 0 0 0 3px var(--todo-accent-soft); }
 
+/* 编辑态的详情框：多行，Ctrl/Cmd+Enter 保存 / Esc 取消 */
+.todo-edit-note {
+  width: 100%;
+  min-height: 52px;
+  max-height: 160px;
+  margin-top: 4px;
+  border: 1px solid var(--line, #e6e8ec);
+  background: var(--card, #ffffff);
+  color: var(--text, #172b4d);
+  border-radius: 6px;
+  padding: 5px 8px;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
+}
+.todo-edit-note:focus { outline: none; border-color: var(--todo-accent); box-shadow: 0 0 0 3px var(--todo-accent-soft); }
+
+/* 列表里的详情正文：与标题区分开，保留换行，长文不抢主视觉 */
+.todo-note {
+  margin-top: 2px;
+  padding-left: 8px;
+  border-left: 2px solid var(--todo-accent-line);
+  color: var(--text-secondary, #6b7a90);
+  font-size: 12.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* 元信息行：优先级 / 标签 / 截止日期 */
 .todo-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 11.5px; }
 
@@ -328,9 +417,6 @@
   color: var(--text-secondary, #6b7a90);
   white-space: nowrap;
 }
-.todo-chip-prio-high { color: var(--todo-high); background: color-mix(in srgb, var(--todo-high) 12%, transparent); font-weight: 600; }
-.todo-chip-prio-mid  { color: var(--todo-mid);  background: color-mix(in srgb, var(--todo-mid) 14%, transparent); font-weight: 600; }
-.todo-chip-prio-low  { color: var(--todo-low);  background: color-mix(in srgb, var(--todo-low) 12%, transparent); font-weight: 600; }
 .todo-chip-tag { color: var(--todo-accent); background: var(--todo-accent-soft); }
 .todo-chip-due-over { color: var(--todo-danger); background: var(--todo-danger-soft); font-weight: 600; }
 
@@ -353,6 +439,11 @@
 }
 .todo-icon-btn:hover { color: var(--text, #172b4d); background: color-mix(in srgb, var(--text, #172b4d) 7%, transparent); }
 .todo-icon-btn-danger:hover { color: var(--todo-danger); background: var(--todo-danger-soft); }
+/* 编辑按钮：✎ 是宽字形，固定宽度避免按钮随 hover 抖动 */
+.todo-icon-btn-edit {
+  width: 30px;
+  font-size: 14px;
+}
 
 /* ===== 空状态 ===== */
 .todo-empty {

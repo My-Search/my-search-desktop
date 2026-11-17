@@ -1,0 +1,34 @@
+{
+  "id": "com.zhuangjie.mouse-gesture",
+  "name": "鼠标手势",
+  "version": "1.1.1",
+  "apiVersion": 1,
+  "minAppVersion": "7.9.34",
+  "author": "zhuangjie",
+  "description": "按住 Ctrl + 右键拖拽画手势，触发动作：休眠/关机/重启/命令行/资源管理器/强制关闭前台程序，也可映射到任意程序、文件夹、文件或网址。轨迹 HUD 实时反馈。",
+  "repository": "https://github.com/My-Search/my-search-desktop/tree/master/plugins/com.zhuangjie.mouse-gesture",
+  "icon": "icon.svg",
+  "changelog": "修复三连：多段手势（如先右后下）此前只能识别出末段单方向；轨迹 HUD 在多屏/缩放屏上与鼠标错位；HUD 可能被其它置顶窗盖住。录制体验：HUD 显示「录制中/已录制」，录不出时面板给出醒目提示。",
+  "permissions": [
+    "ui.inlay",
+    "ui.notify",
+    "store",
+    "gesture.exec"
+  ],
+  "contributes": {
+    "searchItem": {
+      "title": "鼠标手势",
+      "desc": "Ctrl+右键拖拽触发动作：休眠/关机/重启/命令行/资源管理器/强杀前台，或自定义程序、文件夹、文件、网址",
+      "keyword": "手势",
+      "icon": "icon.svg",
+      "subSearch": false
+    },
+    "detailView": {
+      "entry": "ui/detail.html",
+      "script": "ui/index.js",
+      "mode": "inlay",
+      "closeBehavior": "minimize",
+      "theme": "inherit"
+    }
+  }
+}

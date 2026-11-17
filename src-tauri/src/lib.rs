@@ -44,8 +44,10 @@ mod cloud;
 mod favicon;
 mod file_assoc;
 mod market;
+mod mouse_gesture;
 mod plugin_host;
 mod plugin_watch;
+mod pin_image;
 mod proxy_rules;
 mod screenshot;
 mod system_proxy;
@@ -114,6 +116,15 @@ const SHORTCUT_ACTION_SCREENSHOT: &str = "screenshot";
 /// 由前端打开插件 `com.mysearch.clipboard` 的详情视图（inlay 能在主 WebView 里开，
 /// 无需独立窗口）。
 const SHORTCUT_ACTION_CLIPBOARD: &str = "clipboard";
+
+/// 快捷键作用类型：贴图（无需作用对象）。
+///
+/// 同样是**插件动作**（由「截图」插件声明第二个快捷键）。与截图一样**在 Rust
+/// 里就地完成**：读系统剪贴板位图 → 在光标处开无边框置顶小窗口（见
+/// `pin_image.rs`）。历史包袱说明：该键默认 `ctrl+alt+v`，与剪贴板历史的老
+/// 默认键相同——首次升级由 `migrate_pin_shortcut` 把剪贴板历史迁到
+/// `ctrl+alt+b` 给贴图让位（见该函数注释）。
+const SHORTCUT_ACTION_PIN: &str = "pin";
 
 /// 快捷键（open-plugin）触发时向主窗口广播的事件名，payload = { pluginId }
 const EVENT_SHORTCUT_OPEN_PLUGIN: &str = "my-search://shortcut-open-plugin";
@@ -1131,6 +1142,7 @@ fn is_known_shortcut_action(action: &str) -> bool {
         || action == SHORTCUT_ACTION_QUICK_OPEN
         || action == SHORTCUT_ACTION_SCREENSHOT
         || action == SHORTCUT_ACTION_CLIPBOARD
+        || action == SHORTCUT_ACTION_PIN
         || is_plugin_defined_action(action)
 }
 
@@ -1144,6 +1156,7 @@ fn is_known_shortcut_action(action: &str) -> bool {
 fn is_plugin_shortcut_action(action: &str) -> bool {
     action == SHORTCUT_ACTION_SCREENSHOT
         || action == SHORTCUT_ACTION_CLIPBOARD
+        || action == SHORTCUT_ACTION_PIN
         || is_plugin_defined_action(action)
 }
 
@@ -1281,6 +1294,82 @@ pub(crate) fn set_clipboard_unbound(app: &tauri::AppHandle, unbound: bool) {
         }
     }
 }
+
+/// 「贴图热键迁移」已完成的一次性标记（settings.json 里的布尔）。
+///
+/// 背景：贴图（`pin`）的默认键 `ctrl+alt+v` 与剪贴板历史的**老默认键**相同，
+/// 同一个全局热键只能注册一个动作——不迁移的话，老用户升级后贴图的默认键
+/// 注入不上（键被占用），表现为「按 Ctrl+Alt+V 没有贴图」。
+const SETTINGS_KEY_PIN_MIGRATED: &str = "pin_shortcut_migrated_v1";
+
+/// 一次性迁移：剪贴板历史热键 `ctrl+alt+v` → `ctrl+alt+b`，给「贴图」让位。
+///
+/// 规则（保守优先，用户意图永远最高）：
+///   - 仅当剪贴板历史**仍绑在**老默认 `ctrl+alt+v`（用户没自定义过）时迁移；
+///   - 用户主动解绑过剪贴板历史 → 不迁移（他本来就不想要热键，`ctrl+alt+v`
+///     自然空出来给贴图）；
+///   - `ctrl+alt+b` 已被其它动作占用 → 不迁移（不挤掉别人的键），贴图注入
+///     交给 reconcile 的「键被占用则跳过」逻辑（用户可在设置里手动改绑）；
+///   - 只跑一次（`SETTINGS_KEY_PIN_MIGRATED` 标记），之后完全尊重用户改动。
+///
+/// 在 `setup` 里、注册快捷键**之前**调用（迁移结果要参与本次注册）。
+fn migrate_pin_shortcut(app: &tauri::AppHandle) {
+    let Some(store) = settings_store(app) else {
+        return;
+    };
+    if store
+        .get(SETTINGS_KEY_PIN_MIGRATED)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return;
+    }
+    // 标记先行：迁移失败也不重试（避免每次启动反复改写用户配置）
+    store.set(SETTINGS_KEY_PIN_MIGRATED, serde_json::Value::Bool(true));
+    if let Err(e) = store.save() {
+        eprintln!("保存贴图热键迁移标记失败: {e}");
+    }
+    let bindings = read_shortcut_bindings(app);
+    if let Some(next) = migrate_pin_bindings(&bindings) {
+        write_shortcut_bindings(app, &next);
+        eprintln!("贴图热键迁移：剪贴板历史 ctrl+alt+v → ctrl+alt+b（Ctrl+Alt+V 让给贴图）");
+    }
+}
+
+/// `migrate_pin_shortcut` 的纯函数核心（单测友好）：
+/// 剪贴板历史仍绑在老默认 `ctrl+alt+v` 且 `ctrl+alt+b` 空闲 → 返回迁移后的
+/// 绑定列表；否则返回 None（不动）。
+fn migrate_pin_bindings(bindings: &[ShortcutBinding]) -> Option<Vec<ShortcutBinding>> {
+    const OLD_CLIPBOARD_KEY: &str = "ctrl+alt+v";
+    const NEW_CLIPBOARD_KEY: &str = "ctrl+alt+b";
+    // 用户自定义过（≠老默认）或主动解绑（列表里没有）→ 不动
+    if !bindings
+        .iter()
+        .any(|b| b.action == SHORTCUT_ACTION_CLIPBOARD && b.shortcut == OLD_CLIPBOARD_KEY)
+    {
+        return None;
+    }
+    // 目标键被其它动作占用 → 不挤掉别人的键
+    if bindings.iter().any(|b| b.shortcut == NEW_CLIPBOARD_KEY) {
+        return None;
+    }
+    Some(
+        bindings
+            .iter()
+            .map(|b| {
+                if b.action == SHORTCUT_ACTION_CLIPBOARD && b.shortcut == OLD_CLIPBOARD_KEY {
+                    ShortcutBinding {
+                        shortcut: NEW_CLIPBOARD_KEY.to_string(),
+                        ..b.clone()
+                    }
+                } else {
+                    b.clone()
+                }
+            })
+            .collect(),
+    )
+}
+
 
 /// 前端下发的「某插件动作可用」声明（`sync_plugin_shortcut_actions` 的载荷）。
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1459,6 +1548,11 @@ fn dispatch_shortcut_action(app: &tauri::AppHandle, action: &str, target: Option
         // 剪贴板历史**走前端**（inlay 详情视图能开在主 WebView 里）：
         // 这里只把主窗口带到前台并广播事件，由前端打开内置插件详情视图。
         clipboard_by_shortcut(app);
+    } else if action == SHORTCUT_ACTION_PIN {
+        // 贴图：读系统剪贴板位图 → 光标处开无边框置顶小窗口。
+        // 与截图一样在 Rust 里就地完成（贴图是独立窗口，inlay 开不了）；
+        // 内部自己 spawn，不阻塞事件循环。
+        pin_image::start_pin_from_shortcut(app);
     } else if is_plugin_defined_action(action) {
         // 插件自定义动作（`plugin:<id>:<name>`）：执行逻辑在插件自己，
         // 宿主把窗口带到前台 + 广播事件，由前端打开该插件视图并把动作派发给它。
@@ -3684,6 +3778,19 @@ pub fn run() {
             // 插件侧：读/改「截图」快捷键（权威存储是宿主的 shortcut_bindings）
             screenshot::screenshot_get_shortcut,
             screenshot::screenshot_set_shortcut,
+            // ---------- 贴图（热键钉图 + 光标处小窗） ----------
+            // 页面取自己这张图 / 双击与右键菜单关闭 / 异常关闭兜底清理
+            pin_image::pin_image_data,
+            pin_image::pin_close,
+            pin_image::pin_cleanup,
+            // ---------- 鼠标手势（Ctrl+右键拖拽 → 动作；HUD 轨迹反馈） ----------
+            mouse_gesture::gesture_get_enabled,
+            mouse_gesture::gesture_set_enabled,
+            mouse_gesture::gesture_bindings_list,
+            mouse_gesture::gesture_bindings_sync,
+            mouse_gesture::gesture_list_processes,
+            mouse_gesture::gesture_record_start,
+            mouse_gesture::gesture_record_cancel,
             // ---------- 剪贴板历史（原生监听 + 只读抓取 + 插件私有目录落盘） ----------
             // 列表/读图/删除/清空/复制回剪贴板（复制是唯一的写剪贴板路径，用户显式触发）
             clipboard_history::clipboard_history_list,
@@ -3695,6 +3802,8 @@ pub fn run() {
             clipboard_history::clipboard_history_copy,
             // 收藏 / 取消收藏（收藏条目永久保留，不参与上限淘汰与默认清空）
             clipboard_history::clipboard_history_set_favorite,
+            // 设置 / 清除分类（已分类条目同样永久保留，支持按分类分页查看）
+            clipboard_history::clipboard_history_set_category,
             // 修改一条文本历史的内容（插件「编辑」按钮；「仅收藏可编辑」是 UI 门禁）
             clipboard_history::clipboard_history_update,
             // 插件侧：读/改「剪贴板历史」快捷键
@@ -3753,6 +3862,11 @@ pub fn run() {
             // 用 BestEffort：某条键（如 alt+f）被其它程序临时占用时只跳过它，
             // 其余键——尤其呼出键——照常注册；严格模式下一次冲突会回滚全部，
             // 表现为「按快捷键完全没反应」且错误只进看不见的 stderr。
+            //
+            // 注册前先做一次「贴图热键迁移」：老用户的剪贴板历史还占着
+            // ctrl+alt+v（贴图的默认键），迁到 ctrl+alt+b 后贴图才能注入
+            // （见 migrate_pin_shortcut）。只跑一次，之后完全尊重用户改动。
+            migrate_pin_shortcut(app.handle());
             let bindings = read_shortcut_bindings(app.handle());
             if let Err(e) =
                 register_shortcut_bindings(app.handle(), &bindings, RegisterMode::BestEffort)
@@ -3765,6 +3879,13 @@ pub fn run() {
                 read_alt_click_pref(app.handle()).unwrap_or(DEFAULT_ALT_CLICK_ENABLED),
             );
             alt_click::install(app.handle().clone());
+            // 鼠标手势（Ctrl+右键拖拽）：先读偏好再装钩子 + 启动识别线程 +
+            // 恢复映射快照。失败只记日志，不阻断启动（见 mouse_gesture.rs）。
+            mouse_gesture::set_enabled(
+                mouse_gesture::read_gesture_pref(app.handle()).unwrap_or(true),
+            );
+            mouse_gesture::load_bindings_snapshot(app.handle());
+            mouse_gesture::install(app.handle().clone());
             // 剪贴板历史监听：建隐藏 message-only 窗口挂 AddClipboardFormatListener。
             // 必须在带消息循环的主线程装（本处满足）；失败只记日志，不阻断启动。
             clipboard_history::install(app.handle().clone());
@@ -4238,6 +4359,79 @@ mod tests {
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[1].action, SHORTCUT_ACTION_CLIPBOARD);
         assert_eq!(parsed[1].target, None);
+    }
+
+    /// 贴图动作：无作用对象，且是**插件动作**（可用性跟随「截图」插件）。
+    #[test]
+    fn pin_action_needs_no_target() {
+        use super::{
+            is_known_shortcut_action, is_plugin_shortcut_action, parse_shortcut_bindings_strict,
+            DEFAULT_TOGGLE_SHORTCUT, SHORTCUT_ACTION_PIN, SHORTCUT_ACTION_TOGGLE_WINDOW,
+        };
+
+        assert!(is_known_shortcut_action(SHORTCUT_ACTION_PIN));
+        assert!(is_plugin_shortcut_action(SHORTCUT_ACTION_PIN));
+
+        // 没有 target 也合法
+        let parsed = parse_shortcut_bindings_strict(&serde_json::json!([
+            { "shortcut": DEFAULT_TOGGLE_SHORTCUT, "action": SHORTCUT_ACTION_TOGGLE_WINDOW },
+            { "shortcut": "ctrl+alt+v", "action": SHORTCUT_ACTION_PIN }
+        ]))
+        .unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[1].action, SHORTCUT_ACTION_PIN);
+        assert_eq!(parsed[1].target, None);
+    }
+
+    /// 一次性迁移：剪贴板历史 ctrl+alt+v → ctrl+alt+b，给贴图（默认同键）让位。
+    ///
+    /// 回归防线：不迁移的话，老用户升级后 Ctrl+Alt+V 被剪贴板历史占着，
+    /// 贴图的默认键注入不上（reconcile 的「键被占用则跳过」），表现为
+    /// 「按 Ctrl+Alt+V 没有贴图」。
+    #[test]
+    fn migrate_pin_bindings_moves_clipboard_to_b() {
+        use super::{
+            migrate_pin_bindings, ShortcutBinding, SHORTCUT_ACTION_CLIPBOARD,
+            SHORTCUT_ACTION_TOGGLE_WINDOW,
+        };
+        let b = |shortcut: &str, action: &str, target: Option<&str>| ShortcutBinding {
+            shortcut: shortcut.to_string(),
+            action: action.to_string(),
+            target: target.map(|s| s.to_string()),
+        };
+
+        // 1) 老默认（clipboard 仍绑 ctrl+alt+v）→ 迁到 ctrl+alt+b，其余原样
+        let old = vec![
+            b("ctrl+alt+s", SHORTCUT_ACTION_TOGGLE_WINDOW, None),
+            b("ctrl+alt+v", SHORTCUT_ACTION_CLIPBOARD, None),
+            b("ctrl+alt+1", "open-plugin", Some("com.a.b")),
+        ];
+        let next = migrate_pin_bindings(&old).expect("老默认应迁移");
+        assert_eq!(next.len(), 3);
+        let clip = next.iter().find(|x| x.action == SHORTCUT_ACTION_CLIPBOARD).unwrap();
+        assert_eq!(clip.shortcut, "ctrl+alt+b");
+        // 其余绑定原样（含作用对象）
+        assert_eq!(next[0].shortcut, "ctrl+alt+s");
+        assert_eq!(next[2].target.as_deref(), Some("com.a.b"));
+
+        // 2) 用户自定义过剪贴板键（≠老默认）→ 不动
+        let custom = vec![
+            b("ctrl+alt+s", SHORTCUT_ACTION_TOGGLE_WINDOW, None),
+            b("ctrl+alt+c", SHORTCUT_ACTION_CLIPBOARD, None),
+        ];
+        assert!(migrate_pin_bindings(&custom).is_none());
+
+        // 3) 用户解绑过剪贴板（列表里没有）→ 不动（V 键自然空给贴图）
+        let unbound = vec![b("ctrl+alt+s", SHORTCUT_ACTION_TOGGLE_WINDOW, None)];
+        assert!(migrate_pin_bindings(&unbound).is_none());
+
+        // 4) ctrl+alt+b 已被其它动作占用 → 不挤掉别人的键
+        let b_taken = vec![
+            b("ctrl+alt+s", SHORTCUT_ACTION_TOGGLE_WINDOW, None),
+            b("ctrl+alt+v", SHORTCUT_ACTION_CLIPBOARD, None),
+            b("ctrl+alt+b", "quick-open", Some("某常用头")),
+        ];
+        assert!(migrate_pin_bindings(&b_taken).is_none());
     }
 
     /// 桥接读写**必须保留每条绑定的作用对象**。

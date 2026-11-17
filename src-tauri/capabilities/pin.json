@@ -1,0 +1,20 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "pin",
+  "description": "贴图窗口能力：标注工具栏（复用截图引擎）+ 浏览态拖动移动窗口，需窗口位置/焦点/关闭权限；不授予任何插件/网络/存储权限",
+  "windows": ["pin-*"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-scale-factor",
+    "core:window:allow-close",
+    "core:window:allow-hide",
+    "core:window:allow-show",
+    "core:window:allow-set-focus",
+    "core:window:allow-set-size",
+    "core:window:allow-set-position",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-always-on-top",
+    "core:window:allow-outer-position",
+    "core:event:default"
+  ]
+}

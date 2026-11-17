@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>鼠标手势</title>
+</head>
+<body>
+  <!-- 插件界面骨架。列表区由 index.js 用 innerHTML 重建，
+       因此动态区事件一律委托在 #app 上。 -->
+  <div id="app" class="mg">
+
+    <header class="mg-header">
+      <div class="mg-title-row">
+        <h2 class="mg-title">鼠标手势</h2>
+        <label class="mg-switch" title="总开关：关闭后钩子仍常驻，但任何手势都不会触发">
+          <input id="mg-enabled" type="checkbox">
+          <span class="mg-slider"></span>
+          <span class="mg-switch-text">启用</span>
+        </label>
+      </div>
+      <p class="mg-usage">
+        按住 <b>Ctrl</b> + <b>右键</b> 拖拽画出手势，松手触发动作。
+        画出未映射的手势不会执行任何动作；普通右键与 Ctrl+右键点击不受影响。
+        已有映射可点该行右侧的 <b>◎</b> 重新画手势覆盖方向。
+      </p>
+    </header>
+
+    <!-- 映射列表：手势方向串 → 动作 -->
+    <section class="mg-list-wrap">
+      <div class="mg-list-head">
+        <span class="mg-col-pattern">手势方向</span>
+        <span class="mg-col-action">动作</span>
+        <span class="mg-col-ops"></span>
+      </div>
+      <div id="mg-list" class="mg-list"></div>
+      <button id="mg-record" class="mg-btn mg-btn-ghost" type="button" title="在列表末尾新增一条映射：按住 Ctrl+右键画出手势，识别结果自动填入。已有映射请点该行右侧 ◎ 重录">◎ 画手势录制（新增）</button>
+      <button id="mg-add" class="mg-btn mg-btn-ghost" type="button">+ 添加手势映射</button>
+      <button id="mg-refresh-processes" class="mg-btn mg-btn-ghost mg-btn-mini" type="button" title="重新枚举当前有窗口的运行中进程，供「呼出程序」动作的下拉选择">↻ 刷新运行中进程</button>
+    </section>
+
+    <!-- 保存条：修改后出现 -->
+    <footer class="mg-footer">
+      <span id="mg-dirty-hint" class="mg-dirty-hint" hidden>有未保存的修改</span>
+      <button id="mg-import" class="mg-btn mg-btn-ghost" type="button" title="填入一组推荐手势映射（D=命令行 / R=资源管理器 / L=强杀前台 / DU=重启 / UD=关机），导入后可再改">导入默认映射</button>
+      <button id="mg-save" class="mg-btn mg-btn-primary" type="button" disabled>保存映射</button>
+    </footer>
+
+  </div>
+  <script src="ui/index.js"></script>
+</body>
+</html>

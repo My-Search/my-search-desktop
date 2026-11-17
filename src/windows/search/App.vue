@@ -72,6 +72,7 @@ import {
   onShortcutQuickOpen,
   onShortcutClipboard,
   onShortcutPluginAction,
+  onPinNoImage,
   onAttachPaths,
   onWindowFocusChanged,
   isWindowVisible,
@@ -1926,6 +1927,9 @@ let unlistenQuickFilter: (() => void) | null = null;
 let unlistenQuickOpen: (() => void) | null = null;
 /** 「剪贴板历史」快捷键事件监听器 */
 let unlistenClipboardShortcut: (() => void) | null = null;
+
+/** 「贴图无图」事件退订（贴图热键按下但剪贴板里没有图片） */
+let unlistenPinNoImage: (() => void) | null = null;
 /** 「插件自定义动作」快捷键事件监听器 */
 let unlistenPluginActionShortcut: (() => void) | null = null;
 /** 资源管理器「Alt+点击文件带入」事件监听器 */
@@ -2118,6 +2122,12 @@ onMounted(async () => {
     void openPluginByShortcut(pluginId);
   });
 
+  // 「贴图无图」（用户按贴图热键但剪贴板里没有位图，Rust 广播）：
+  // Rust 侧不会开窗，这里把主窗带出来给一句提示——热键按下不该毫无反应。
+  unlistenPinNoImage = await onPinNoImage(() => {
+    toast.showToast("剪贴板里没有图片，先复制一张图再按贴图快捷键", "error");
+  });
+
   // 全局快捷键「插件自定义动作」（如录屏的开始 / 停止，作用类型为 `plugin:<id>:<name>`）：
   // Rust 端广播 { pluginId, action }。打开该插件视图后把动作派发给插件脚本
   // （插件用 ms.shortcuts.onAction 注册）。执行逻辑在插件自己里。
@@ -2308,6 +2318,7 @@ onBeforeUnmount(() => {
   unlistenQuickOpen?.();
   unlistenClipboardShortcut?.();
   unlistenPluginActionShortcut?.();
+  unlistenPinNoImage?.();
   unlistenAttachPaths?.();
   unlistenBuiltin?.();
   unlistenDragDrop?.();

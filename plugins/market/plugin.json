@@ -1,7 +1,7 @@
 {
   "id": "com.mysearch.market",
   "name": "插件市场",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "apiVersion": 1,
   "minAppVersion": "7.9.15",
   "author": "my-search",
@@ -9,6 +9,7 @@
   "homepage": "https://github.com/My-Search",
   "repository": "https://github.com/My-Search/my-search-desktop/tree/master/plugins/market",
   "icon": "icon.svg",
+  "changelog": "安装/更新/卸载成功后不再整表刷新：只在原地更新对应卡片的状态（显示「已安装」徽标），列表顺序与滚动位置保持不变。",
   "permissions": [
     "ui.inlay",
     "store"

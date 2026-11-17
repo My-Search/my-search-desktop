@@ -34,6 +34,12 @@
       <button class="cb-tab" data-tab="fav" data-act="tab-fav">收藏<span id="cb-fav-count" class="cb-tab-badge" hidden></span></button>
     </div>
 
+    <!-- 分类栏：只在「全部」标签下出现。点某个分类即筛选该分类下的条目；
+         分类后的条目永久保留（与收藏同等待遇：不参与上限淘汰、默认清空也保留）。 -->
+    <div id="cb-cats" class="cb-cats" hidden></div>
+    <!-- 分类输入建议（各条目的分类编辑框共用） -->
+    <datalist id="cb-cat-options"></datalist>
+
     <!-- 状态行：错误 / 过程消息（成功后清空并整行隐藏） -->
     <div id="cb-status" class="cb-status" hidden></div>
 

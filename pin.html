@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN" class="ms-pin-root">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
+    <title>贴图</title>
+    <!-- 贴图窗口：无边框置顶小窗，页面把剪贴板图片 1:1 铺满整个窗口 -->
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <style>
+      /* 必须在 Vue/样式表加载前生效：整窗无滚动、禁选中文本（贴图不是网页） */
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+        user-select: none;
+        font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+      }
+      #app {
+        width: 100vw;
+        height: 100vh;
+        background: transparent;
+      }
+    </style>
+  </head>
+  <body class="ms-pin-body">
+    <div id="app"></div>
+    <script type="module" src="/src/pin.ts"></script>
+  </body>
+</html>

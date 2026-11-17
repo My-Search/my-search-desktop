@@ -32,7 +32,12 @@
         <input id="todo-input" class="todo-input" type="text" autocomplete="off" spellcheck="false"
                placeholder="添加待办，回车确认（如：写周报 #工作 2026-09-30）">
         <button id="todo-add" class="todo-btn todo-btn-primary" type="button">添加</button>
+        <button id="todo-note-toggle" class="todo-btn todo-btn-ghost" type="button"
+                title="展开/收起详情输入（可选）">详情</button>
       </div>
+      <!-- 详情（可选）：点「详情」展开；新增后随待办一起保存，列表中展示 -->
+      <textarea id="todo-note" class="todo-note-input" rows="2" hidden
+                placeholder="详情（可选）：补充说明、链接、步骤…"></textarea>
       <!-- 输入提示：只在解析出元信息或出错时出现 -->
       <p id="todo-hint" class="todo-hint" hidden></p>
     </section>
@@ -69,7 +74,7 @@
 
     <!-- 底部提示 -->
     <footer class="todo-foot">
-      <span>单击勾选完成 · 双击标题编辑 · 数据仅存本机</span>
+      <span>单击勾选完成 · 点 ✎ 或双击标题编辑（含详情） · 数据仅存本机</span>
     </footer>
   </div>
   <script src="index.js"></script>

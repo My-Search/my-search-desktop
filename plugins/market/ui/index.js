@@ -109,20 +109,19 @@
     });
   }
 
-  function renderCards(entries) {
+  function cardHtml(e) {
     let html = "";
-    for (let i = 0; i < entries.length; i++) {
-      const e = entries[i];
-      const installed = view.installedMap[e.id];
-      const upd = view.updates.find((u) => u.id === e.id);
-      const hasUpdate = !!upd;
-      const isBlocked = view.blocked.includes(e.id);
-      let actionHtml = "";
-      let badgeHtml = "";
+    const installed = view.installedMap[e.id];
+    const upd = view.updates.find((u) => u.id === e.id);
+    const hasUpdate = !!upd;
+    const isBlocked = view.blocked.includes(e.id);
+    let actionHtml = "";
+    let badgeHtml = "";
 
-      if (e.official) badgeHtml += '<span class="badge badge-official">官方</span>';
-      if (hasUpdate) badgeHtml += '<span class="badge badge-update">可更新</span>';
-      if (e.deprecated) badgeHtml += '<span class="badge badge-deprecated">已废弃</span>';
+    if (e.official) badgeHtml += '<span class="badge badge-official">官方</span>';
+    if (installed) badgeHtml += '<span class="badge badge-installed">已安装</span>';
+    if (hasUpdate) badgeHtml += '<span class="badge badge-update">可更新</span>';
+    if (e.deprecated) badgeHtml += '<span class="badge badge-deprecated">已废弃</span>';
 
       if (isBlocked) {
         actionHtml = '<button class="btn-market" disabled>已屏蔽</button>';
@@ -136,7 +135,7 @@
         actionHtml = '<button class="btn-market" data-action="install" data-id="' + escapeHtml(e.id) + '">安装</button>';
       }
 
-      html += '<article class="plugin-card' + (e.deprecated ? " plugin-card-deprecated" : "") + '">';
+      html += '<article class="plugin-card' + (e.deprecated ? " plugin-card-deprecated" : "") + '" data-id="' + escapeHtml(e.id) + '">';
       // 图标：网络图（raw / github 直链）加载完成前显示骨架占位，
       // 加载失败退回 🧩 —— 三态由 .icon-loading / .icon-ready / .icon-failed 控制。
       // 用 <img class="icon-img"> 承载，事件在容器上委托（卡片是 innerHTML 重建的）。
@@ -189,9 +188,58 @@
       html += "</div></div>";
       html += '<div class="plugin-action">' + actionHtml + "</div>";
       html += "</article>";
+    return html;
+  }
+
+  function renderCards(entries) {
+    let html = "";
+    for (let i = 0; i < entries.length; i++) {
+      html += cardHtml(entries[i]);
     }
     $list.innerHTML = html;
     showState($list, true); // 顺带隐藏分页条，由 renderPager 决定是否重新显示
+  }
+
+  /** 按插件 id 找当前页里的卡片节点（卡片都带 data-id） */
+  function cardElOf(id) {
+    const cards = $list.querySelectorAll("article.plugin-card[data-id]");
+    for (let i = 0; i < cards.length; i++) {
+      if (cards[i].getAttribute("data-id") === id) return cards[i];
+    }
+    return null;
+  }
+
+  /**
+   * 只重绘一张卡片，**不重拉目录、不重排列表**。
+   *
+   * 安装成功后的用户诉求：列表别闪、别跳，只把刚装的这张卡片切成「已安装」。
+   * 因此这里原地替换 `outerHTML`——位置、分页、其它卡片全都保持不动。
+   */
+  function refreshCard(id) {
+    if (!view) return;
+    const entry = view.entries.find((e) => e.id === id);
+    const el = cardElOf(id);
+    if (!entry || !el) return;
+    el.outerHTML = cardHtml(entry);
+  }
+
+  /** 安装 / 更新成功：更新本地视图状态并原地刷新那一张卡片 */
+  function markInstalled(id, version) {
+    if (!view) return;
+    view.installedMap[id] = String(version || view.installedMap[id] || "");
+    view.updates = view.updates.filter((u) => u.id !== id);
+    refreshCard(id);
+  }
+
+  /** 卸载成功：本地去掉已安装标记（「已安装」页需要重排，其它页原地刷新） */
+  function markUninstalled(id) {
+    if (!view) return;
+    delete view.installedMap[id];
+    if (activeTab() === "installed") {
+      render(); // 该页的数据集少了一条，列表与分页都必须重算
+      return;
+    }
+    refreshCard(id);
   }
 
   /** 页码按钮：≤7 页全显，否则只显首尾与当前页附近（… 省略） */
@@ -351,16 +399,17 @@
         // 用户在安装确认弹窗里点了「取消」：不是失败，静默恢复按钮
         if (result.cancelled) return restoreBtn();
         if (!result.ok) throw new Error(result.error);
-        await loadMarket();
+        // 不重拉目录、不重排列表：只把这张卡片原地切成「已安装」
+        markInstalled(id, result.version);
       } else if (action === "update") {
         const result = await ms.market.update(id);
         if (result.cancelled) return restoreBtn();
         if (!result.ok) throw new Error(result.error);
-        await loadMarket();
+        markInstalled(id, result.updatedTo);
       } else if (action === "uninstall") {
         const result = await ms.market.uninstall(id);
         if (!result.ok) throw new Error(result.error);
-        await loadMarket();
+        markUninstalled(id);
       }
     } catch (e) {
       restoreBtn();

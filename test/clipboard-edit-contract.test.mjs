@@ -266,9 +266,9 @@ const CMD = "clipboard_history_update";
 /* ============ 7. 清单：版本与说明同步 ============ */
 {
   const m = JSON.parse(manifest);
-  // 版本应 ≥ 引入行内编辑的 1.4.0（后续升 1.4.1/1.4.2… 不应让本契约失效）
+  // 版本应 ≥ 引入行内编辑的 1.4.0（后续升 1.4.1/1.4.2/1.5.0… 不应让本契约失效）
   const verNum = (m.version || "").split(".").map(Number);
-  const ge140 = verNum[0] === 1 && verNum[1] === 4 && verNum[2] >= 0;
+  const ge140 = verNum[0] > 1 || (verNum[0] === 1 && verNum[1] >= 4);
   ok(ge140, `插件版本应 ≥ 1.4.0（当前 ${m.version}）`);
   ok(
     typeof m.changelog === "string" && m.changelog.trim().length > 0,

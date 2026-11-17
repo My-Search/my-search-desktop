@@ -1,0 +1,45 @@
+{
+  "id": "com.zhuangjie.app-uninstaller",
+  "name": "软件卸载器",
+  "version": "1.1.0",
+  "apiVersion": 1,
+  "minAppVersion": "7.9.15",
+  "author": "zhuangjie",
+  "description": "列出 Windows 已安装软件（含真实图标），支持卸载 / 强制卸载 / 打开安装位置；卸载结束后自动扫描安装目录、快捷方式与注册表残留，可勾选清理。",
+  "repository": "https://github.com/My-Search/my-search-desktop/tree/master/plugins/com.zhuangjie.app-uninstaller",
+  "icon": "icon.svg",
+  "changelog": "列表显示软件真实图标；操作改为 卸载 / 强制卸载 / 打开位置；卸载（含强制卸载）结束后自动扫描残留，可直接勾选清理。",
+  "permissions": [
+    "ui.inlay",
+    "ui.notify",
+    "store",
+    "backend.spawn"
+  ],
+  "contributes": {
+    "searchItem": {
+      "title": "软件卸载器",
+      "desc": "卸载 Windows 软件，并在卸载后自动扫描、清理残留文件与注册表项",
+      "keyword": "卸载",
+      "icon": "icon.svg",
+      "subSearch": true
+    },
+    "detailView": {
+      "entry": "ui/detail.html",
+      "script": "ui/index.js",
+      "mode": "inlay",
+      "closeBehavior": "minimize",
+      "theme": "inherit"
+    }
+  },
+  "backend": {
+    "entry": "backend/run.cmd",
+    "command": ["node", "backend/index.mjs"],
+    "protocol": "jsonrpc-stdio",
+    "autostart": "on-demand",
+    "closeBehavior": "minimize",
+    "startupTimeoutMs": 20000,
+    "callTimeoutMs": 180000,
+    "idleExitSec": 300,
+    "maxRestarts": 1
+  }
+}

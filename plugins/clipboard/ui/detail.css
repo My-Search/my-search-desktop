@@ -207,6 +207,65 @@
   color: #fff;
 }
 
+/* ---------- 分类栏（仅「全部」标签下显示） ---------- */
+.cb-cats {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.cb-cats-label {
+  font-size: 11px;
+  color: var(--cb-muted);
+}
+
+.cb-cat {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  font-size: 11px;
+  line-height: 18px;
+  border: 1px solid var(--cb-line);
+  border-radius: 10px;
+  background: var(--cb-card);
+  color: var(--cb-muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.cb-cat:hover {
+  border-color: var(--cb-accent);
+  color: var(--cb-accent);
+}
+
+.cb-cat.active {
+  border-color: var(--cb-accent);
+  background: color-mix(in srgb, var(--cb-accent) 12%, var(--cb-card));
+  color: var(--cb-accent);
+  font-weight: 600;
+}
+
+.cb-cat-num {
+  min-width: 14px;
+  padding: 0 4px;
+  border-radius: 7px;
+  text-align: center;
+  font-size: 10px;
+  background: color-mix(in srgb, var(--cb-text) 8%, transparent);
+  color: inherit;
+}
+
+.cb-cat.active .cb-cat-num {
+  background: color-mix(in srgb, var(--cb-accent) 22%, transparent);
+}
+
+.cb-cat-clear {
+  border-style: dashed;
+}
+
 /* ---------- 按钮 ---------- */
 .cb-btn {
   padding: 5px 12px;
@@ -363,6 +422,17 @@
   white-space: nowrap;
 }
 
+/* 条目上的分类徽标：用主色系与普通来源行区分，一眼看出「这条已整理过」 */
+.cb-item-cat {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--cb-accent) 12%, transparent);
+  color: var(--cb-accent);
+  font-size: 10.5px;
+  line-height: 16px;
+}
+
 .cb-item-actions {
   flex: none;
   display: flex;
@@ -439,6 +509,30 @@
 }
 
 .cb-item-edit-input:focus {
+  outline: none;
+  border-color: var(--cb-accent);
+}
+
+/* 分类编辑态：与内容编辑态同一套视觉（描边 + 浮起背景） */
+.cb-item-categorizing {
+  border-color: var(--cb-accent);
+  background: var(--cb-hover);
+  cursor: default;
+  align-items: flex-start;
+}
+
+.cb-item-cat-input {
+  width: 100%;
+  padding: 5px 8px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--cb-text);
+  background: var(--cb-card);
+  border: 1px solid var(--cb-line);
+  border-radius: 5px;
+}
+
+.cb-item-cat-input:focus {
   outline: none;
   border-color: var(--cb-accent);
 }

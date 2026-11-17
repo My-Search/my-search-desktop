@@ -175,6 +175,7 @@ export interface PluginHostContext {
   clipboardHistoryPage?: (opts: {
     query?: string;
     favoriteOnly?: boolean;
+    category?: string;
     offset?: number;
     limit?: number;
   }) => Promise<ClipboardPage>;
@@ -182,18 +183,36 @@ export interface PluginHostContext {
   clipboardHistoryReadImage?: (relPath: string) => Promise<string>;
   /** 删除一条剪贴板历史 */
   clipboardHistoryDelete?: (id: string) => Promise<void>;
-  /** 清空剪贴板历史（keepFavorites=true 时保留收藏条目） */
+  /** 清空剪贴板历史（keepFavorites=true 时保留收藏与已分类条目） */
   clipboardHistoryClear?: (keepFavorites?: boolean) => Promise<void>;
   /** 把某条历史复制回系统剪贴板（用户显式触发） */
   clipboardHistoryCopy?: (id: string) => Promise<void>;
   /** 收藏 / 取消收藏一条剪贴板历史 */
   clipboardHistorySetFavorite?: (id: string, favorite: boolean) => Promise<void>;
+  /** 设置 / 清除一条剪贴板历史的分类（null = 取消分类） */
+  clipboardHistorySetCategory?: (id: string, category: string | null) => Promise<void>;
   /** 修改一条文本剪贴板历史的内容（只改 text/size，元数据保留） */
   clipboardHistoryUpdate?: (id: string, text: string) => Promise<void>;
   /** 读「剪贴板历史」动作当前绑的全局快捷键（空串 = 未绑） */
   clipboardHistoryGetShortcut?: () => Promise<string>;
   /** 给「剪贴板历史」动作改绑全局快捷键（空串 = 解绑），返回实际生效的键 */
   clipboardHistorySetShortcut?: (shortcut: string) => Promise<string>;
+
+  // ===== 鼠标手势（宿主原生钩子；仅手势插件会用到） =====
+  /** 读手势功能总开关（权威在 Rust settings.json） */
+  gestureGetEnabled?: () => Promise<boolean>;
+  /** 写手势功能总开关（置位即生效） */
+  gestureSetEnabled?: (enabled: boolean) => Promise<void>;
+  /** 读手势映射表 */
+  gestureBindingsList?: () => Promise<unknown[]>;
+  /** 全量覆盖手势映射表（即刻生效） */
+  gestureBindingsSync?: (bindings: unknown) => Promise<void>;
+  /** 列出运行中的窗口进程（「呼出程序」动作下拉数据源） */
+  gestureListProcesses?: () => Promise<unknown[]>;
+  /** 进入画手势录制模式（下一次 Ctrl+右键手势只识别不执行） */
+  gestureRecordStart?: () => Promise<void>;
+  /** 退出画手势录制模式 */
+  gestureRecordCancel?: () => Promise<void>;
 
   // ===== 数据同步（新增）=====
   /**
@@ -325,6 +344,8 @@ export interface ClipboardItem {
   source?: string;
   /** 是否已收藏（收藏条目永久保留，不参与上限淘汰与默认清空） */
   favorite?: boolean;
+  /** 分类名（已分类条目同样永久保留；空/缺省 = 未分类） */
+  category?: string;
 }
 
 /** 一页剪贴板历史（`ms.clipboard.page()` 的返回项） */
@@ -638,6 +659,65 @@ function addClipboardUpdatedListener(pluginId: string, handler: () => void): () 
   return () => {
     if (handlers) handlers.delete(handler);
     if (handlers?.size === 0) clipboardUpdatedHandlers.delete(pluginId);
+  };
+}
+
+/* ============================================================
+ * 鼠标手势「画手势录制」监听管理器（模块级，跨 API 实例共享）
+ *
+ * 通知源只有一个 Tauri 事件（my-search://gesture-record，由 mouse_gesture.rs
+ * 识别线程在手势松手时携带方向串广播）；跨 API 实例共享单例监听，
+ * 按插件 id 分发（同 clipboard-updated 的成熟模式）。
+ * ============================================================ */
+
+/** 录制结果监听器：pluginId → Set<(pattern: string) => void> */
+const gestureRecordHandlers = new Map<string, Set<(pattern: string) => void>>();
+/** 单例 Tauri 监听是否已挂（挂一次，进程内共享） */
+let gestureRecordListenerReady = false;
+let gestureRecordUnlisten: (() => void) | null = null;
+
+function ensureGestureRecordListener(): void {
+  if (gestureRecordListenerReady) return;
+  gestureRecordListenerReady = true;
+  import("@tauri-apps/api/event").then(({ listen }) => {
+    listen<{ pattern?: string }>("my-search://gesture-record", (event) => {
+      const pattern = typeof event.payload?.pattern === "string" ? event.payload.pattern : "";
+      for (const [pid, handlers] of gestureRecordHandlers) {
+        for (const h of handlers) {
+          try { h(pattern); } catch (e) { console.warn(`[插件 ${pid}] 手势录制处理器异常:`, e); }
+        }
+      }
+    }).then((unlisten) => {
+      gestureRecordUnlisten = unlisten;
+    }).catch((e) => {
+      gestureRecordListenerReady = false;
+      console.warn("[插件] 注册手势录制监听失败:", e);
+    });
+  });
+}
+
+/** 为某插件注册「画手势录制」结果监听，返回取消函数。 */
+function addGestureRecordListener(
+  pluginId: string,
+  handler: (pattern: string) => void,
+): () => void {
+  if (typeof handler !== "function") return () => {};
+  ensureGestureRecordListener();
+  let handlers = gestureRecordHandlers.get(pluginId);
+  if (!handlers) {
+    handlers = new Set();
+    gestureRecordHandlers.set(pluginId, handlers);
+  }
+  handlers.add(handler);
+  return () => {
+    if (handlers) handlers.delete(handler);
+    if (handlers?.size === 0) gestureRecordHandlers.delete(pluginId);
+    // 全部插件都退订时卸掉单例监听（面板会话销毁后的清理路径）
+    if (gestureRecordHandlers.size === 0 && gestureRecordUnlisten) {
+      gestureRecordUnlisten();
+      gestureRecordUnlisten = null;
+      gestureRecordListenerReady = false;
+    }
   };
 }
 
@@ -1640,11 +1720,11 @@ export function createHostApi(pluginId: string, ctx: PluginHostContext): Record<
       /**
        * 分页拉取剪贴板历史（从新到旧）。
        *
-       * 关键词与「仅收藏」过滤在 Rust 侧**分页之前**完成，返回的 `total` 是
+       * 关键词、仅收藏与分类过滤在 Rust 侧**分页之前**完成，返回的 `total` 是
        * 过滤后总条数、`hasMore` 指示是否还有下一页——前端据此做「每页 30 条 +
        * 触底加载更多」。需要 `clipboard.read` 权限。
        */
-      page: (opts?: { query?: string; favoriteOnly?: boolean; offset?: number; limit?: number }) =>
+      page: (opts?: { query?: string; favoriteOnly?: boolean; category?: string; offset?: number; limit?: number }) =>
         call({
           api: "clipboard.page",
           permission: "clipboard.read",
@@ -1653,6 +1733,7 @@ export function createHostApi(pluginId: string, ctx: PluginHostContext): Record<
             ctx.clipboardHistoryPage?.({
               query: opts?.query,
               favoriteOnly: opts?.favoriteOnly,
+              category: opts?.category,
               offset: opts?.offset,
               limit: opts?.limit,
             }) ?? Promise.resolve({ items: [], total: 0, hasMore: false }),
@@ -1698,8 +1779,8 @@ export function createHostApi(pluginId: string, ctx: PluginHostContext): Record<
       /**
        * 清空剪贴板历史。
        *
-       * 默认**保留收藏条目**（只清未收藏的）；传 `{ keepFavorites: false }`
-       * 则连同收藏一起清空——是否保留由插件按用户选择决定。
+       * 默认**保留收藏与已分类条目**（只清临时条目）；传 `{ keepFavorites: false }`
+       * 则连同收藏 / 分类一起清空——是否保留由插件按用户选择决定。
        * 需要 `clipboard.read` 权限。
        */
       clear: (opts?: { keepFavorites?: boolean }) =>
@@ -1726,6 +1807,21 @@ export function createHostApi(pluginId: string, ctx: PluginHostContext): Record<
           run: () =>
             ctx.clipboardHistorySetFavorite?.(String(id ?? ""), !!favorite) ??
             Promise.reject(new Error("当前版本不支持收藏剪贴板历史")),
+        }),
+      /**
+       * 设置 / 清除一条历史的分类（`null` / 空串 = 取消分类）。
+       *
+       * 与 `setFavorite` 同属用户显式触发的写入性操作，走 `clipboard.write`。
+       * 已分类条目与收藏一样永久保留（不参与上限淘汰、默认清空也保留）。
+       */
+      setCategory: (id: string, category: string | null) =>
+        call({
+          api: "clipboard.setCategory",
+          permission: "clipboard.write",
+          detail: String(id ?? "") + " → " + (category ? String(category).slice(0, 24) : "(none)"),
+          run: () =>
+            ctx.clipboardHistorySetCategory?.(String(id ?? ""), category == null ? null : String(category)) ??
+            Promise.reject(new Error("当前版本不支持分类剪贴板历史")),
         }),
       /**
        * 修改一条文本剪贴板历史的内容（插件「编辑」按钮）。
@@ -1770,6 +1866,68 @@ export function createHostApi(pluginId: string, ctx: PluginHostContext): Record<
        * 返回取消订阅函数。
        */
       onUpdated: (handler: () => void) => addClipboardUpdatedListener(pluginId, handler),
+    },
+
+    /* ---------------- 鼠标手势（宿主原生钩子；仅手势插件获得本 API） ---------------- */
+    gesture: {
+      /** 读总开关 */
+      getEnabled: () =>
+        call({
+          api: "gesture.getEnabled",
+          run: () => ctx.gestureGetEnabled?.() ?? Promise.resolve(false),
+        }),
+      /** 写总开关（面板开关；置位即生效） */
+      setEnabled: (enabled: boolean) =>
+        call({
+          api: "gesture.setEnabled",
+          detail: String(enabled),
+          run: () => ctx.gestureSetEnabled?.(Boolean(enabled)) ?? Promise.reject(new Error("当前版本不支持")),
+        }),
+      /** 读映射表（权威在 Rust；面板打开时拉取） */
+      listBindings: () =>
+        call({
+          api: "gesture.listBindings",
+          run: () => ctx.gestureBindingsList?.() ?? Promise.resolve([]),
+        }),
+      /** 全量覆盖映射表（面板保存；即刻生效） */
+      syncBindings: (bindings: unknown) =>
+        call({
+          api: "gesture.syncBindings",
+          permission: "gesture.exec",
+          detail: `${Array.isArray(bindings) ? bindings.length : 0} 条映射`,
+          run: () =>
+            ctx.gestureBindingsSync?.(bindings as never) ??
+            Promise.reject(new Error("当前版本不支持")),
+        }),
+      /** 列出运行中的窗口进程（只读，供「呼出程序」动作下拉选择） */
+      listProcesses: () =>
+        call({
+          api: "gesture.listProcesses",
+          run: () => ctx.gestureListProcesses?.() ?? Promise.resolve([]),
+        }),
+      /**
+       * 画手势录制：进入录制模式后，下一次 Ctrl+右键手势只识别**不执行**
+       * （Rust RECORRING 模式），松手时广播 `my-search://gesture-record`
+       * 携带方向串。面板订阅本回调拿结果；返回取消订阅函数。
+       */
+      onRecord: (handler: (pattern: string) => void) =>
+        addGestureRecordListener(pluginId, handler),
+      /** 开始录制（Rust 侧置 RECORRING 模式；HUD 显示「录制中」提示） */
+      recordStart: () =>
+        call({
+          api: "gesture.recordStart",
+          permission: "gesture.exec",
+          run: () =>
+            ctx.gestureRecordStart?.() ?? Promise.reject(new Error("当前版本不支持")),
+        }),
+      /** 取消录制（Rust 侧退出 RECORRING 模式） */
+      recordCancel: () =>
+        call({
+          api: "gesture.recordCancel",
+          permission: "gesture.exec",
+          run: () =>
+            ctx.gestureRecordCancel?.() ?? Promise.reject(new Error("当前版本不支持")),
+        }),
     },
 
     /* ---------------- 后端 ---------------- */

@@ -39,7 +39,7 @@
   var dom = {};
   ["todo-input", "todo-add", "todo-hint", "todo-stats", "todo-tabs", "todo-clear-done",
    "todo-sort", "todo-sort-dir", "todo-level", "todo-status", "todo-list", "todo-empty",
-   "todo-empty-text"
+   "todo-empty-text", "todo-note", "todo-note-toggle"
   ].forEach(function (id) {
     dom[id] = document.getElementById(id);
   });
@@ -53,15 +53,15 @@
   /** 排序偏好单独一个键：改排序不该重写整个待办列表（也避免写失败丢数据） */
   var PREFS_KEY = "prefs";
   /** 存储格式版本：将来结构变了按版本迁移，别直接读坏老数据 */
-  var SCHEMA_VERSION = 1;
+  var SCHEMA_VERSION = 2;
   /**
    * 紧急等级：三档。内部值沿用 high/mid/low（已落库的数据不用迁移），
    * 对外文案是「紧急 / 普通 / 低」。
    */
   var URGENCIES = {
-    high: { label: "紧急", weight: 2, cls: "todo-chip-prio-high", parse: /^(紧急|高|h|high|重要|urgent)$/i },
-    mid: { label: "普通", weight: 1, cls: "todo-chip-prio-mid", parse: /^(普通|中|m|mid|medium|normal)$/i },
-    low: { label: "低", weight: 0, cls: "todo-chip-prio-low", parse: /^(低|l|low)$/i }
+    high: { label: "紧急", parse: /^(紧急|高|h|high|重要|urgent)$/i },
+    mid: { label: "普通", parse: /^(普通|中|m|mid|medium|normal)$/i },
+    low: { label: "低", parse: /^(低|l|low)$/i }
   };
   /** 排序权重：数字越小越靠前（紧急在前），未设置排最后 */
   var URGENCY_ORDER = { high: 0, mid: 1, low: 2 };
@@ -73,6 +73,8 @@
   var FILTERS = ["all", "active", "today", "done"];
   /** 单条待办标题上限（防手滑粘贴整篇文档把渲染卡住） */
   var MAX_TEXT = 500;
+  /** 单条待办详情上限（详情是补充说明，不是第二篇正文） */
+  var MAX_NOTE = 4000;
   var MAX_TODOS = 5000;
 
   // ===== 状态 =====
@@ -247,9 +249,11 @@
     if (!text) return null;
     var priority = raw.priority === "high" || raw.priority === "mid" || raw.priority === "low" ? raw.priority : null;
     var due = typeof raw.due === "string" && isValidISODate(raw.due) ? raw.due : null;
+    var note = typeof raw.note === "string" ? raw.note.trim().slice(0, MAX_NOTE) : "";
     return {
       id: typeof raw.id === "string" && raw.id ? raw.id : uid(),
       text: text.slice(0, MAX_TEXT),
+      note: note,
       done: !!raw.done,
       priority: priority,
       tags: Array.isArray(raw.tags)
@@ -431,10 +435,8 @@
 
   function metaHtml(t) {
     var parts = [];
-    if (t.priority && URGENCIES[t.priority]) {
-      parts.push(chipHtml("todo-chip-prio-" + (t.priority === "mid" ? "mid" : t.priority),
-        "紧急 " + URGENCIES[t.priority].label));
-    }
+    // 优先级不再做成 chip：等级状态只通过标题前的状态圆点表达（.todo-dot），
+    // 行内只剩标签 / 截止日期这两类「内容性」元信息。
     for (var i = 0; i < t.tags.length; i++) {
       parts.push(chipHtml("todo-chip-tag", "#" + t.tags[i]));
     }
@@ -455,18 +457,31 @@
 
     var bodyHtml;
     if (state.editingId === t.id) {
-      // 行内编辑：输入框内容原样（未解析）回填，保存时再解析
+      // 行内编辑：输入框内容原样（未解析）回填，保存时再解析；
+      // 详情单独一个 textarea（Enter 换行，Ctrl+Enter 保存）
       bodyHtml =
         '<div class="todo-edit-row">' +
           '<input class="todo-edit-input" type="text" data-edit-input="' + escapeHtml(t.id) + '" ' +
                  'value="' + escapeHtml(serializeEdit(t)) + '">' +
+        "</div>" +
+        '<textarea class="todo-edit-note" rows="2" data-edit-note="' + escapeHtml(t.id) + '" ' +
+                  'placeholder="详情（可选）">' + escapeHtml(t.note || "") + "</textarea>" +
+        '<div class="todo-edit-row">' +
           '<button class="todo-btn todo-btn-primary" data-action="edit-save" data-id="' + escapeHtml(t.id) + '">保存</button>' +
           '<button class="todo-btn" data-action="edit-cancel" data-id="' + escapeHtml(t.id) + '">取消</button>' +
         "</div>";
     } else {
+      // 标题前的状态圆点：优先级的唯一行内可视化（紧急=红 / 普通=黄 / 低=绿，
+      // 未设置=中性灰）。行底色统一为卡片底，不再随等级染色。
       bodyHtml =
-        '<span class="todo-text" data-action="edit-start" data-id="' + escapeHtml(t.id) + '" ' +
-              'title="双击编辑">' + escapeHtml(t.text) + "</span>" + metaHtml(t);
+        '<div class="todo-title-line">' +
+          '<span class="todo-dot" aria-hidden="true"' +
+                 (prio !== "none" && URGENCIES[prio] ? ' title="' + escapeHtml(URGENCIES[prio].label) + '"' : "") + "></span>" +
+          '<span class="todo-text" data-action="edit-start" data-id="' + escapeHtml(t.id) + '" ' +
+                 'title="双击编辑">' + escapeHtml(t.text) + "</span>" +
+        "</div>" +
+        (t.note ? '<div class="todo-note">' + escapeHtml(t.note) + "</div>" : "") +
+        metaHtml(t);
     }
 
     return '<li class="' + cls + '" data-id="' + escapeHtml(t.id) + '" data-priority="' + escapeHtml(prio) + '">' +
@@ -474,10 +489,8 @@
              (t.done ? " checked" : "") + ' aria-label="完成"' + ">" +
       '<div class="todo-body">' + bodyHtml + "</div>" +
       '<div class="todo-actions">' +
-        '<button class="todo-icon-btn" data-action="cycle-prio" data-id="' + escapeHtml(t.id) + '" ' +
-                'title="切换紧急等级（当前：' + (t.priority && URGENCIES[t.priority] ? URGENCIES[t.priority].label : "未设置") + '）">' +
-                // 显示等级首字，比统一的 "!" 更能一眼看出当前档位
-                (t.priority && URGENCIES[t.priority] ? URGENCIES[t.priority].label.charAt(0) : "·") + "</button>" +
+        '<button class="todo-icon-btn todo-icon-btn-edit" data-action="edit-start" data-id="' + escapeHtml(t.id) + '" ' +
+                'title="编辑（改标题 / 标签 / 紧急等级 / 截止日期 / 详情）">✎</button>' +
         '<button class="todo-icon-btn todo-icon-btn-danger" data-action="remove" data-id="' + escapeHtml(t.id) + '" ' +
                 'title="删除">✕</button>' +
       "</div>" +
@@ -611,10 +624,29 @@
     return URGENCIES[v] ? v : DEFAULT_LEVEL;
   }
 
-  /** 把新增区重置为默认状态（等级回到默认档，输入框清空） */
+  /** 新增区的详情文本（trim + 长度上限；没有输入时为空串） */
+  function currentNote() {
+    return dom["todo-note"] ? String(dom["todo-note"].value || "").trim().slice(0, MAX_NOTE) : "";
+  }
+
+  /** 展开 / 收起新增区的详情输入框 */
+  function setNoteOpen(open) {
+    if (!dom["todo-note"]) return;
+    dom["todo-note"].hidden = !open;
+    if (dom["todo-note-toggle"]) {
+      dom["todo-note-toggle"].textContent = open ? "收起详情" : "详情";
+      dom["todo-note-toggle"].classList.toggle("active", open);
+    }
+    if (open) {
+      dom["todo-note"].focus();
+    }
+  }
+
+  /** 把新增区重置为默认状态（等级回到默认档，输入框与详情清空） */
   function resetComposer() {
     if (dom["todo-level"]) dom["todo-level"].value = DEFAULT_LEVEL;
     if (dom["todo-input"]) dom["todo-input"].value = "";
+    if (dom["todo-note"]) dom["todo-note"].value = "";
   }
 
   function findTodo(id) {
@@ -638,6 +670,7 @@
     state.todos.push({
       id: uid(),
       text: parsed.text,
+      note: currentNote(),
       done: false,
       priority: effectiveLevel(parsed),
       tags: parsed.tags,
@@ -666,6 +699,7 @@
     state.todos.push({
       id: uid(),
       text: parsed.text,
+      note: "",
       done: false,
       // 二次搜索新增没有选择器上下文（界面可能还没渲染），用默认档；
       // 文本里写了 `!紧急` 等仍以文本为准
@@ -699,18 +733,6 @@
     commit();
   }
 
-  function cyclePriority(id) {
-    var t = findTodo(id);
-    if (!t) return;
-    // null → high → mid → low → null
-    t.priority = t.priority === null ? "high"
-      : t.priority === "high" ? "mid"
-      : t.priority === "mid" ? "low"
-      : null;
-    t.updatedAt = Date.now();
-    commit();
-  }
-
   function startEdit(id) {
     state.editingId = id;
     render();
@@ -736,8 +758,12 @@
     }
     var t = findTodo(id);
     if (!t) { state.editingId = null; render(); return; }
+    var noteEl = dom["todo-list"].querySelector('[data-edit-note="' + id + '"]');
     t.text = parsed.text;
-    t.priority = parsed.priority;
+    t.note = noteEl ? String(noteEl.value || "").trim().slice(0, MAX_NOTE) : (t.note || "");
+    // 行内编辑没有新增区那个等级选择器可兜底：文本里没写 `!紧急/!普通/!低`
+    // 时保持原等级不动（否则每次编辑都会把没写等级的条目重置掉）
+    t.priority = parsed.priority || t.priority;
     t.tags = parsed.tags;
     t.due = parsed.due;
     t.updatedAt = Date.now();
@@ -771,6 +797,21 @@
   function bindEvents() {
     // 新增
     if (dom["todo-add"]) dom["todo-add"].addEventListener("click", function () { addFromInput(); });
+
+    // 详情：展开/收起；详情框里 Ctrl/Cmd+Enter 直接添加（Enter 保留换行）
+    if (dom["todo-note-toggle"]) {
+      dom["todo-note-toggle"].addEventListener("click", function () {
+        setNoteOpen(dom["todo-note"] ? dom["todo-note"].hidden : false);
+      });
+    }
+    if (dom["todo-note"]) {
+      dom["todo-note"].addEventListener("keydown", function (e) {
+        if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !e.isComposing) {
+          e.preventDefault();
+          addFromInput();
+        }
+      });
+    }
 
     if (dom["todo-input"]) {
       dom["todo-input"].addEventListener("keydown", function (e) {
@@ -836,9 +877,9 @@
         var id = el.getAttribute("data-id");
         if (action === "toggle") { toggleTodo(id); return; }
         if (action === "remove") { removeTodo(id); return; }
-        if (action === "cycle-prio") { cyclePriority(id); return; }
         if (action === "edit-save") { saveEdit(id); return; }
         if (action === "edit-cancel") { cancelEdit(); return; }
+        if (action === "edit-start") { startEdit(id); return; }
         // edit-start 只在双击时触发（见 dblclick），单击不进入编辑
       });
 
@@ -850,7 +891,19 @@
 
       dom["todo-list"].addEventListener("keydown", function (e) {
         var t = e.target;
-        if (!t || !t.getAttribute || !t.getAttribute("data-edit-input")) return;
+        if (!t || !t.getAttribute) return;
+        // 编辑态的详情框：Enter 换行（textarea 默认行为），Ctrl/Cmd+Enter 保存，Esc 取消
+        if (t.getAttribute("data-edit-note")) {
+          if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !e.isComposing) {
+            e.preventDefault();
+            saveEdit(t.getAttribute("data-edit-note"));
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            cancelEdit();
+          }
+          return;
+        }
+        if (!t.getAttribute("data-edit-input")) return;
         var id = t.getAttribute("data-edit-input");
         if (e.key === "Enter" && !e.isComposing) {
           e.preventDefault();
@@ -888,6 +941,34 @@
         var s = String(sub == null ? "" : sub).trim();
         if (!s) return;
         quickAdd(s);
+      });
+    }
+
+    // ===== 全局快捷键动作（宿主转发） =====
+    //
+    // 清单 contributes.shortcut 里声明了本地动作名 `open-todo`、默认键
+    // Ctrl+Alt+T；宿主在插件安装后自动注册全局热键（`plugin:<id>:open-todo`，
+    // 未被用户解绑且默认键没被占用时），按下后打开/恢复本视图并把动作名派发
+    // 到这里。行为：聚焦新增输入框、光标落到末尾，用户直接输入待办内容。
+    // （改键 / 解绑在 设置 → 快捷键；解绑后宿主不再注册、也不会再派发。）
+    //
+    // onAction 返回的取消函数**不在这里调用**：处理器要陪整个会话——
+    // minimize 停车保活后快捷键仍应能呼出聚焦；会话真正销毁时宿主会统一
+    // 清掉本插件的所有动作处理器（_clearActionHandlers），无需手动摘。
+    if (ms && ms.shortcuts && typeof ms.shortcuts.onAction === "function") {
+      ms.shortcuts.onAction("open-todo", function () {
+        if (!alive()) return; // 会话已销毁（停车区 DOM 已脱离文档）：不碰任何 DOM
+        var input = dom["todo-input"];
+        if (!input) return;
+        // 若正停在行内编辑态，先退出编辑（否则输入框聚焦也录不了新待办）
+        if (state.editingId != null) {
+          state.editingId = null;
+          render();
+        }
+        input.focus();
+        var len = input.value.length;
+        try { input.setSelectionRange(len, len); } catch (e) { /* 非文本控件时忽略 */ }
+        toast("已呼出待办清单，直接输入即可新增", "info");
       });
     }
 
