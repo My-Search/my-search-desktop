@@ -67,7 +67,8 @@ static HELD: AtomicBool = AtomicBool::new(false);
 
 /// 「画手势录制」模式：面板请求后置位——识别线程把手势结果广播给
 /// 面板（my-search://gesture-record）而**不执行动作**；HUD 显示「录制中」。
-#[cfg(windows)]
+/// 不能加 `#[cfg(windows)]`：`gesture_record_start` / `gesture_record_cancel`
+/// 两个命令在所有平台注册，非 Windows 编译也会引用它。
 static RECORDING: AtomicBool = AtomicBool::new(false);
 
 // ===================== 识别算法（移植 FlowMouse GestureRecognizer） =====================
