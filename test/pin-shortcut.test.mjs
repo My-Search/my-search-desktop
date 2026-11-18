@@ -2,16 +2,16 @@
  * 贴图（pin）快捷键 + 窗口链路的静态契约测试（纯 Node，无需浏览器）。
  *
  * 链路（与截图同源）：截图插件清单 `contributes.shortcut` 数组里声明第二个
- * 动作 `pin`（宿主原生保留名）+ 默认键 ctrl+alt+v → 前端算出可用动作下发给
+ * 动作 `pin`（宿主原生保留名）+ 默认键 ctrl+alt+p → 前端算出可用动作下发给
  * Rust（`sync_plugin_shortcut_actions`）→ `reconcile_plugin_actions` 自动注入
  * → `dispatch_shortcut_action` 分发到 `pin_image::start_pin_from_shortcut`：
  * 读系统剪贴板位图（`clipboard_history::current_clipboard_image`）→ 光标处开
  * 无边框置顶小窗（`pin.html` + `src/windows/pin/PinApp.vue`）。
  *
- * 键位冲突处置：ctrl+alt+v 原本是剪贴板历史的老默认键。本版本起：
- *   - Rust `migrate_pin_shortcut` 一次性把仍绑在 ctrl+alt+v 的剪贴板历史迁到
- *     ctrl+alt+b（用户自定义过/解绑过的不动，目标键被占也不动）；
- *   - 清单默认值同步改为 ctrl+alt+b；
+ * 默认键约定：
+ *   - 贴图（`pin`）默认 `ctrl+alt+p`，剪贴板历史（`clipboard`）默认 `ctrl+alt+v`；
+ *   - Rust `migrate_pin_shortcut` 一次性把曾迁到临时默认键的老绑定平滑对齐到
+ *     `pin=ctrl+alt+p`、`clipboard=ctrl+alt+v`（用户自定义过/解绑过的不动，目标键被占也不动）；
  *   - 全部插件清单声明的默认键 + 宿主默认键之间互不冲突。
  *
  * 用法: node test/pin-shortcut.test.mjs
@@ -56,17 +56,17 @@ ok(
 );
 const pinAction = shotActions.find((s) => s.action === "pin");
 ok(!!pinAction, "截图清单声明了 pin 动作（贴图）");
-ok(pinAction?.defaultShortcut === "ctrl+alt+v", "pin 默认键为 ctrl+alt+v", pinAction?.defaultShortcut ?? "(missing)");
+ok(pinAction?.defaultShortcut === "ctrl+alt+p", "pin 默认键为 ctrl+alt+p", pinAction?.defaultShortcut ?? "(missing)");
 ok(!!pinAction?.title, "pin 动作有标题", pinAction?.title ?? "(missing)");
 
-/* 2. 剪贴板清单：默认键迁到 ctrl+alt+b */
+/* 2. 剪贴板清单：默认键为 ctrl+alt+v */
 const clipRaw = readFileSync(path.join(clipDir, "plugin.json"), "utf8");
 const clipParsed = parsePluginManifest(clipRaw, isKnownPermission);
 ok(clipParsed.ok, "剪贴板清单通过 parsePluginManifest 校验", (clipParsed.errors || []).join(", ") || "no errors");
 const clipActions = clipParsed.ok ? listShortcutActions(clipParsed.manifest) : [];
 ok(
-  clipActions.some((s) => s.action === "clipboard" && s.defaultShortcut === "ctrl+alt+b"),
-  "剪贴板清单默认键已迁到 ctrl+alt+b"
+  clipActions.some((s) => s.action === "clipboard" && s.defaultShortcut === "ctrl+alt+v"),
+  "剪贴板清单默认键为 ctrl+alt+v"
 );
 
 /* 3. 动作计算链路（数组声明的第二个动作能被算出） */
@@ -77,7 +77,7 @@ const shotRec = {
 };
 const shotActions2 = shortcutActionsOf(shotRec);
 ok(
-  shotActions2.some((a) => a.action === "pin" && a.defaultShortcut === "ctrl+alt+v" && a.pluginId === "com.zhuangjie.screenshot"),
+  shotActions2.some((a) => a.action === "pin" && a.defaultShortcut === "ctrl+alt+p" && a.pluginId === "com.zhuangjie.screenshot"),
   "shortcutActionsOf 算出 pin 动作（宿主原生名直通）"
 );
 const reg = { plugins: [shotRec] };

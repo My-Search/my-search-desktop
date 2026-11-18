@@ -1,0 +1,17 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "plugin-window",
+  "description": "插件独立窗口能力（获授 ui.window 权限的插件通过 ms.ui.openWindow 打开的子窗口；所有宿主命令仍由 Rust 网关做第二道权限校验）",
+  "windows": [
+    "plugin-win-*"
+  ],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:window:allow-close",
+    "core:window:allow-set-focus",
+    "core:window:allow-start-dragging",
+    "dialog:default",
+    "opener:allow-open-url"
+  ]
+}

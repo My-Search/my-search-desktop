@@ -29,7 +29,12 @@ import {
   watchPluginDir,
   type BackendStatus,
 } from "../../lib/plugins/ipc.ts";
-import { syncRecordGateway, syncShortcutActions } from "../../lib/plugins/gateway.ts";
+import {
+  onRegistryChanged,
+  syncRecordGateway,
+  syncRegistryGateway,
+  syncShortcutActions,
+} from "../../lib/plugins/gateway.ts";
 import { parsePluginManifest, type PluginManifest } from "../../lib/plugins/manifest.ts";
 import { isKnownPermission } from "../../lib/plugins/permissions.ts";
 import { isFreshEvent, planReload } from "../../lib/plugins/dev-reload.ts";
@@ -124,12 +129,29 @@ export function usePluginRuntime() {
     await refreshBackends();
   }
 
-  /** 调和全部插件（启动 / 注册表变化时调用） */
+  /** 调和全部插件（启动 / 注册表变化时调用：一次批量网关同步取代逐条 IPC） */
   async function reconcileAll(): Promise<void> {
+    try {
+      await syncRegistryGateway(registry);
+    } catch (e) {
+      console.warn("[插件] 批量网关同步失败:", e);
+    }
+    try {
+      await syncShortcutActions(registry);
+    } catch (e) {
+      console.warn("[插件] 快捷键动作同步失败:", e);
+    }
     for (const rec of registry.plugins) {
       if (rec.source.kind === "legacy") continue;
-      await reconcile(rec.id);
+      if (rec.source.dev && rec.source.ref) {
+        try {
+          await watchPluginDir(rec.id, rec.source.ref, true);
+        } catch (e) {
+          console.warn(`[插件] 登记目录监听失败（${rec.id}）:`, e);
+        }
+      }
     }
+    await refreshBackends();
   }
 
   /** 刷新后台进程状态 */
@@ -547,17 +569,17 @@ export function usePluginRuntime() {
 
   /** 事件监听取消函数（窗口卸载时调用） */
   let unlistenDevChanged: (() => void) | null = null;
+  let unlistenRegistryChanged: (() => void) | null = null;
 
   /**
-   * 监听「开发插件变化」事件，把新清单合并进面板正在展示的注册表。
-   *
-   * 与搜索窗口的分工：**这里只更新展示**（名称 / 版本 / 描述 / 搜索项 / 权限
-   * 的待确认状态），不做视图重挂与进程重启——那两个动作属于前台会话。
-   * 面板上的记录是 `reactive` 的，就地改字段即可刷新界面。
-   *
-   * 串行消费：同一插件的连续事件按序处理，避免并发读清单互相覆盖。
+   * 监听「开发插件变化」与「跨窗口注册表变更」事件，把新状态合并进面板响应式注册表。
    */
   async function startDevWatcher(): Promise<void> {
+    if (!unlistenRegistryChanged) {
+      unlistenRegistryChanged = onRegistryChanged(() => {
+        reloadRegistry();
+      });
+    }
     if (unlistenDevChanged) return;
     let chain: Promise<void> = Promise.resolve();
     const unlisten = await onPluginDevChanged((payload) => {
@@ -576,6 +598,8 @@ export function usePluginRuntime() {
   function stopDevWatcher(): void {
     unlistenDevChanged?.();
     unlistenDevChanged = null;
+    unlistenRegistryChanged?.();
+    unlistenRegistryChanged = null;
   }
 
   /**

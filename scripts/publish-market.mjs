@@ -52,6 +52,7 @@ const PLUGINS = [
   { dir: "resource-monitor", id: "com.zhuangjie.resource-monitor" },
   { dir: "com.zhuangjie.app-uninstaller", id: "com.zhuangjie.app-uninstaller" },
   { dir: "com.zhuangjie.mouse-gesture", id: "com.zhuangjie.mouse-gesture" },
+  { dir: "com.zhuangjie.webdav", id: "com.zhuangjie.webdav" },
 ];
 
 const pkgsDir = path.join(root, "dist", "market-pkgs");

@@ -1,7 +1,7 @@
 //! 贴图（Pin Image）：把**当前剪贴板里的图片**钉在屏幕上。
 //!
 //! 交互（与截图同源的一条宿主原生链路）：
-//!   1. 用户按全局热键 `Ctrl+Alt+V`（由「截图」插件清单 `contributes.shortcut`
+//!   1. 用户按全局热键 `Ctrl+Alt+P`（由「截图」插件清单 `contributes.shortcut`
 //!      声明动作 `pin`，Rust 端 `SHORTCUT_ACTION_PIN` 分发到本模块）；
 //!   2. 只读一次系统剪贴板（`clipboard_history::current_clipboard_image`，
 //!      CF_DIB → RGBA，不写不 Empty——只读铁律见 clipboard_history.rs 模块注释）；
@@ -11,7 +11,7 @@
 //!      「剪贴板里没有图片」（贴图失败不该让用户面对毫无反应的热键）。
 //!   4. 再按一次热键 = 再贴一张（多实例），超过上限时关掉最旧的一张（FIFO）。
 //!
-//! 典型链路：截图 → 标注 → 复制 → Ctrl+Alt+V → 贴图钉在屏幕上对照参考。
+//! 典型链路：截图 → 标注 → 复制 → Ctrl+Alt+P → 贴图钉在屏幕上对照参考。
 //! 窗口行为由 `src/windows/pin/PinApp.vue` 实现：双击关闭、右键菜单
 //! （显示编辑工具 / 关闭 / 复制）、编辑工具（画笔 / 矩形 / 椭圆 / 箭头 /
 //! 文字 / 橡皮）。窗口透明：橡皮「擦掉」贴图时露出底下的真实桌面。
@@ -189,29 +189,39 @@ async fn run_pin_capture(app: &AppHandle) -> Result<(), String> {
         return Err(err("剪贴板里没有图片"));
     };
 
-    // 光标所在屏（定位用；拿不到就退主屏中心）
-    let (cx, cy) = cursor_pos().unwrap_or((0, 0));
-    let monitor = monitor_at(app, cx, cy);
+    // 剪贴板内容若与上次「截图复制」的像素指纹一致，就贴回截图选区原位
+    //（用户需求：截图后贴图的位置与截图时一致）；否则维持光标居中。
+    let anchored = crate::screenshot::take_capture_anchor()
+        .filter(|(_, _, fp)| *fp == crate::screenshot::pixel_fingerprint(w, h, &rgba));
 
     // 超上限先关最旧的，再注册新的（保证「按热键必出新贴图」）
     trim_pins(app);
 
-    // 窗口 = 图片尺寸（物理像素 1:1），比屏大则等比缩进屏内；
-    // 位置以光标为中心，整体夹进显示器内。
-    let (mx, my, mw, mh) = monitor.unwrap_or((0, 0, 1920, 1080));
-    let avail_w = mw.saturating_sub(SCREEN_MARGIN * 2).max(160);
-    let avail_h = mh.saturating_sub(SCREEN_MARGIN * 2).max(160);
-    let (ww, wh) = fit_size(w, h, avail_w, avail_h);
-    let (px, py) = clamp_pos(
-        cx - ww as i32 / 2,
-        cy - wh as i32 / 2,
-        ww as i32,
-        wh as i32,
-        mx,
-        my,
-        mw as i32,
-        mh as i32,
-    );
+    let (ww, wh, px, py) = if let Some((ax, ay, _)) = anchored {
+        // 选区本身就在屏幕内：原坐标 + 原尺寸，1:1 贴回原位置，不再 fit/clamp。
+        (w, h, ax, ay)
+    } else {
+        // 光标所在屏（定位用；拿不到就退主屏中心）
+        let (cx, cy) = cursor_pos().unwrap_or((0, 0));
+        let monitor = monitor_at(app, cx, cy);
+        // 窗口 = 图片尺寸（物理像素 1:1），比屏大则等比缩进屏内；
+        // 位置以光标为中心，整体夹进显示器内。
+        let (mx, my, mw, mh) = monitor.unwrap_or((0, 0, 1920, 1080));
+        let avail_w = mw.saturating_sub(SCREEN_MARGIN * 2).max(160);
+        let avail_h = mh.saturating_sub(SCREEN_MARGIN * 2).max(160);
+        let (ww, wh) = fit_size(w, h, avail_w, avail_h);
+        let (px, py) = clamp_pos(
+            cx - ww as i32 / 2,
+            cy - wh as i32 / 2,
+            ww as i32,
+            wh as i32,
+            mx,
+            my,
+            mw as i32,
+            mh as i32,
+        );
+        (ww, wh, px, py)
+    };
 
     let png = crate::screenshot::encode_png(w, h, &rgba)?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
@@ -266,6 +276,60 @@ async fn build_pin_window(
 }
 
 // ===================== 命令（pin.html 页面调用） =====================
+
+/// 编辑态窗口边界：位置 + 尺寸**一次**生效。
+///
+/// 前端进入/退出编辑时要同时改窗口高度与坐标（贴近屏幕底部时向上扩、窗口上移，
+/// 图片在屏幕上原地不动）。若分两次调 `set_position` / `set_size`，WebView 会先
+/// 按其中一个值渲染一帧，表现为图片或工具条抖一下；Windows 侧用一次
+/// `SetWindowPos` 原子完成，其它平台退化为顺序调用。
+#[tauri::command]
+pub fn pin_set_bounds(
+    app: AppHandle,
+    label: String,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    let win = app
+        .get_webview_window(&label)
+        .ok_or_else(|| err("贴图窗口不存在"))?;
+
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER,
+        };
+        let hwnd = win
+            .hwnd()
+            .map_err(|e| err(&format!("取贴图窗口句柄失败: {e}")))?;
+        unsafe {
+            SetWindowPos(
+                HWND(hwnd.0 as *mut _),
+                None,
+                x,
+                y,
+                width as i32,
+                height as i32,
+                SWP_NOACTIVATE | SWP_NOZORDER,
+            )
+            .map_err(|e| err(&format!("设置贴图窗口边界失败: {e}")))?;
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        use tauri::{PhysicalPosition, PhysicalSize};
+        win.set_position(PhysicalPosition::new(x, y))
+            .map_err(|e| err(&format!("移动贴图窗口失败: {e}")))?;
+        win.set_size(PhysicalSize::new(width, height))
+            .map_err(|e| err(&format!("调整贴图窗口大小失败: {e}")))?;
+    }
+
+    Ok(())
+}
 
 /// 页面取自己这张贴图（label 由页面从窗口元数据读出后传入）。
 #[tauri::command]

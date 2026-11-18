@@ -44,28 +44,28 @@ ok(typeof manifest.version === "string" && manifest.version.length > 0, "有版�
 
 /* ---------------- 2. Rust 侧接线 ---------------- */
 const rs = read("src-tauri/src/mouse_gesture.rs");
-ok(/pub fn install\(app: AppHandle\)/.test(rs), "Rust: install 入口存在");
-ok(/SetWindowsHookExW\(WH_MOUSE_LL/.test(rs), "Rust: 安装 WH_MOUSE_LL 低级鼠标钩子");
+ok(/pub fn sync_active\(app: &AppHandle\)/.test(rs), "Rust: sync_active 按需启停入口存在");
+ok(!/GESTURE_PLUGIN_ID/.test(rs), "Rust: 不再硬编码特定鼠标手势插件 ID");
+ok(/SetWindowsHookExW\(WH_MOUSE_LL/.test(rs) && /UnhookWindowsHookEx/.test(rs), "Rust: 支持按需安装与卸载 WH_MOUSE_LL 低级鼠标钩子");
 ok(/WM_RBUTTONUP/.test(rs) && /return 1;/.test(rs), "Rust: 激活时吞掉 RBUTTONUP（右键菜单不弹）");
 ok(/WM_RBUTTONDOWN/.test(rs) && /trigger_held/.test(rs), "Rust: 按下需按住触发键");
 ok(/VK_CONTROL/.test(rs), "Rust: 默认触发键 Ctrl");
-ok(/has_base_permission\(&s, "gesture.exec"\)/.test(rs), "Rust: 执行前校验 gesture.exec 网关权限");
+ok(/plugin_host::require_grant\(&plugin_id,\s*"gesture\.exec"\)/.test(rs), "Rust: 命令与执行前经统一网关校验 gesture.exec 权限");
 ok(/fn gesture_get_enabled|fn gesture_set_enabled|fn gesture_bindings_list|fn gesture_bindings_sync/.test(rs),
   "Rust: 四个 tauri 命令齐备");
 ok(/Sleep|Shutdown|Reboot|Terminal|Explorer|KillForeground|Open/.test(rs),
   "Rust: 动作枚举含休眠/关机/重启/命令行/资源管理器/强杀前台/打开");
 ok(/pattern:\s*"U"/.test(rs) === false || true, "占位（默认映射检查移至下方专项断言）");
 ok(!/Mutex::new\(default_bindings\(\)\)/.test(rs), "Rust: 不再内置注入默认映射（BINDINGS 初始为空，用户全自定义）");
-ok(/g\.is_empty\(\)/.test(rs), "Rust: 快照恢复条件 = 映射表为空（删光 = 自愿清空）");
 ok(/gesture_record_start|gesture_record_cancel|RECORDING/.test(rs), "Rust: 画手势录制模式与命令齐备");
 ok(/my-search:\/\/gesture-record/.test(rs), "Rust: 录制结果广播 my-search://gesture-record");
 ok(/TerminateProcess|WM_CLOSE|0x0010/.test(rs), "Rust: 强杀前台先 WM_CLOSE 再强杀");
 ok(/SetSuspendState/.test(rs), "Rust: 休眠走 SetSuspendState（不弹 UAC）");
-ok(/gesture-bindings\.json/.test(rs), "Rust: 映射快照落盘（重启自愈）");
+ok(/gesture-bindings\.json/.test(rs), "Rust: 映射快照按插件独立落盘（重启自愈）");
 
 const librs = read("src-tauri/src/lib.rs");
 ok(/mod mouse_gesture;/.test(librs), "lib.rs: 挂载 mouse_gesture 模块");
-ok(/mouse_gesture::install\(app\.handle\(\)\.clone\(\)\)/.test(librs), "lib.rs: setup 时安装手势钩子");
+ok(/plugin_host::reconcile_native_capabilities\(app\.handle\(\)\)/.test(librs), "lib.rs: setup 时按网关授权按需调和手势钩子");
 ok(/mouse_gesture::gesture_get_enabled,/.test(librs) && /mouse_gesture::gesture_bindings_sync,/.test(librs),
   "lib.rs: 注册手势命令到 invoke_handler");
 
@@ -80,13 +80,13 @@ for (const cmd of ["gesture_get_enabled", "gesture_set_enabled", "gesture_bindin
   ok(ipc.includes(`"${cmd}"`), `ipc.ts: 封装 ${cmd}`);
 }
 
-const host = read("src/lib/plugins/host.ts");
-ok(/gesture:\s*\{/.test(host), "host.ts: 提供 ms.gesture API");
-ok(/onRecord:\s*\(handler/.test(host) && /recordStart:\s*\(\)/.test(host), "host.ts: 提供 ms.gesture.onRecord / recordStart / recordCancel（画手势录制通道）");
-ok(/permission:\s*"gesture\.exec"/.test(host), "host.ts: syncBindings 按权限门禁");
+const host = read("src/lib/plugins/host/native-api.ts");
+ok(/defineRpcNamespace\(\s*"gesture"/.test(host), "host/native-api.ts: 表驱动提供 ms.gesture API");
+ok(/onRecord:\s*\(handler/.test(host) && /recordStart:\s*\{/.test(host), "host/native-api.ts: 提供 ms.gesture.onRecord / recordStart / recordCancel（画手势录制通道）");
+ok(/permission:\s*"gesture\.exec"/.test(host), "host/native-api.ts: syncBindings / recordStart 按权限门禁");
 
 const uph = read("src/windows/search/usePluginHost.ts");
-ok(/gestureBindingsSync: \(bindings\)/.test(uph), "usePluginHost: 注入手势 API 实现");
+ok(!/gestureBindingsSync/.test(uph), "usePluginHost: 已消除冗余手势透传样板（网关直连 IPC）");
 
 /* ---------------- 4. 插件面板 ---------------- */
 const ui = read("plugins/com.zhuangjie.mouse-gesture/ui/index.js");
@@ -120,8 +120,8 @@ ok(/fn show_hud[\s\S]*?virtual_screen_bounds\(app\)[\s\S]*?set_always_on_top\(tr
   "Rust: show_hud 先对齐虚拟屏包围盒再重断言 TOPMOST（防被后建置顶窗盖住）");
 ok(/"vx": vx, "vy": vy, "vw": vw, "vh": vh/.test(rs), "Rust: 轨迹事件携带虚拟屏包围盒（HUD 坐标对齐依据）");
 ok(/"recording": true/.test(rs), "Rust: 录制结果带 recording 标记（HUD 不再误报「未映射」）");
-ok(/pub fn gesture_record_start\(app: AppHandle\)/.test(rs) && /show_hud\(&app/.test(rs),
-  "Rust: record_start 同步唤起 HUD「录制中」提示");
+ok(/pub fn gesture_record_start\(app: AppHandle,\s*plugin_id: String\)/.test(rs) && /show_hud\(&app/.test(rs),
+  "Rust: record_start 携带 plugin_id 鉴权并同步唤起 HUD「录制中」提示");
 
 const hudTs = read("src/gesture.ts");
 ok(/let originX = 0/.test(hudTs) && /\(x - originX\) \/ dpr/.test(hudTs),
@@ -168,9 +168,9 @@ ok(librs.includes("mouse_gesture::gesture_list_processes,"), "lib.rs: 注册 ges
 ok(ipc.includes('"gesture_list_processes"') && /RunningProcessIpc/.test(ipc),
   "ipc.ts: 封装 gestureListProcesses + RunningProcessIpc 类型");
 ok(/listProcesses:/.test(host) && /gestureListProcesses/.test(host),
-  "host.ts: 暴露 ms.gesture.listProcesses");
-ok(/gestureListProcesses/.test(read("src/windows/search/usePluginHost.ts")),
-  "usePluginHost.ts: 注入进程列举实现");
+  "host/native-api.ts: 暴露 ms.gesture.listProcesses");
+ok(!/gestureListProcesses/.test(read("src/windows/search/usePluginHost.ts")),
+  "usePluginHost.ts: 已移除冗余进程列举透传样板");
 ok(/data-act="process"/.test(ui) && /data-act="exePath"/.test(ui) && /mg-focus-fields/.test(ui),
   "面板: 呼出程序动作有进程下拉 + 手动路径输入");
 ok(/ms\.gesture\.listProcesses/.test(ui) && /mg-refresh-processes/.test(detailHtml),

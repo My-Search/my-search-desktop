@@ -77,6 +77,12 @@ const EVENT_BACKEND_CHANGED: &str = "plugin://backend-changed";
 /// 插件后端通知事件名（后端发的非 log 通知通过此事件广播给前端）
 /// payload: {"method":"chat:delta","params":{...}}
 const EVENT_BACKEND_NOTIFICATION: &str = "plugin://notification";
+/// 插件注册表/网关变更广播事件（跨窗口即时同步，消除 localStorage 指纹轮询）
+pub(crate) const EVENT_REGISTRY_CHANGED: &str = "plugin://registry-changed";
+/// 插件独立子窗口 label 前缀（capabilities/plugin-window.json 按 `plugin-win-*` 授权）
+pub const PLUGIN_WINDOW_PREFIX: &str = "plugin-win-";
+/// 单个插件同时允许打开的独立窗口上限
+const MAX_PLUGIN_WINDOWS: usize = 4;
 
 // ===================== 错误与结果 =====================
 
@@ -228,6 +234,10 @@ pub struct GatewaySpec {
     /// 也能拿到变量」的必要代价。
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// 该插件是否订阅后台剪贴板变更流（需同时具备 `clipboard.read` 授权才生效）。
+    /// 将「一次性读剪贴板（如截图贴图）」与「后台持续抓取历史」解耦，避免非剪贴板插件白白写盘。
+    #[serde(default)]
+    pub clipboard_capture: bool,
 }
 
 static GATEWAY: LazyLock<Mutex<HashMap<String, GatewaySpec>>> =
@@ -302,6 +312,95 @@ pub(crate) fn has_base_permission(spec: &GatewaySpec, base: &str) -> bool {
         let b = g.split(':').next().unwrap_or("");
         b == base
     })
+}
+
+/// 统一网关守卫：校验插件已注册、处于启用态，且已获授指定基础权限。
+///
+/// 所有向插件开放的原生命令（剪贴板、截图、鼠标手势、文件存储、独立窗口等）
+/// 统一走本函数做第二道纵深防御，避免各模块重复手写或遗漏鉴权。
+pub(crate) fn require_grant(plugin_id: &str, base: &str) -> Result<GatewaySpec, String> {
+    validate_plugin_id(plugin_id)?;
+    let spec = gateway_get(plugin_id)
+        .ok_or_else(|| err(format!("插件「{plugin_id}」未注册到网关（请先同步注册表）")))?;
+    if !spec.enabled {
+        return Err(err(format!("插件「{plugin_id}」已禁用")));
+    }
+    if !has_base_permission(&spec, base) {
+        return Err(err(format!("插件「{plugin_id}」缺少权限: {base}")));
+    }
+    Ok(spec)
+}
+
+/// 统一网关守卫（仅要求插件已注册且启用，用于读取插件自身非敏感运行态）。
+pub(crate) fn require_enabled(plugin_id: &str) -> Result<GatewaySpec, String> {
+    validate_plugin_id(plugin_id)?;
+    let spec = gateway_get(plugin_id)
+        .ok_or_else(|| err(format!("插件「{plugin_id}」未注册到网关")))?;
+    if !spec.enabled {
+        return Err(err(format!("插件「{plugin_id}」已禁用")));
+    }
+    Ok(spec)
+}
+
+/// 当前网关中是否存在**至少一个**已启用且获授 `base` 权限的插件。
+///
+/// 原生钩子/监听器（系统剪贴板监听、低级鼠标手势钩子）据此按需启停——
+/// 宿主不再认识具体插件 id，只认「当前有没有启用中的插件消费这项能力」。
+pub(crate) fn any_plugin_granted(base: &str) -> bool {
+    GATEWAY
+        .lock()
+        .ok()
+        .map(|g| {
+            g.values()
+                .any(|spec| spec.enabled && has_base_permission(spec, base))
+        })
+        .unwrap_or(false)
+}
+
+/// 返回当前所有「已启用且获授 `base` 权限」的插件 id（按字典序稳定排列）。
+pub(crate) fn active_plugin_ids_with_grant(base: &str) -> Vec<String> {
+    let mut ids: Vec<String> = GATEWAY
+        .lock()
+        .ok()
+        .map(|g| {
+            g.values()
+                .filter(|spec| spec.enabled && has_base_permission(spec, base))
+                .map(|spec| spec.plugin_id.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    ids.sort();
+    ids
+}
+
+/// 返回当前所有「已启用、订阅了后台剪贴板流（`clipboard_capture`）且已获授 `clipboard.read`」的插件 id。
+pub(crate) fn clipboard_capture_plugin_ids() -> Vec<String> {
+    let mut ids: Vec<String> = GATEWAY
+        .lock()
+        .ok()
+        .map(|g| {
+            g.values()
+                .filter(|spec| {
+                    spec.enabled
+                        && spec.clipboard_capture
+                        && has_base_permission(spec, "clipboard.read")
+                })
+                .map(|spec| spec.plugin_id.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    ids.sort();
+    ids
+}
+
+/// 调和所有依赖插件授权状态的宿主原生监听器/钩子（幂等）。
+///
+/// 在应用启动读回网关快照后、网关同步后、插件卸载后统一调用：
+///   - 没有任何启用插件具备 `clipboard.read` → 停止系统剪贴板监听与落盘；
+///   - 没有任何启用插件具备 `gesture.exec` → 卸载全局低级鼠标钩子并收起 HUD。
+pub(crate) fn reconcile_native_capabilities(app: &AppHandle) {
+    crate::clipboard_history::sync_active(app);
+    crate::mouse_gesture::sync_active(app);
 }
 
 /// 校验 URL 是否落在某个已授予的 `net.fetch:<scope>` 之下（与前端 scopeAllows 同规则）
@@ -599,11 +698,17 @@ pub fn plugin_remove(app: AppHandle, plugin_id: String) -> Result<(), String> {
     if let Ok(log) = plugin_log_path(&app, &plugin_id) {
         let _ = std::fs::remove_file(log);
     }
+    // 关闭该插件可能已打开的所有独立子窗口
+    close_plugin_windows(&app, &plugin_id);
     if let Ok(mut g) = GATEWAY.lock() {
         g.remove(&plugin_id);
     }
+    // 卸载后同步调和原生监听器/钩子（如剪贴板监听、低级鼠标手势钩子）
+    crate::mouse_gesture::remove_plugin_bindings(&plugin_id);
+    reconcile_native_capabilities(&app);
     // 同步落盘镜像，避免下次启动按旧快照把它自启起来（那时目录已不存在）
     save_gateway_snapshot(&app);
+    let _ = app.emit(EVENT_REGISTRY_CHANGED, json!({ "pluginId": plugin_id, "removed": true }));
     Ok(())
 }
 
@@ -1055,46 +1160,314 @@ fn decide_sync_action(
 
 /// `plugin_gateway_sync` 的同步实现（供 async 命令与内部调用复用）
 fn gateway_sync_inner(app: &AppHandle, spec: GatewaySpec) -> Result<(), String> {
-    validate_plugin_id(&spec.plugin_id)?;
+    let action = upsert_gateway_entry(&spec)?;
     let plugin_id = spec.plugin_id.clone();
-    let auto_start = spec.auto_start.clone();
     let enabled = spec.enabled;
+    let has_window_grant = has_base_permission(&spec, "ui.window");
 
-    // 取旧的镜像（用于判断「策略是否真的变了」）
-    let prev = GATEWAY.lock().ok().and_then(|g| g.get(&plugin_id).cloned());
-    let action = decide_sync_action(
-        prev.as_ref().map(|p| (p.auto_start.as_str(), p.enabled)),
-        &auto_start,
-        enabled,
-    );
-
-    if let Ok(mut g) = GATEWAY.lock() {
-        g.insert(plugin_id.clone(), spec);
-    }
     // 落盘镜像：让下次启动的「开机自启」有依据（见 GATEWAY_SNAPSHOT_FILE 的说明）
     save_gateway_snapshot(app);
+    // 同步调和原生钩子/监听器（剪贴板监听、鼠标手势低级钩子）
+    reconcile_native_capabilities(app);
+    // 插件被禁用或撤销了独立窗口权限时，立即关闭它已打开的独立窗口
+    if !enabled || !has_window_grant {
+        close_plugin_windows(app, &plugin_id);
+    }
 
-    // 只在策略真正变化时动进程（幂等重放绝不打断运行中的进程）
+    apply_sync_action(app, &plugin_id, action);
+    let _ = app.emit(EVENT_REGISTRY_CHANGED, json!({ "pluginId": plugin_id }));
+    Ok(())
+}
+
+/// 批量同步整张注册表的网关配置（1 次 IPC + 1 次落盘快照 + 1 次原生钩子调和）。
+///
+/// 消除此前双窗口遍历 N 个插件连发 N 次 IPC、连续写盘 N 次 `plugin-gateway.json` 的开销，
+/// 同时自动剔除已被移除的残余网关条目，并向所有窗口广播 `plugin://registry-changed`。
+#[tauri::command]
+pub async fn plugin_gateway_sync_batch(
+    app: AppHandle,
+    specs: Vec<GatewaySpec>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || gateway_sync_batch_inner(&app, specs))
+        .await
+        .map_err(|e| err(format!("批量网关同步任务执行失败: {e}")))?
+}
+
+fn gateway_sync_batch_inner(app: &AppHandle, specs: Vec<GatewaySpec>) -> Result<(), String> {
+    for spec in &specs {
+        validate_plugin_id(&spec.plugin_id)?;
+    }
+    let keep_ids: HashSet<String> = specs.iter().map(|s| s.plugin_id.clone()).collect();
+    let stale_ids: Vec<String> = GATEWAY
+        .lock()
+        .ok()
+        .map(|g| {
+            g.keys()
+                .filter(|id| !keep_ids.contains(*id))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+
+    for stale in stale_ids {
+        close_plugin_windows(app, &stale);
+        let _ = stop_backend(app, &stale, true);
+        if let Ok(mut g) = GATEWAY.lock() {
+            g.remove(&stale);
+        }
+    }
+
+    let mut actions: Vec<(String, SyncAction, bool)> = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let pid = spec.plugin_id.clone();
+        let keep_win = spec.enabled && has_base_permission(&spec, "ui.window");
+        let action = upsert_gateway_entry(&spec)?;
+        actions.push((pid, action, keep_win));
+    }
+
+    save_gateway_snapshot(app);
+    reconcile_native_capabilities(app);
+
+    for (pid, action, keep_win) in actions {
+        if !keep_win {
+            close_plugin_windows(app, &pid);
+        }
+        apply_sync_action(app, &pid, action);
+    }
+    let _ = app.emit(EVENT_REGISTRY_CHANGED, json!({ "batch": true }));
+    Ok(())
+}
+
+fn upsert_gateway_entry(spec: &GatewaySpec) -> Result<SyncAction, String> {
+    validate_plugin_id(&spec.plugin_id)?;
+    let prev = GATEWAY.lock().ok().and_then(|g| g.get(&spec.plugin_id).cloned());
+    let action = decide_sync_action(
+        prev.as_ref().map(|p| (p.auto_start.as_str(), p.enabled)),
+        &spec.auto_start,
+        spec.enabled,
+    );
+    if let Ok(mut g) = GATEWAY.lock() {
+        g.insert(spec.plugin_id.clone(), spec.clone());
+    }
+    Ok(action)
+}
+
+fn apply_sync_action(app: &AppHandle, plugin_id: &str, action: SyncAction) {
     match action {
         SyncAction::None => {}
         SyncAction::Start => {
-            if !backend_is_alive(&plugin_id) {
-                let _ = spawn_backend(app, &plugin_id);
+            if !backend_is_alive(plugin_id) {
+                let _ = spawn_backend(app, plugin_id);
             }
         }
         SyncAction::Stop => {
-            if backend_is_alive(&plugin_id) {
-                let _ = stop_backend(app, &plugin_id, true);
+            if backend_is_alive(plugin_id) {
+                let _ = stop_backend(app, plugin_id, true);
             }
         }
     }
+}
+
+// ===================== 通用插件结构化存储原语（store 权限） =====================
+
+/// 校验插件 KV 存储文件名（限制为插件私有 `kv/` 目录下的安全相对键，不含上跳）。
+fn resolve_plugin_kv_path(app: &AppHandle, plugin_id: &str, key: &str) -> Result<PathBuf, String> {
+    let trimmed = key.trim();
+    if !is_safe_relative(trimmed) {
+        return Err(err(format!("非法存储键: {key}")));
+    }
+    let base = plugin_data_dir(app, plugin_id)?.join("kv");
+    std::fs::create_dir_all(&base).map_err(|e| err(format!("创建插件存储目录失败: {e}")))?;
+    let file_rel = if trimmed.ends_with(".json") {
+        trimmed.replace('\\', "/")
+    } else {
+        format!("{}.json", trimmed.replace('\\', "/"))
+    };
+    let dest = base.join(&file_rel);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| err(format!("创建存储子目录失败: {e}")))?;
+    }
+    Ok(dest)
+}
+
+/// 读取插件私有结构化存储文件（不存在时返回 `Ok(None)`；突破 localStorage 5MB 上限）。
+#[tauri::command]
+pub fn plugin_storage_read(
+    app: AppHandle,
+    plugin_id: String,
+    key: String,
+) -> Result<Option<String>, String> {
+    require_grant(&plugin_id, "store")?;
+    let path = resolve_plugin_kv_path(&app, &plugin_id, &key)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let meta = std::fs::metadata(&path).map_err(|e| err(format!("读取存储元数据失败: {e}")))?;
+    if meta.len() > MAX_FILE_BYTES {
+        return Err(err("插件存储文件超出上限（64MB）"));
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| err(format!("读取插件存储失败: {e}")))?;
+    Ok(Some(text))
+}
+
+/// 原子写入插件私有结构化存储文件（写临时文件后替换，防断电半截损坏）。
+#[tauri::command]
+pub fn plugin_storage_write(
+    app: AppHandle,
+    plugin_id: String,
+    key: String,
+    content: String,
+) -> Result<(), String> {
+    require_grant(&plugin_id, "store")?;
+    if content.len() as u64 > MAX_FILE_BYTES {
+        return Err(err("写入内容过大（上限 64MB）"));
+    }
+    let path = resolve_plugin_kv_path(&app, &plugin_id, &key)?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, content.as_bytes()).map_err(|e| err(format!("写入临时存储失败: {e}")))?;
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        let _ = std::fs::write(&path, content.as_bytes())
+            .map_err(|_| err(format!("落盘插件存储失败: {e}")))?;
+        let _ = std::fs::remove_file(&tmp);
+    }
     Ok(())
+}
+
+/// 删除插件私有结构化存储文件。
+#[tauri::command]
+pub fn plugin_storage_delete(
+    app: AppHandle,
+    plugin_id: String,
+    key: String,
+) -> Result<bool, String> {
+    require_grant(&plugin_id, "store")?;
+    let path = resolve_plugin_kv_path(&app, &plugin_id, &key)?;
+    if !path.exists() {
+        return Ok(false);
+    }
+    std::fs::remove_file(&path).map_err(|e| err(format!("删除插件存储失败: {e}")))?;
+    Ok(true)
+}
+
+// ===================== 通用插件独立窗口原语（ui.window 权限） =====================
+
+/// 计算稳定、仅含合法 label 字符的窗口标识：`plugin-win-<插件哈希>-<入口哈希>`。
+/// 同插件同入口重复调用时会聚焦既有窗口而非无限堆积。
+fn plugin_window_label(plugin_id: &str, entry: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h1 = std::collections::hash_map::DefaultHasher::new();
+    plugin_id.hash(&mut h1);
+    let mut h2 = std::collections::hash_map::DefaultHasher::new();
+    entry.hash(&mut h2);
+    format!("{PLUGIN_WINDOW_PREFIX}{:08x}-{:08x}", h1.finish() as u32, h2.finish() as u32)
+}
+
+/// 关闭指定插件打开的所有独立子窗口（插件禁用 / 卸载 / 撤销 `ui.window` 时调用）。
+pub(crate) fn close_plugin_windows(app: &AppHandle, plugin_id: &str) {
+    use std::hash::{Hash, Hasher};
+    let mut h1 = std::collections::hash_map::DefaultHasher::new();
+    plugin_id.hash(&mut h1);
+    let prefix = format!("{PLUGIN_WINDOW_PREFIX}{:08x}-", h1.finish() as u32);
+    for (label, win) in app.webview_windows() {
+        if label.starts_with(&prefix) {
+            let _ = win.close();
+        }
+    }
+}
+
+/// 打开或聚焦一个插件独立子窗口（兑现 `ui.window` 权限原语）。
+///
+/// 安全边界：
+///   1. 必须获授 `ui.window` 权限且插件处于启用态；
+///   2. `entry` 必须是插件目录内真实存在的安全相对路径（防路径穿越与任意页面加载）；
+///   3. 尺寸夹紧在合理桌面区间（240×160 ~ 1920×1200），单插件最多同时开 4 个子窗口；
+///   4. 必须 `async` 执行，避免 Windows WebView2 同步建窗死锁（wry#583）。
+#[tauri::command]
+pub async fn plugin_open_window(
+    app: AppHandle,
+    plugin_id: String,
+    entry: String,
+    title: Option<String>,
+    width: Option<f64>,
+    height: Option<f64>,
+    always_on_top: Option<bool>,
+) -> Result<String, String> {
+    require_grant(&plugin_id, "ui.window")?;
+    let clean_entry = entry.trim().replace('\\', "/");
+    // 确认目标 HTML 确实在插件目录内存在
+    let _ = resolve_plugin_file(&app, &plugin_id, &clean_entry)?;
+
+    let label = plugin_window_label(&plugin_id, &clean_entry);
+    if let Some(existing) = app.get_webview_window(&label) {
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        return Ok(label);
+    }
+
+    // 单插件并发窗口数限制
+    let owner_prefix = label.rsplit_once('-').map(|(p, _)| format!("{p}-")).unwrap_or_default();
+    let count = app
+        .webview_windows()
+        .keys()
+        .filter(|k| !owner_prefix.is_empty() && k.starts_with(&owner_prefix))
+        .count();
+    if count >= MAX_PLUGIN_WINDOWS {
+        return Err(err(format!(
+            "单插件最多同时打开 {MAX_PLUGIN_WINDOWS} 个独立窗口"
+        )));
+    }
+
+    let w = width.unwrap_or(720.0).clamp(240.0, 1920.0);
+    let h = height.unwrap_or(520.0).clamp(160.0, 1200.0);
+    let win_title = title
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| plugin_id.clone());
+
+    let encoded_id = urlencoding_simple(&plugin_id);
+    let encoded_entry = urlencoding_simple(&clean_entry);
+    let url = tauri::WebviewUrl::App(
+        format!("plugin-window.html?pluginId={encoded_id}&entry={encoded_entry}").into(),
+    );
+
+    tauri::WebviewWindowBuilder::new(&app, &label, url)
+        .title(&win_title)
+        .inner_size(w, h)
+        .min_inner_size(240.0, 160.0)
+        .resizable(true)
+        .center()
+        .always_on_top(always_on_top.unwrap_or(false))
+        .visible(true)
+        .focused(true)
+        .build()
+        .map_err(|e| err(format!("创建插件窗口失败: {e}")))?;
+
+    Ok(label)
+}
+
+fn urlencoding_simple(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 /// 经宿主代理由插件发起的网络请求。
 ///
 /// 双重校验：`plugin_id` 必须有 `net.fetch:<匹配该 URL 的 scope>`，
 /// 否则拒绝——即使前端被绕过也拿不到 SSRF 能力。
+///
+/// 新增参数（均可选，旧调用方不传即保持文本语义）：
+/// - `bodyBase64`：二进制请求体（PUT 上传用）；
+/// - `responseType`：`"text"`（默认）/ `"base64"`；
+/// - `maxBytes`：响应体上限（默认文本 32MB / 二进制 64MB，硬上限 256MB）；
+/// - `timeoutSecs`：超时（默认 30s，上限 300s）。
 #[tauri::command]
 pub async fn plugin_net_fetch(
     plugin_id: String,
@@ -1102,7 +1475,11 @@ pub async fn plugin_net_fetch(
     method: String,
     headers: HashMap<String, String>,
     body: Option<String>,
-) -> Result<String, String> {
+    body_base64: Option<String>,
+    response_type: Option<String>,
+    max_bytes: Option<u64>,
+    timeout_secs: Option<u64>,
+) -> Result<crate::PluginHttpResponse, String> {
     let spec = gateway_get(&plugin_id).ok_or_else(|| err("插件未注册到网关"))?;
     if !spec.enabled {
         return Err(err("插件已禁用"));
@@ -1115,7 +1492,19 @@ pub async fn plugin_net_fetch(
     if !allowed {
         return Err(err(format!("插件未获授权访问该地址: {url}")));
     }
-    crate::http_request_for_plugin(method, url, headers, body).await
+    crate::http_request_for_plugin(
+        method,
+        url,
+        headers,
+        body,
+        crate::PluginHttpOptions {
+            body_base64,
+            response_type,
+            max_bytes,
+            timeout_secs,
+        },
+    )
+    .await
 }
 
 // ===================== 后台进程托管 =====================

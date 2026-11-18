@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- 云 + 上传箭头 -->
+  <path d="M46 26a13 13 0 0 0-25.2-4.4A11 11 0 0 0 22 43h22a9 9 0 0 0 2-17.8z"
+        fill="#4a90d9" opacity="0.92"/>
+  <path d="M32 30v14" stroke="#ffffff" stroke-width="4" stroke-linecap="round"/>
+  <path d="M25.5 36.5 32 30l6.5 6.5" fill="none" stroke="#ffffff" stroke-width="4"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

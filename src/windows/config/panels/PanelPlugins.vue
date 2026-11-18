@@ -291,6 +291,11 @@ const pluginThemeOptions = [
   { value: "light" as PluginThemePreference, label: "浅色", desc: "打开该插件时，呼出窗口整体切成浅色" },
 ];
 
+const autoUpdateOptions = [
+  { value: true, label: "开启", desc: "定时从插件市场检测并在后台静默安装新版本" },
+  { value: false, label: "关闭", desc: "仅手动点击更新" },
+];
+
 const autoStartLabel = (mode: AutoStartMode): string =>
   autoStartOptions.find((o) => o.value === mode)?.label ?? mode;
 const closeBehaviorLabel = (mode: CloseBehavior): string =>
@@ -321,6 +326,24 @@ function closeBehaviorModified(rec: any): boolean {
 /** 用户是否改过界面主题（与插件声明的建议值比较） */
 function pluginThemeModified(rec: any): boolean {
   return (rec.themePreference ?? "inherit") !== detailViewThemeOf(rec.manifest);
+}
+/** 用户是否改过自动更新开关（与插件声明的建议值比较） */
+function autoUpdateModified(rec: any): boolean {
+  return Boolean(rec.autoUpdate) !== suggestionOf(rec).autoUpdate;
+}
+/** 仅市场安装或内置插件支持从插件市场自动更新（本地文件/目录挂载不展示该行） */
+function showsAutoUpdateRow(rec: any): boolean {
+  return rec.source?.kind === "market" || rec.source?.kind === "builtin";
+}
+function setAutoUpdate(rec: any, enabled: boolean): void {
+  rec.autoUpdate = Boolean(enabled);
+  rt.persist();
+  props.notify(
+    enabled
+      ? `${rec.name} 已开启自动更新`
+      : `${rec.name} 已关闭自动更新`,
+    "ok"
+  );
 }
 /** 有界面的插件才谈「界面主题」 */
 function showsPluginThemeRow(rec: any): boolean {
@@ -392,12 +415,14 @@ function setPluginTheme(rec: any, mode: PluginThemePreference): void {
   );
 }
 
-/** 恢复插件建议的默认值（三项一起，避免用户分不清恢复了哪个） */async function restoreBehaviorDefaults(rec: any): Promise<void> {
+/** 恢复插件建议的默认值（四项一起，避免用户分不清恢复了哪个） */
+async function restoreBehaviorDefaults(rec: any): Promise<void> {
   const s = suggestionOf(rec);
   const autoStartChanged = rec.autoStart !== s.autoStart;
   rec.autoStart = s.autoStart;
   rec.closeBehavior = s.closeBehavior;
   rec.themePreference = detailViewThemeOf(rec.manifest);
+  rec.autoUpdate = s.autoUpdate;
   rt.persist();
   try {
     if (autoStartChanged && rec.manifest.backend) await rt.reconcile(rec.id);
@@ -508,6 +533,7 @@ const updatingId = ref<string | null>(null);
  * 文件分支彻底隔离，互不干扰（安装来源不同：市场更新由 host.ts 落盘，文件安装由本面板落盘）。
  */
 let marketUpdateResolver: ((ok: boolean) => void) | null = null;
+let installDialogAutoUpdateCb: ((val: boolean) => void) | null = null;
 async function confirmMarketInstall(req: any): Promise<boolean> {
   if (installDialogVisible.value) return false;
   installDialogMode = "market";
@@ -517,10 +543,19 @@ async function confirmMarketInstall(req: any): Promise<boolean> {
   installDialogWarnings.value = req.warnings;
   installDialogInstalledVersion.value = req.installedVersion;
   installDialogRunning.value = req.running === true;
+  installDialogShowAutoUpdate.value = typeof req.autoUpdate === "boolean";
+  installDialogAutoUpdate.value = req.autoUpdate === true;
+  installDialogAutoUpdateCb =
+    typeof req.onAutoUpdateChange === "function" ? req.onAutoUpdateChange : null;
   installDialogVisible.value = true;
   return new Promise<boolean>((resolve) => {
     marketUpdateResolver = resolve;
   });
+}
+
+function onInstallAutoUpdateChange(val: boolean): void {
+  installDialogAutoUpdate.value = val;
+  installDialogAutoUpdateCb?.(val);
 }
 
 // ===================== 启用/禁用/卸载 =====================
@@ -610,6 +645,8 @@ const installDialogWarnings = ref<string[]>([]);
 const installDialogInstalledVersion = ref<string | null>(null);
 /** 该插件当前是否在后台运行（覆盖安装时弹窗提示「先停止再安装」） */
 const installDialogRunning = ref(false);
+const installDialogShowAutoUpdate = ref(false);
+const installDialogAutoUpdate = ref(false);
 /** 待安装的预处理结果（确认后直接落盘） */
 let pendingPrepared: Awaited<ReturnType<typeof preparePackageFromBase64>> | null = null;
 /** 待安装的 .mspp 文件路径（写入插件来源 source.ref） */
@@ -653,6 +690,8 @@ async function installFromPath(path: string): Promise<void> {
     // 后台是否在跑：覆盖安装时弹窗提示「会先停止再安装」
     const st = rt.runtimeOf(mf.id).status;
     installDialogRunning.value = st === "running" || st === "starting";
+    installDialogShowAutoUpdate.value = false;
+    installDialogAutoUpdateCb = null;
     installDialogVisible.value = true;
   } catch (e) {
     props.notify(`安装失败: ${String((e as Error)?.message ?? e)}`, "error");
@@ -731,6 +770,8 @@ function closeInstallDialogState(): void {
   installDialogIcon.value = null;
   installDialogInstalledVersion.value = null;
   installDialogRunning.value = false;
+  installDialogShowAutoUpdate.value = false;
+  installDialogAutoUpdateCb = null;
   installDialogMode = "file";
 }
 
@@ -1065,6 +1106,27 @@ function durFrom(ts: number | null): string {
             </div>
           </div>
 
+          <!-- 自动更新（插件可声明建议，默认关闭；仅市场/内置来源支持） -->
+          <div v-if="showsAutoUpdateRow(record)" class="plugin-info-row">
+            <span class="plugin-info-label">自动更新</span>
+            <div @click.stop class="behavior-cell">
+              <div class="backend-autostart">
+                <button
+                  v-for="opt in autoUpdateOptions"
+                  :key="String(opt.value)"
+                  class="btn-tiny"
+                  :class="{ on: Boolean(record.autoUpdate) === opt.value }"
+                  :title="opt.desc"
+                  @click="setAutoUpdate(record, opt.value)"
+                >{{ opt.label }}</button>
+              </div>
+              <div class="behavior-note">
+                <span class="plugin-suggest">插件建议：{{ suggestionOf(record).autoUpdate ? '开启' : '关闭' }}</span>
+                <button v-if="autoUpdateModified(record)" class="btn-link" @click="restoreBehaviorDefaults(record)">恢复</button>
+              </div>
+            </div>
+          </div>
+
           <!-- 开机自启（插件可声明建议，用户可改） -->
           <div v-if="record.manifest.backend" class="plugin-info-row">
             <span class="plugin-info-label">开机自启</span>
@@ -1226,6 +1288,9 @@ function durFrom(ts: number | null): string {
       :warnings="installDialogWarnings"
       :installed-version="installDialogInstalledVersion"
       :running="installDialogRunning"
+      :show-auto-update="installDialogShowAutoUpdate"
+      :auto-update="installDialogAutoUpdate"
+      @update:auto-update="onInstallAutoUpdateChange"
       @confirm="onInstallConfirm"
       @cancel="onInstallCancel"
     />

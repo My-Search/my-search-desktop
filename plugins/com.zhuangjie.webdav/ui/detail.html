@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WebDAV 网盘</title>
+<link rel="stylesheet" href="detail.css">
+</head>
+<body>
+<div id="app" class="wd-container">
+
+  <!-- ===== 顶部工具条：服务器 / 操作 ===== -->
+  <div class="wd-toolbar">
+    <select id="wd-server" class="wd-server-select" title="切换服务器"></select>
+    <button id="wd-server-manage" class="wd-btn wd-icon-btn" title="服务器设置">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+    </button>
+    <span class="wd-toolbar-sep"></span>
+    <button id="wd-up" class="wd-btn wd-icon-btn" title="上一级">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+    </button>
+    <button id="wd-refresh" class="wd-btn wd-icon-btn" title="刷新">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"/></svg>
+    </button>
+    <button id="wd-new-folder" class="wd-btn" title="在当前目录新建文件夹">新建文件夹</button>
+    <button id="wd-upload" class="wd-btn wd-btn-primary" title="上传文件到当前目录">上传</button>
+    <span class="wd-toolbar-flex"></span>
+    <input id="wd-filter" class="wd-filter" type="text" placeholder="过滤当前目录…" spellcheck="false" autocomplete="off" />
+  </div>
+
+  <!-- ===== 面包屑 + 收藏星标 ===== -->
+  <div class="wd-crumb-bar">
+    <div id="wd-crumbs" class="wd-crumbs"></div>
+    <button id="wd-star" class="wd-btn wd-icon-btn wd-star" title="收藏当前文件夹">
+      <svg id="wd-star-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+    </button>
+  </div>
+
+  <!-- ===== 收藏夹 ===== -->
+  <div id="wd-favorites" class="wd-favorites"></div>
+
+  <!-- ===== 列表 ===== -->
+  <div class="wd-list-head">
+    <label class="wd-check-wrap"><input type="checkbox" id="wd-select-all" title="全选/取消全选" /></label>
+    <button id="wd-sort-name" class="wd-sort" data-key="name">名称</button>
+    <button id="wd-sort-size" class="wd-sort" data-key="size">大小</button>
+    <button id="wd-sort-time" class="wd-sort" data-key="time">修改时间</button>
+    <button id="wd-hidden" class="wd-sort" title="切换是否显示点开头的隐藏文件">隐藏文件：关</button>
+  </div>
+  <div id="wd-list" class="wd-list" tabindex="0"></div>
+
+  <!-- ===== 选中操作条 ===== -->
+  <div id="wd-selection-bar" class="wd-action-bar" style="display:none">
+    <span id="wd-selection-count" class="wd-bar-text"></span>
+    <button id="wd-sel-download" class="wd-btn" title="下载选中的文件">下载</button>
+    <button id="wd-sel-copy" class="wd-btn" title="复制到剪贴板（之后粘贴）">复制</button>
+    <button id="wd-sel-cut" class="wd-btn" title="剪切（之后粘贴）">剪切</button>
+    <button id="wd-sel-rename" class="wd-btn" title="重命名（仅单个）">重命名</button>
+    <button id="wd-sel-delete" class="wd-btn wd-btn-danger" title="删除选中项">删除</button>
+    <button id="wd-sel-clear" class="wd-btn wd-icon-btn" title="取消选择">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+    </button>
+  </div>
+
+  <!-- ===== 剪贴板（复制/剪切待粘贴）条 ===== -->
+  <div id="wd-paste-bar" class="wd-action-bar wd-paste-bar" style="display:none">
+    <span id="wd-paste-text" class="wd-bar-text"></span>
+    <button id="wd-paste-ok" class="wd-btn wd-btn-primary">粘贴到这里</button>
+    <button id="wd-paste-cancel" class="wd-btn" title="放弃">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+    </button>
+  </div>
+
+  <!-- ===== 进度条（上传/下载/粘贴） ===== -->
+  <div id="wd-progress" class="wd-progress" style="display:none" role="progressbar"
+    aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="传输进度">
+    <div class="wd-progress-track"><div id="wd-progress-bar" class="wd-progress-bar" style="width:0%"></div></div>
+    <div class="wd-progress-info">
+      <span id="wd-progress-text" class="wd-progress-text">准备中…</span>
+      <span id="wd-progress-pct" class="wd-progress-pct">0%</span>
+    </div>
+  </div>
+
+  <!-- ===== 状态栏 ===== -->
+  <div id="wd-status" class="wd-status"></div>
+
+  <!-- ===== 拖入文件悬停提示 ===== -->
+  <div id="wd-drop" class="wd-drop-overlay" style="display:none">
+    <div class="wd-drop-box">松开以上传到当前目录</div>
+  </div>
+
+  <!-- ===== 服务器设置对话框 ===== -->
+  <div id="wd-dlg" class="wd-modal" style="display:none">
+    <div class="wd-modal-box">
+      <div class="wd-modal-title" id="wd-dlg-title">服务器设置</div>
+      <div id="wd-srv-list" class="wd-srv-list"></div>
+      <table class="wd-form">
+        <tr><td>名称：</td><td><input id="wd-srv-name" class="wd-input" type="text" placeholder="如：坚果云" autocomplete="off" /></td></tr>
+        <tr><td>地址：</td><td><input id="wd-srv-url" class="wd-input" type="text" placeholder="如：https://dav.jianguoyun.com/dav/" autocomplete="off" spellcheck="false" /></td></tr>
+        <tr><td>账号：</td><td><input id="wd-srv-user" class="wd-input" type="text" placeholder="用户名（部分服务填邮箱）" autocomplete="off" spellcheck="false" /></td></tr>
+        <tr><td>密码：</td><td><input id="wd-srv-pass" class="wd-input" type="password" placeholder="应用密码（不是登录密码）" autocomplete="new-password" /></td></tr>
+      </table>
+      <div class="wd-modal-actions">
+        <button id="wd-srv-add" class="wd-btn">新增</button>
+        <span class="wd-toolbar-flex"></span>
+        <button id="wd-srv-delete" class="wd-btn wd-btn-danger">删除</button>
+        <button id="wd-srv-cancel" class="wd-btn">取消</button>
+        <button id="wd-srv-save" class="wd-btn wd-btn-primary">保存</button>
+      </div>
+      <div class="wd-modal-hint">
+        <p>💡 常见地址：<code>坚果云 https://dav.jianguoyun.com/dav/</code>、<code>Alist http://host:5244/dav/</code>、<code>Nextcloud https://host/remote.php/dav/files/账号/</code></p>
+        <p>💡 配置保存在本插件私有存储中；联网权限为 net.fetch:*（面板中会标红提示），请仅在可信环境使用</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 输入对话框（新建文件夹 / 重命名） ===== -->
+  <div id="wd-prompt" class="wd-modal" style="display:none">
+    <div class="wd-modal-box wd-modal-box-sm">
+      <div class="wd-modal-title" id="wd-prompt-title">输入</div>
+      <input id="wd-prompt-input" class="wd-input" type="text" autocomplete="off" spellcheck="false" />
+      <div class="wd-modal-actions">
+        <button id="wd-prompt-cancel" class="wd-btn">取消</button>
+        <button id="wd-prompt-ok" class="wd-btn wd-btn-primary">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 文件预览 ===== -->
+  <div id="wd-preview" class="wd-preview" style="display:none">
+    <div class="wd-preview-head">
+      <button id="wd-preview-close" class="wd-btn">← 返回</button>
+      <div id="wd-preview-title" class="wd-preview-title"></div>
+      <div class="wd-preview-actions">
+        <button id="wd-preview-prev" class="wd-btn wd-icon-btn" title="上一个">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
+        </button>
+        <button id="wd-preview-next" class="wd-btn wd-icon-btn" title="下一个">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
+        </button>
+        <button id="wd-preview-download" class="wd-btn">下载</button>
+        <button id="wd-preview-link" class="wd-btn">复制链接</button>
+      </div>
+    </div>
+    <div id="wd-preview-body" class="wd-preview-body"></div>
+    <div id="wd-preview-foot" class="wd-preview-foot"></div>
+  </div>
+
+</div>
+<script src="index.js"></script>
+</body>
+</html>

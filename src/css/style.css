@@ -4483,6 +4483,10 @@ html.theme-dark #ms-config-view .btn-warn:hover {
   font-size: 11.5px;
   color: var(--muted);
 }
+/* 云端备份大小行：等宽数字，数值跳动时宽度更稳 */
+#ms-config-view .page.sync .sync-remote-size {
+  font-variant-numeric: tabular-nums;
+}
 #ms-config-view .page.sync .sync-now-btn {
   flex-shrink: 0;
   margin-left: auto;
@@ -4509,7 +4513,7 @@ html.theme-dark #ms-config-view .btn-warn:hover {
   gap: 4px;
 }
 #ms-config-view .page.sync .cfg-row .cfg-input,
-#ms-config-view .page.sync .cfg-row .cfg-select {
+#ms-config-view .page.sync .cfg-row .cfg-select-wrap {
   flex: 1;
 }
 
@@ -4545,21 +4549,44 @@ html.theme-dark #ms-config-view .btn-warn:hover {
   border-color: var(--brand);
   background: var(--card);
 }
-/* 下拉框：去掉系统原生箭头，用背景 SVG 画一个随主题变色的三角 */
+/* 下拉框：去掉系统原生箭头。
+   箭头不能用 background-image 画：WebView2（Windows 125%/150% DPI 缩放）下有
+   已知的 SVG 背景绘制 bug —— 即使 background-repeat: no-repeat，12px 的箭头
+   SVG 也会被平铺成满框的箭头图案（Chromium issue 41434132 一类）。
+   改为外层 .cfg-select-wrap::after 用 border 画一个箭头（√ 形旋转 45°），
+   不走背景绘制路径，不受该 bug 影响；颜色随主题用 border-color 覆盖。 */
 #ms-config-view .page.sync .cfg-select {
   -webkit-appearance: none;
   appearance: none;
   padding-right: 30px;
   cursor: pointer;
-  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.5L6 8l3.5-3.5' fill='none' stroke='%237a828e' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 10px center;
+}
+.cfg-select-wrap {
+  position: relative;
+  display: flex;
+  min-width: 0;
+}
+.cfg-select-wrap .cfg-select {
+  width: 100%;
+}
+.cfg-select-wrap::after {
+  content: "";
+  position: absolute;
+  right: 13px;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  border-right: 1.6px solid #7a828e;
+  border-bottom: 1.6px solid #7a828e;
+  border-radius: 1px;
+  transform: translateY(-70%) rotate(45deg);
+  pointer-events: none;
 }
 /* 深色态判定改用 <html> 类（theme.ts 保证恒有 theme-light/theme-dark 之一）：
    原 @media prefers-color-scheme 只看系统偏好，「强制浅色 + 系统深色」时
    会把这处深色样式错带过来，与强制主题打架。 */
-html.theme-dark #ms-config-view .page.sync .cfg-select {
-  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.5L6 8l3.5-3.5' fill='none' stroke='%2398a0ab' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+html.theme-dark #ms-config-view .page.sync .cfg-select-wrap::after {
+  border-color: #98a0ab;
 }
 /* 深色下 <option> 由系统绘制，显式给底色避免白底黑字 */
 html.theme-dark #ms-config-view .page.sync .cfg-select option {
@@ -4568,7 +4595,7 @@ html.theme-dark #ms-config-view .page.sync .cfg-select option {
 }
 
 /* 兜底间隔：选项很短，不需要占满整行
-   （选择器带上 .cfg-row 以压过上面的 `.cfg-row .cfg-select { flex: 1 }`） */
+   （选择器带上 .cfg-row 以压过上面的 `.cfg-row .cfg-select-wrap { flex: 1 }`） */
 #ms-config-view .page.sync .cfg-row .cfg-select-narrow {
   flex: 0 0 auto;
   width: 130px;

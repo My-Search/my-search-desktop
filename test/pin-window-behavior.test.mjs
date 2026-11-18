@@ -193,7 +193,11 @@ const INJECT = `
     }
     return c.toDataURL('image/png');
   };
-  window.__pinImage = mkImage(880, 660);
+  // 贴图尺寸可由 URL 参数指定（窄贴图回归用；默认 880×660）
+  const params = new URLSearchParams(location.search);
+  window.__pinImageW = Number(params.get('w')) || 880;
+  window.__pinImageH = Number(params.get('h')) || 660;
+  window.__pinImage = mkImage(window.__pinImageW, window.__pinImageH);
   window.__invoked = [];
 window.__TAURI_INTERNALS__ = {
     invoke(cmd, args) {
@@ -203,19 +207,38 @@ window.__TAURI_INTERNALS__ = {
           window.__pinFailOnce = false;
           return Promise.reject('贴图不存在或已关闭');
         }
-        return Promise.resolve({ dataUrl: window.__pinImage, width: 880, height: 660, label: (args && args.label) || '' });
+        return Promise.resolve({
+          dataUrl: window.__pinImage,
+          width: window.__pinImageW,
+          height: window.__pinImageH,
+          label: (args && args.label) || '',
+        });
       }
       if (cmd === 'pin_close' || cmd === 'pin_cleanup') return Promise.resolve(null);
       if (cmd === 'screenshot_copy_image') {
         window.__lastCopy = (args && args.dataUrl) || '';
         return Promise.resolve(null);
       }
+      if (cmd === 'pin_set_bounds') {
+        // 编辑态窗口边界：一次原子设置位置+尺寸。stub 记录参数并同步虚拟几何，
+        // 后续 outer_position 读到的就是移动后的坐标（退出编辑要据此还原）。
+        window.__pinPos = { x: args.x, y: args.y };
+        window.__pinSize = { width: args.width, height: args.height };
+        return Promise.resolve(null);
+      }
       if (cmd === 'plugin:window|set_size' || cmd === 'plugin:window|set_position' || cmd === 'plugin:window|set_decorations') {
-        // 编辑态扩窗 / 边框开关：记录调用参数即可，宿主侧真实几何无需模拟
+        // 边框开关等：记录调用参数即可，宿主侧真实几何无需模拟
         return Promise.resolve(null);
       }
       if (cmd === 'plugin:window|scale_factor') return Promise.resolve(1);
-      if (cmd === 'plugin:window|outer_position') return Promise.resolve({ x: 120, y: 80 });
+      if (cmd === 'plugin:window|outer_position') return Promise.resolve(window.__pinPos || { x: 120, y: 80 });
+      if (cmd === 'plugin:window|current_monitor') {
+        return Promise.resolve(window.__pinMonitor || {
+          name: 'test', scaleFactor: 1,
+          position: { x: 0, y: 0 }, size: { width: 1920, height: 1080 },
+          workArea: { position: { x: 0, y: 0 }, size: { width: 1920, height: 1080 } },
+        });
+      }
       if (cmd === 'plugin:window|start_dragging') {
         // 浏览态拖移的真实命令（getCurrentWindow().startDragging() 内部 invoke）；
         // 计数用于双击守卫行为断言（第二次 mousedown 必须跳过拖动）。
@@ -351,21 +374,21 @@ try {
     "菜单四项齐全（编辑工具 / 边框开关 / 复制 / 关闭）",
     JSON.stringify(items)
   );
-  // 边框开关：默认开（outline 生效），点「隐藏边框」后 outline 变 none
-  const frameOn = await evaluate(
-    "getComputedStyle(document.querySelector('.pin-canvas')).outlineStyle"
+  // 边框开关：默认开（独立覆盖层 .pin-frame 存在），点「隐藏边框」后覆盖层移除
+  const frameOn = await evaluate("!!document.querySelector('.pin-frame')");
+  ok(frameOn === true, "默认显示边框（.pin-frame 覆盖层存在）", String(frameOn));
+  const frameStyle = await evaluate(
+    "getComputedStyle(document.querySelector('.pin-frame')).boxShadow"
   );
-  ok(frameOn === "solid", "默认显示边框（outline solid）", String(frameOn));
+  ok(/inset/.test(frameStyle), "边框用 inset 阴影画在图片内侧（四边完整、不被窗口边缘裁剪）", String(frameStyle));
   await evaluate("window.__pin.clickMenu('隐藏边框')");
   await sleep(120);
-  const frameOff = await evaluate(
-    "getComputedStyle(document.querySelector('.pin-canvas')).outlineStyle"
-  );
-  ok(frameOff === "none", "右键「隐藏边框」后边框消失（outline none）", String(frameOff));
+  const frameOff = await evaluate("!!document.querySelector('.pin-frame')");
+  ok(frameOff === false, "右键「隐藏边框」后边框覆盖层移除", String(frameOff));
   const frameInvoked = await evaluate(
     "window.__pin.invoked('plugin:window|set_decorations').length"
   );
-  ok(frameInvoked === 0, "边框开关走 CSS outline（不依赖系统 decorations）", String(frameInvoked));
+  ok(frameInvoked === 0, "边框开关走纯 CSS（不依赖系统 decorations）", String(frameInvoked));
 
   /* ---------------- 3. 显示编辑工具 → 编辑态 + 画笔 ---------------- */
   // 进入编辑前的浏览态画布尺寸（= 整窗客户区）：扩窗期望值的基准
@@ -374,40 +397,53 @@ try {
   await evaluate("window.__pin.clickMenu('显示编辑工具')");
   await sleep(150);
   ok((await evaluate("window.__pin.toolbarVisible()")) === true, "进入编辑态：工具条出现");
-  // 编辑扩窗：宿主侧窗口应收到加高 48（CSS px × scale）的 set_size + 相应上移
-  const sizeCalls = await evaluate("window.__pin.invoked('plugin:window|set_size').length");
-  const posCalls = await evaluate("window.__pin.invoked('plugin:window|set_position').length");
-  ok(sizeCalls === 1 && posCalls === 1, "进入编辑：窗口扩出工具条悬浮条（set_size + set_position）",
-    `size=${sizeCalls} pos=${posCalls}`);
-  const sizeArg = await evaluate("(window.__pin.invoked('plugin:window|set_size')[0] || {}).args");
+  // 编辑扩窗：位置+尺寸一次 pin_set_bounds 原子生效（下方有空间 → 向下扩，坐标不动）
+  const boundsCalls = await evaluate("window.__pin.invoked('pin_set_bounds').length");
+  ok(boundsCalls === 1, "进入编辑：只调一次 pin_set_bounds（位置+尺寸原子生效）", String(boundsCalls));
+  const boundsArg = await evaluate("(window.__pin.invoked('pin_set_bounds')[0] || {}).args");
   ok(
-    !!sizeArg && sizeArg.value && sizeArg.value.Height === viewH + 48 && sizeArg.value.Width === viewW,
-    "扩窗尺寸 = 浏览态窗口 + 48（悬浮条区）",
-    `view=${viewW}x${viewH} → ${JSON.stringify(sizeArg && sizeArg.value)}`
+    !!boundsArg && boundsArg.height === viewH + 48 && boundsArg.width >= viewW && boundsArg.y === 80,
+    "下方有空间：高度 +48、宽度至少不窄于图片、窗口坐标不动",
+    `view=${viewW}x${viewH} → ${JSON.stringify(boundsArg)}`
   );
-  // 悬浮条区不压画布：编辑态画布顶部让出 48px
-  const editTop = await evaluate(
-    "Math.round(document.querySelector('.pin-canvas').getBoundingClientRect().top)"
-  );
-  ok(editTop === 48, "编辑态画布顶部让出悬浮条区（top=48，工具条不压图片）", String(editTop));
+  // 画布高度固定为图片 CSS 尺寸（cssSize.h = 浏览态窗口高），与扩窗时机无关：
+  // 进入编辑后画布仍贴顶、尺寸不变，图片位置/大小完全不动。
+  const editGeom = await evaluate("(() => { const r = document.querySelector('.pin-canvas').getBoundingClientRect(); return { top: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) }; })()");
+  ok(editGeom.top === 0 && editGeom.w === viewW && editGeom.h === viewH,
+    "编辑态画布贴顶且尺寸不变（图片位置/大小不动）", JSON.stringify({ viewW, viewH, editGeom }));
   const tools = await evaluate("window.__pin.tools()");
   ok(
     ["选择", "矩形", "椭圆", "箭头", "画笔", "文字", "马赛克", "模糊", "撤销 (Ctrl+Z)", "重做 (Ctrl+Shift+Z)"].every((t) => tools.includes(t)),
     "工具条与截图同款（选择/矩形/椭圆/箭头/画笔/文字/马赛克/模糊/撤销/重做）",
     JSON.stringify(tools)
   );
-  // 工具条只许盖住顶部一小条：共享组件自带 bottom:28px，宿主覆盖 top:8px 时
-  // 必须同时写 bottom:auto——否则 top+bottom 同时生效把盒子拉满整窗，
-  // 半透明背景罩住全部画布、mousedown 又被工具条吞掉 → 整窗变暗且无法编辑
-  //（真机见过的 bug，几何断言钉死它）。
+  // 工具条 top 固定为「图片下沿 + 4」，不依赖扩窗时机；测试 stub 不真的扩窗，
+  // 故 top ≈ viewH + 4。覆盖共享组件 top/bottom 时两边都写，避免组件默认
+  // bottom:28px 与 top 同时生效把盒子拉满整窗（真机踩过的坑）。
   const tbRect = await evaluate(
-    "(() => { const t = document.querySelector('.pin-toolbar'); if (!t) return null; const r = t.getBoundingClientRect(); return { top: Math.round(r.top), height: Math.round(r.height), vh: window.innerHeight }; })()"
+    "(() => { const t = document.querySelector('.pin-toolbar'); if (!t) return null; const r = t.getBoundingClientRect(); return { left: Math.round(r.left), right: Math.round(r.right), top: Math.round(r.top), bottom: Math.round(r.bottom), width: Math.round(r.width), height: Math.round(r.height), vh: window.innerHeight }; })()"
   );
   ok(!!tbRect, "工具条可测得几何");
   ok(
-    !!tbRect && tbRect.top >= 0 && tbRect.top + tbRect.height <= 96 && tbRect.height < tbRect.vh / 2,
-    "工具条贴顶且不拉满整窗（bottom:auto 生效，不挡画布）",
-    JSON.stringify(tbRect)
+    !!tbRect && Math.abs(tbRect.top - (viewH + 4)) <= 1 && tbRect.height < tbRect.vh / 2,
+    "工具条 top 固定在图片下沿 + 4（不压画布、不拉满整窗）",
+    JSON.stringify({ viewH, tbRect })
+  );
+  ok(
+    !!tbRect && !!boundsArg && tbRect.width <= boundsArg.width,
+    "工具条宽度不超过扩宽后的窗口宽度（窄贴图也能看全所有按钮）",
+    JSON.stringify({ tbW: tbRect && tbRect.width, winW: boundsArg && boundsArg.width })
+  );
+  ok(
+    !!tbRect && tbRect.left >= 0 && tbRect.right <= (boundsArg ? boundsArg.width : 0),
+    "工具条完整落在扩宽后的窗口内（左右都不被裁）",
+    JSON.stringify({ left: tbRect && tbRect.left, right: tbRect && tbRect.right, winW: boundsArg && boundsArg.width })
+  );
+  // 图片比工具条宽时，工具条应相对图片居中（而不是相对被扩宽的窗口居中）。
+  ok(
+    !!tbRect && Math.abs(tbRect.left - (viewW - tbRect.width) / 2) <= 1,
+    "工具条相对图片居中（图片够宽时）",
+    JSON.stringify({ left: tbRect && tbRect.left, expect: (viewW - (tbRect ? tbRect.width : 0)) / 2 })
   );
   const beforePen = await evaluate(`window.__pin.ink(${RED})`);
   ok(beforePen === 0, "画笔前无红色像素");
@@ -434,6 +470,36 @@ try {
   await sleep(150);
   ok((await evaluate("window.__pin.textboxOpen()")) === false, "回车提交后输入框关闭");
 
+  /* ------- 5.1 真实鼠标回归：点画布开的输入框必须保持焦点 -------
+   * 背景：mousedown 的默认「焦点移交」会把焦点从刚插入并聚焦的 textarea 抢回
+   * body → blur → 空提交关框，真机表现为「文字标注没反应」。合成事件不触发
+   * 默认行为，测不出来；必须用 CDP 真实鼠标/键盘回归（onCanvasDown 文字分支
+   * 已 preventDefault 拦下默认聚焦）。 */
+  const realClickAt = async (x, y) => {
+    await send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y, button: "none" });
+    await send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
+    await send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
+  };
+  await realClickAt(200, 100);
+  await sleep(450);
+  ok((await evaluate("window.__pin.textboxOpen()")) === true, "真实鼠标点画布：输入框保持打开（不被默认聚焦行为顶掉）");
+  ok(
+    (await evaluate("document.activeElement && document.activeElement.className")) === "pin-text-input",
+    "真实鼠标点画布：输入框保持焦点（可直接输入）"
+  );
+  for (const ch of ["h", "i"]) {
+    await send("Input.dispatchKeyEvent", { type: "keyDown", key: ch, text: ch });
+    await send("Input.dispatchKeyEvent", { type: "keyUp", key: ch });
+  }
+  await sleep(100);
+  ok(
+    (await evaluate("document.querySelector('.pin-text-input').value")) === "hi",
+    "真实键盘输入进入输入框"
+  );
+  await evaluate("window.__pin.keyInTextarea('Escape')");
+  await sleep(100);
+  ok((await evaluate("window.__pin.textboxOpen()")) === false, "Esc 取消真实输入（不落笔）");
+
   /* ---------------- 6. Esc 退出编辑：工具条消失 ---------------- */
   await evaluate("window.__pin.esc()");
   await sleep(150);
@@ -452,6 +518,74 @@ try {
   await evaluate("window.__pin.esc()");
   await sleep(120);
   ok((await evaluate("window.__pin.toolbarVisible()")) === false, "再次 Esc 退出编辑");
+
+  /* ------- 7.1 贴近屏幕底部 → 向上扩窗：窗口上移，图片仍在原位，工具条在上方 ------- */
+  await evaluate(`window.__pinPos = { x: 120, y: 98 };
+    window.__pinMonitor = {
+      name: 'test', scaleFactor: 1,
+      position: { x: 0, y: 0 }, size: { width: 1920, height: 700 },
+      workArea: { position: { x: 0, y: 0 }, size: { width: 1920, height: 700 } },
+    };`);
+  await evaluate("window.__pin.contextMenu(300, 200)");
+  await sleep(150);
+  const upBefore = await evaluate("window.__pin.invoked('pin_set_bounds').length");
+  await evaluate("window.__pin.clickMenu('显示编辑工具')");
+  await sleep(200);
+  const upIdx = Number(upBefore);
+  const upBounds = await evaluate(`(window.__pin.invoked('pin_set_bounds')[${upIdx}] || {}).args`);
+  ok(
+    !!upBounds && upBounds.y === 50 && upBounds.height === viewH + 48,
+    "贴底：向上扩窗（窗口上移 48、总高 +48）",
+    JSON.stringify(upBounds)
+  );
+  const upGeom = await evaluate(`(() => {
+    const c = document.querySelector('.pin-canvas').getBoundingClientRect();
+    const t = document.querySelector('.pin-toolbar').getBoundingClientRect();
+    return { canvasTop: Math.round(c.top), toolbarTop: Math.round(t.top), toolbarBottom: Math.round(t.bottom) };
+  })()`);
+  ok(upGeom.canvasTop === 48, "向上扩窗后画布下移 48（图片仍在原屏幕位置）", JSON.stringify(upGeom));
+  ok(upGeom.toolbarTop === 4, "向上扩窗：工具条在图片上方（不被扩出屏幕）", JSON.stringify(upGeom));
+  await evaluate("window.__pin.esc()");
+  await sleep(200);
+  const exitBounds = await evaluate("(() => { const a = window.__pin.invoked('pin_set_bounds'); return a.length ? a[a.length - 1].args : null; })()");
+  ok(
+    !!exitBounds && exitBounds.y === 98 && exitBounds.height === viewH,
+    "退出编辑：窗口坐标/尺寸还原（图片不跳位）",
+    JSON.stringify(exitBounds)
+  );
+
+  /* ------- 7.2 上下都没有空间 → 工具条悬浮在图片底部内侧，窗口不扩高 ------- */
+  await evaluate(`window.__pinPos = { x: 120, y: 80 };
+    window.__pinMonitor = {
+      name: 'test', scaleFactor: 1,
+      position: { x: 0, y: 80 }, size: { width: 1920, height: ${viewH} },
+      workArea: { position: { x: 0, y: 80 }, size: { width: 1920, height: ${viewH} } },
+    };`);
+  await evaluate("window.__pin.contextMenu(300, 200)");
+  await sleep(150);
+  const ovBefore = await evaluate("window.__pin.invoked('pin_set_bounds').length");
+  await evaluate("window.__pin.clickMenu('显示编辑工具')");
+  await sleep(200);
+  const ovIdx = Number(ovBefore);
+  const ovBounds = await evaluate(`(window.__pin.invoked('pin_set_bounds')[${ovIdx}] || {}).args`);
+  ok(
+    !!ovBounds && ovBounds.y === 80 && ovBounds.height === viewH,
+    "上下都放不下：窗口不扩高（图片尺寸/位置不变）",
+    JSON.stringify(ovBounds)
+  );
+  const ovGeom = await evaluate(`(() => {
+    const c = document.querySelector('.pin-canvas').getBoundingClientRect();
+    const t = document.querySelector('.pin-toolbar').getBoundingClientRect();
+    return { canvasTop: Math.round(c.top), toolbarTop: Math.round(t.top), toolbarBottom: Math.round(t.bottom), vh: window.innerHeight };
+  })()`);
+  ok(ovGeom.canvasTop === 0, "悬浮模式：画布仍贴顶", JSON.stringify(ovGeom));
+  ok(
+    ovGeom.toolbarTop >= viewH - 60 && ovGeom.toolbarBottom <= viewH,
+    "悬浮模式：工具条完整落在图片底部内侧（不被屏幕裁掉）",
+    JSON.stringify(ovGeom)
+  );
+  await evaluate("window.__pin.esc()");
+  await sleep(200);
 
   /* ---------------- 8. 菜单「复制」→ screenshot_copy_image ---------------- */
   await evaluate("window.__pin.contextMenu(300, 200)");
@@ -476,6 +610,64 @@ try {
     `before=${dragBefore} after=${dragAfter}`);
   const closeLabel = await evaluate("(() => { const c = window.__pin.invoked('pin_close')[0]; return c && c.args ? c.args.label : null; })()");
   ok(closeLabel === "pin-test-1", "关闭时带自己的 label", String(closeLabel));
+
+  /* ------- 9.1 窄贴图：按钮不被压扁，窗口向右扩宽到装得下整条工具栏 ------- *
+   * 真机上贴图窗口只有图片那么宽，共享组件的 max-width: calc(100vw - 24px)
+   * 会把工具条量窄（→ 误判装得下、不扩宽）。这里用 CDP 把视口也压到 200×200，
+   * 复现「窄窗口 + 宽工具条」的真实条件。
+   */
+  await send("Emulation.setDeviceMetricsOverride", {
+    width: 200,
+    height: 200,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await send("Page.navigate", { url: `${base}/pin.html?w=200&h=200` });
+  await sleep(1000);
+  const narrowCanvas = await evaluate(`(() => {
+    const r = document.querySelector('.pin-canvas').getBoundingClientRect();
+    return { w: Math.round(r.width), h: Math.round(r.height) };
+  })()`);
+  ok(narrowCanvas.w === 200 && narrowCanvas.h === 200, "窄贴图：画布 = 图片 CSS 尺寸（200×200）", JSON.stringify(narrowCanvas));
+  await evaluate("window.__pin.contextMenu(150, 100)");
+  await sleep(150);
+  await evaluate("window.__pin.clickMenu('显示编辑工具')");
+  await sleep(200);
+  const narrowGeom = await evaluate(`(() => {
+    const t = document.querySelector('.pin-toolbar');
+    const r = t.getBoundingClientRect();
+    const btn = document.querySelector('.pin-toolbar .ov-tool').getBoundingClientRect();
+    const a = window.__pin.invoked('pin_set_bounds');
+    const bounds = a.length ? a[a.length - 1].args : null;
+    return {
+      toolbarWidth: Math.round(r.width), toolbarLeft: Math.round(r.left), toolbarRight: Math.round(r.right),
+      maxWidth: getComputedStyle(t).maxWidth, buttonWidth: Math.round(btn.width),
+      bounds,
+    };
+  })()`);
+  ok(
+    narrowGeom.maxWidth === "none",
+    "工具条不再被共享组件的 max-width: calc(100vw - 24px) 量窄",
+    String(narrowGeom.maxWidth)
+  );
+  ok(
+    narrowGeom.buttonWidth === 32,
+    "窄贴图下按钮保持 32px 原宽（不被挤扁）",
+    String(narrowGeom.buttonWidth)
+  );
+  ok(
+    !!narrowGeom.bounds && narrowGeom.bounds.width >= narrowGeom.toolbarWidth + 8,
+    "窗口向右扩宽到装得下整条工具条",
+    JSON.stringify({ win: narrowGeom.bounds && narrowGeom.bounds.width, tb: narrowGeom.toolbarWidth })
+  );
+  ok(
+    narrowGeom.toolbarLeft === 0 && narrowGeom.toolbarRight <= (narrowGeom.bounds ? narrowGeom.bounds.width : 0),
+    "工具条贴图片左缘且完整落在窗口内",
+    JSON.stringify(narrowGeom)
+  );
+  await evaluate("window.__pin.esc()");
+  await sleep(150);
+  await send("Emulation.clearDeviceMetricsOverride");
 
   /* ---------------- 10. 加载失败 → 错误提示（独立页面） ---------------- */
   await send("Page.addScriptToEvaluateOnNewDocument", {

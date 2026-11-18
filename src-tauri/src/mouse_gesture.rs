@@ -25,17 +25,14 @@
 //!
 //! 坐标全部是**物理屏幕像素**（`MSLLHOOKSTRUCT.pt` 口径），与贴图/遮罩一致。
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::{LazyLock, Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
-#[cfg(windows)]
 use crate::plugin_host;
-
-/// 手势插件 id（动作执行前按此 id 查网关权限）
-pub const GESTURE_PLUGIN_ID: &str = "com.zhuangjie.mouse-gesture";
 
 /// 手势轨迹 HUD 窗口 label（常驻隐藏；capabilities/gesture.json 按 `gesture-*` 授权）
 pub const GESTURE_HUD_LABEL: &str = "gesture-hud";
@@ -46,12 +43,15 @@ pub const EVENT_GESTURE_TRAIL: &str = "my-search://gesture-trail";
 /// 手势结果反馈事件名（Rust → HUD 页面：识别出的手势 + 将执行的动作）
 pub const EVENT_GESTURE_RESULT: &str = "my-search://gesture-result";
 
-/// 启用开关（settings 键 `gesture_enabled`；钩子常驻，关闭时回调首行直接放行）
+/// 用户启用开关（settings 键 `gesture_enabled`）
 static ENABLED: AtomicBool = AtomicBool::new(true);
-/// 钩子句柄（进程期保活；卸载只在进程退出时由系统回收）
+/// 钩子句柄（仅在有启用插件具备 `gesture.exec` 且用户开关开启时挂载；否则为 0）
 static HOOK: AtomicIsize = AtomicIsize::new(0);
-/// 应用句柄（install 时写入；识别线程用它广播事件）
+/// 应用句柄（sync_active / install 时写入；识别线程用它广播事件）
 static APP: OnceLock<AppHandle> = OnceLock::new();
+/// 识别线程是否已启动（进程内最多起一个常驻识别循环，钩子未挂时阻塞在 recv 零开销）
+#[cfg(windows)]
+static WORKER_STARTED: AtomicBool = AtomicBool::new(false);
 /// 识别线程的命令通道（钩子回调 → 识别线程；回调只 send，绝不做重活）
 #[cfg(windows)]
 static MSG_TX: OnceLock<std::sync::mpsc::Sender<GestureEv>> = OnceLock::new();
@@ -67,9 +67,9 @@ static HELD: AtomicBool = AtomicBool::new(false);
 
 /// 「画手势录制」模式：面板请求后置位——识别线程把手势结果广播给
 /// 面板（my-search://gesture-record）而**不执行动作**；HUD 显示「录制中」。
-/// 不能加 `#[cfg(windows)]`：`gesture_record_start` / `gesture_record_cancel`
-/// 两个命令在所有平台注册，非 Windows 编译也会引用它。
 static RECORDING: AtomicBool = AtomicBool::new(false);
+/// 发起录制的插件 id（只向发起方定向回传录制结果）
+static RECORDING_PLUGIN: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mutex::new(None));
 
 // ===================== 识别算法（移植 FlowMouse GestureRecognizer） =====================
 
@@ -217,14 +217,14 @@ pub struct GestureBinding {
     pub label: Option<String>,
 }
 
-/// 映射表（进程内共享；前端 sync 命令全量覆盖）
-static BINDINGS: LazyLock<Mutex<Vec<GestureBinding>>> =
-    // 不再内置默认映射：手势全部由用户在插件面板自定义（手填或画手势录制），
-    // 初始为空；持久化默认值由 load_bindings_snapshot 从快照恢复。
-    LazyLock::new(|| Mutex::new(Vec::new()));
+/// 按插件隔离的手势映射表：plugin_id → Vec<GestureBinding>。
+/// 宿主不硬编码任何具体插件 id，任何获授 `gesture.exec` 的启用插件均可注册自己的映射。
+static BINDINGS: LazyLock<Mutex<HashMap<String, Vec<GestureBinding>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// 供面板「导入默认映射」按钮使用的一组推荐映射（**不再自动注入**）。
 /// 方向语义：U=上 D=下 L=左 R=右，方向串按轨迹先后拼接（"UD" = 先上后下）。
+#[allow(dead_code)]
 pub fn default_bindings() -> Vec<GestureBinding> {
     vec![
         GestureBinding {
@@ -254,23 +254,36 @@ pub fn default_bindings() -> Vec<GestureBinding> {
         },
     ]
 }
-/// 读映射表快照
-pub fn bindings_snapshot() -> Vec<GestureBinding> {
+
+/// 读指定插件的映射表快照
+pub fn bindings_snapshot_of(plugin_id: &str) -> Vec<GestureBinding> {
     BINDINGS
         .lock()
         .ok()
-        .map(|g| g.clone())
+        .and_then(|g| g.get(plugin_id).cloned())
         .unwrap_or_default()
 }
 
-/// 按方向串查绑定
-fn find_binding(pattern: &str) -> Option<GestureBinding> {
-    BINDINGS
-        .lock()
-        .ok()?
-        .iter()
-        .find(|b| b.pattern == pattern)
-        .cloned()
+/// 清理某插件在内存中的映射（插件卸载时调用）
+pub(crate) fn remove_plugin_bindings(plugin_id: &str) {
+    if let Ok(mut g) = BINDINGS.lock() {
+        g.remove(plugin_id);
+    }
+}
+
+/// 按方向串在当前所有已启用且具备 `gesture.exec` 权限的插件里查找映射（返回所属 plugin_id 与条目）
+#[cfg(windows)]
+fn find_binding(pattern: &str) -> Option<(String, GestureBinding)> {
+    let active_owners = plugin_host::active_plugin_ids_with_grant("gesture.exec");
+    let guard = BINDINGS.lock().ok()?;
+    for pid in active_owners {
+        if let Some(list) = guard.get(&pid) {
+            if let Some(b) = list.iter().find(|b| b.pattern == pattern) {
+                return Some((pid, b.clone()));
+            }
+        }
+    }
+    None
 }
 
 /// 动作展示名（无备注时兜底）
@@ -757,9 +770,10 @@ fn finish_gesture(app: &AppHandle, pattern: &str) {
     // 空手势同样广播（面板提示「未识别」），HUD 不会残留。
     if RECORDING.load(Ordering::Acquire) {
         RECORDING.store(false, Ordering::Release);
+        let owner = RECORDING_PLUGIN.lock().ok().and_then(|mut g| g.take());
         let _ = app.emit(
             "my-search://gesture-record",
-            serde_json::json!({ "pattern": pattern }),
+            serde_json::json!({ "pluginId": owner, "pattern": pattern }),
         );
         // recording:true → HUD 显示「已录制 xx」而非「未映射」（录制场景显示
         // 未映射是误导）；空手势仍 silent（HUD 立即收场，面板提示未识别）。
@@ -777,7 +791,7 @@ fn finish_gesture(app: &AppHandle, pattern: &str) {
         );
         return;
     }
-    let Some(binding) = find_binding(pattern) else {
+    let Some((owner_id, binding)) = find_binding(pattern) else {
         // 未映射的手势：HUD 显示识别结果但不执行
         let _ = app.emit(
             EVENT_GESTURE_RESULT,
@@ -793,17 +807,16 @@ fn finish_gesture(app: &AppHandle, pattern: &str) {
         EVENT_GESTURE_RESULT,
         serde_json::json!({ "pattern": pattern, "matched": true, "label": label }),
     );
-    // 权限二次校验（前端是唯一真相源，这里只信网关镜像）：
-    // 未授予 `gesture.exec` 时一律拒绝——HUD 显示「未授权」提示。
-    let granted = plugin_host::gateway_get(GESTURE_PLUGIN_ID)
-        .map(|s| plugin_host::has_base_permission(&s, "gesture.exec"))
+    // 权限二次校验（按映射归属插件动态校验 `gesture.exec`，宿主不硬编码插件 id）：
+    let granted = plugin_host::gateway_get(&owner_id)
+        .map(|s| s.enabled && plugin_host::has_base_permission(&s, "gesture.exec"))
         .unwrap_or(false);
     if !granted {
         let _ = app.emit(
             EVENT_GESTURE_RESULT,
             serde_json::json!({ "pattern": pattern, "matched": true, "label": label, "denied": true }),
         );
-        eprintln!("[手势] 插件未授予 gesture.exec，拒绝执行「{label}」");
+        eprintln!("[手势] 插件 {owner_id} 未授予 gesture.exec，拒绝执行「{label}」");
         return;
     }
     let action = binding.action;
@@ -826,6 +839,9 @@ fn trigger_held() -> bool {
 
 #[cfg(windows)]
 fn install_hook() -> Result<(), String> {
+    if HOOK.load(Ordering::Acquire) != 0 {
+        return Ok(());
+    }
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::WindowsAndMessaging::{SetWindowsHookExW, WH_MOUSE_LL};
     unsafe {
@@ -839,6 +855,21 @@ fn install_hook() -> Result<(), String> {
         }
         HOOK.store(hook as isize, Ordering::Release);
         Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn uninstall_hook() {
+    let prev = HOOK.swap(0, Ordering::AcqRel);
+    if prev != 0 {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{UnhookWindowsHookEx, HHOOK};
+        unsafe {
+            let _ = UnhookWindowsHookEx(prev as HHOOK);
+        }
+        HELD.store(false, Ordering::Release);
+        ACTIVE.store(false, Ordering::Release);
+        RECORDING.store(false, Ordering::Release);
+        eprintln!("[手势] 已卸载低级鼠标钩子（插件未启用或总开关已关）");
     }
 }
 
@@ -948,58 +979,101 @@ unsafe extern "system" fn mouse_hook_proc(
     CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
 }
 
-// ===================== 对外入口与 tauri 命令 =====================
+// ===================== 生命周期与按需启停 =====================
 
-/// 安装鼠标手势监听（幂等；失败只记日志——功能缺失不阻断应用启动）。
+/// 按「是否有启用插件获授 `gesture.exec` + 用户总开关」动态装卸低级鼠标钩子（幂等）。
 ///
-/// 识别线程独立启动（channel 消费），钩子回调只投递事件。
-/// 非 Windows：空实现（功能静默缺席，不影响编译与启动）。
+/// 关键解耦：不再在宿主启动时无条件挂 `WH_MOUSE_LL` 钩子——未安装或禁用手势插件时
+/// 系统层零鼠标钩子、零 HUD 窗口；启用或新安装手势插件后经主线程消息循环即时挂载。
 #[cfg(windows)]
-pub fn install(app: AppHandle) {
-    let hud_app = app.clone();
-    let _ = APP.set(app);
-    if let Err(e) = install_hook() {
-        eprintln!("[手势] {e}，鼠标手势不可用");
-        return;
+pub fn sync_active(app: &AppHandle) {
+    let _ = APP.set(app.clone());
+    let active_ids = plugin_host::active_plugin_ids_with_grant("gesture.exec");
+    for pid in &active_ids {
+        ensure_plugin_bindings_loaded(app, pid);
     }
-    let (tx, rx) = std::sync::mpsc::channel::<GestureEv>();
-    let _ = MSG_TX.set(tx);
-    let spawned = std::thread::Builder::new()
-        .name("mouse-gesture".into())
-        .spawn(move || {
-            recognizer_loop(rx, |v| ACTIVE.store(v, Ordering::Release));
-        });
-    if spawned.is_err() {
-        eprintln!("[手势] 识别线程启动失败，鼠标手势不可用");
-        return;
-    }
-    eprintln!("[手势] 鼠标手势监听已启动（Ctrl + 右键拖拽）");
-    // HUD 常驻隐藏窗口：异步创建（同步命令里建 WebView2 会死锁 wry#583），
-    // 失败只记日志——轨迹反馈缺失不影响手势本身。
-    tauri::async_runtime::spawn(async move {
-        if let Err(e) = ensure_hud_window(&hud_app).await {
-            eprintln!("[手势] {e}");
+
+    let should_run = ENABLED.load(Ordering::Relaxed) && !active_ids.is_empty();
+    if should_run {
+        if !WORKER_STARTED.swap(true, Ordering::AcqRel) {
+            let (tx, rx) = std::sync::mpsc::channel::<GestureEv>();
+            let _ = MSG_TX.set(tx);
+            if std::thread::Builder::new()
+                .name("mouse-gesture".into())
+                .spawn(move || {
+                    recognizer_loop(rx, |v| ACTIVE.store(v, Ordering::Release));
+                })
+                .is_err()
+            {
+                WORKER_STARTED.store(false, Ordering::Release);
+                eprintln!("[手势] 识别线程启动失败，鼠标手势不可用");
+                return;
+            }
         }
-    });
+        if HOOK.load(Ordering::Acquire) == 0 {
+            let main_app = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                if ENABLED.load(Ordering::Relaxed)
+                    && plugin_host::any_plugin_granted("gesture.exec")
+                {
+                    if let Err(e) = install_hook() {
+                        eprintln!("[手势] {e}");
+                    } else {
+                        eprintln!("[手势] 鼠标手势监听已按需激活（Ctrl + 右键拖拽）");
+                    }
+                }
+            });
+            let hud_app = main_app;
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = ensure_hud_window(&hud_app).await {
+                    eprintln!("[手势] {e}");
+                }
+            });
+        }
+    } else {
+        if HOOK.load(Ordering::Acquire) != 0 {
+            let _ = app.run_on_main_thread(|| {
+                uninstall_hook();
+            });
+        }
+        if let Some(w) = app.get_webview_window(GESTURE_HUD_LABEL) {
+            let _ = w.hide();
+        }
+    }
 }
 
 #[cfg(not(windows))]
-pub fn install(_app: AppHandle) {}
+pub fn sync_active(_app: &AppHandle) {}
 
-/// 写开关（启动时按落盘偏好调用；置位即生效，钩子常驻不卸载）
+/// 退出应用时卸掉低级鼠标钩子（幂等）。
+#[cfg(windows)]
+pub fn uninstall() {
+    uninstall_hook();
+}
+
+#[cfg(not(windows))]
+pub fn uninstall() {}
+
+/// 写开关（启动时按落盘偏好调用）
 pub fn set_enabled(enabled: bool) {
     ENABLED.store(enabled, Ordering::Relaxed);
 }
 
-/// 读取启用开关（设置面板展示）
+/// 读取启用开关（需调用方插件处于启用态）
 #[tauri::command]
-pub fn gesture_get_enabled() -> bool {
-    ENABLED.load(Ordering::Relaxed)
+pub fn gesture_get_enabled(plugin_id: String) -> Result<bool, String> {
+    plugin_host::require_enabled(&plugin_id)?;
+    Ok(ENABLED.load(Ordering::Relaxed))
 }
 
-/// 写入启用开关（置位即生效，钩子常驻不卸载；偏好落盘）
+/// 写入启用开关（需 `gesture.exec` 权限；置位即触发钩子按需装卸并落盘偏好）
 #[tauri::command]
-pub fn gesture_set_enabled(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+pub fn gesture_set_enabled(
+    app: tauri::AppHandle,
+    plugin_id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    plugin_host::require_grant(&plugin_id, "gesture.exec")?;
     ENABLED.store(enabled, Ordering::Relaxed);
     if let Some(store) = crate::settings_store(&app) {
         store.set("gesture_enabled", serde_json::Value::Bool(enabled));
@@ -1007,13 +1081,19 @@ pub fn gesture_set_enabled(app: tauri::AppHandle, enabled: bool) -> Result<(), S
             eprintln!("保存鼠标手势设置失败: {e}");
         }
     }
+    sync_active(&app);
     Ok(())
 }
 
 /// 进入「画手势录制」模式：下一次 Ctrl+右键手势只识别不执行，
-/// 松手时广播 my-search://gesture-record 携带方向串（面板拿去回填）。
+/// 松手时广播 my-search://gesture-record 携带归属 pluginId 与方向串。
 #[tauri::command]
-pub fn gesture_record_start(app: AppHandle) {
+pub fn gesture_record_start(app: AppHandle, plugin_id: String) -> Result<(), String> {
+    plugin_host::require_grant(&plugin_id, "gesture.exec")?;
+    sync_active(&app);
+    if let Ok(mut g) = RECORDING_PLUGIN.lock() {
+        *g = Some(plugin_id);
+    }
     RECORDING.store(true, Ordering::Release);
     // HUD 同步进入「录制中」：show + 提示（轨迹照画，动作不执行）。
     show_hud(&app, None);
@@ -1021,17 +1101,25 @@ pub fn gesture_record_start(app: AppHandle) {
         EVENT_GESTURE_RESULT,
         serde_json::json!({ "pattern": "", "matched": false, "recording": true }),
     );
+    Ok(())
 }
 
 /// 退出「画手势录制」模式（面板取消 / 面板销毁时调用）。
 #[tauri::command]
-pub fn gesture_record_cancel(app: AppHandle) {
+pub fn gesture_record_cancel(app: AppHandle, plugin_id: String) -> Result<(), String> {
+    plugin_host::require_grant(&plugin_id, "gesture.exec")?;
     RECORDING.store(false, Ordering::Release);
+    if let Ok(mut g) = RECORDING_PLUGIN.lock() {
+        if g.as_deref() == Some(plugin_id.as_str()) {
+            *g = None;
+        }
+    }
     // HUD 可能停在「录制中」提示上：发 silent result 让它立即收场
     let _ = app.emit(
         EVENT_GESTURE_RESULT,
         serde_json::json!({ "pattern": "", "matched": false, "silent": true }),
     );
+    Ok(())
 }
 
 /// 从 settings.json 读偏好（None = 从未配置，按默认开）
@@ -1041,16 +1129,22 @@ pub fn read_gesture_pref(app: &tauri::AppHandle) -> Option<bool> {
         .and_then(|v| v.as_bool())
 }
 
-/// 读取映射表（插件面板打开时拉取）
+/// 读取调用方插件自己的手势映射表（懒加载快照）
 #[tauri::command]
-pub fn gesture_bindings_list() -> Vec<GestureBinding> {
-    bindings_snapshot()
+pub fn gesture_bindings_list(
+    app: tauri::AppHandle,
+    plugin_id: String,
+) -> Result<Vec<GestureBinding>, String> {
+    plugin_host::require_enabled(&plugin_id)?;
+    ensure_plugin_bindings_loaded(&app, &plugin_id);
+    Ok(bindings_snapshot_of(&plugin_id))
 }
 
-/// 列出当前有可见窗口的运行中进程（插件面板「呼出程序」动作的下拉数据源）。
+/// 列出当前有可见窗口的运行中进程（需 `gesture.exec` 权限）。
 /// 按 exe 路径去重（同程序多窗口只保留 Z 序最顶者），排除本应用自身，上限 200 条。
 #[tauri::command]
-pub fn gesture_list_processes() -> Vec<RunningProcessDto> {
+pub fn gesture_list_processes(plugin_id: String) -> Result<Vec<RunningProcessDto>, String> {
+    plugin_host::require_grant(&plugin_id, "gesture.exec")?;
     #[cfg(windows)]
     {
         let mut seen = std::collections::HashSet::new();
@@ -1073,19 +1167,14 @@ pub fn gesture_list_processes() -> Vec<RunningProcessDto> {
                 break;
             }
         }
-        out
+        Ok(out)
     }
     #[cfg(not(windows))]
-    Vec::new()
+    Ok(Vec::new())
 }
 
-/// 写入映射表（插件面板保存后下发；全量覆盖式，含清洗与落盘）
-#[tauri::command]
-pub fn gesture_bindings_sync(
-    app: tauri::AppHandle,
-    bindings: Vec<GestureBinding>,
-) -> Result<(), String> {
-    // 清洗：方向串只留 UDLR、按 pattern 去重、上限 64 条（防内存滥用）
+/// 清洗手势绑定列表（纯函数：只留 UDLR、去重、上限 64 条）
+fn clean_gesture_bindings(bindings: Vec<GestureBinding>) -> Vec<GestureBinding> {
     let mut cleaned: Vec<GestureBinding> = Vec::new();
     for mut b in bindings {
         b.pattern = b
@@ -1101,61 +1190,64 @@ pub fn gesture_bindings_sync(
             break;
         }
     }
+    cleaned
+}
+
+/// 写入调用方插件自己的映射表（需 `gesture.exec` 权限；全量覆盖式，含清洗与落盘）
+#[tauri::command]
+pub fn gesture_bindings_sync(
+    app: tauri::AppHandle,
+    plugin_id: String,
+    bindings: Vec<GestureBinding>,
+) -> Result<(), String> {
+    plugin_host::require_grant(&plugin_id, "gesture.exec")?;
+    let cleaned = clean_gesture_bindings(bindings);
     if let Ok(mut g) = BINDINGS.lock() {
-        *g = cleaned;
+        g.insert(plugin_id.clone(), cleaned);
     }
-    save_bindings_snapshot(&app);
+    save_bindings_snapshot(&app, &plugin_id);
+    sync_active(&app);
     Ok(())
 }
 
-/// 映射快照落盘（plugin-data/<id>/gesture-bindings.json；Rust 侧自愈兜底）
-fn bindings_snapshot_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
-    #[cfg(windows)]
-    {
-        crate::plugin_host::plugin_data_dir(app, GESTURE_PLUGIN_ID)
-            .ok()
-            .map(|d| d.join("gesture-bindings.json"))
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = app;
-        None
-    }
+/// 某插件映射快照落盘路径（`plugin-data/<plugin_id>/gesture-bindings.json`）
+fn bindings_snapshot_path(app: &tauri::AppHandle, plugin_id: &str) -> Option<std::path::PathBuf> {
+    crate::plugin_host::plugin_data_dir(app, plugin_id)
+        .ok()
+        .map(|d| d.join("gesture-bindings.json"))
 }
 
-/// 快照写入（尽力；失败只记日志）
-fn save_bindings_snapshot(app: &tauri::AppHandle) {
-    let Some(path) = bindings_snapshot_path(app) else {
+/// 快照写入（按插件隔离落盘）
+fn save_bindings_snapshot(app: &tauri::AppHandle, plugin_id: &str) {
+    let Some(path) = bindings_snapshot_path(app, plugin_id) else {
         return;
     };
-    let list = bindings_snapshot();
+    let list = bindings_snapshot_of(plugin_id);
     let Ok(json) = serde_json::to_string(&list) else {
         return;
     };
     if std::fs::write(&path, json).is_err() {
-        eprintln!("[手势] 写映射快照失败");
+        eprintln!("[手势] 写映射快照失败（{plugin_id}）");
     }
 }
 
-/// 启动时恢复快照（前端还没 sync 时的兜底；只在映射表为空时恢复——
-/// 用户删光映射 = 自愿清空，尊重之，不回填）。
-pub fn load_bindings_snapshot(app: &tauri::AppHandle) {
-    let Some(path) = bindings_snapshot_path(app) else {
-        return;
-    };
-    let Ok(json) = std::fs::read_to_string(&path) else {
-        return;
-    };
-    let Ok(list) = serde_json::from_str::<Vec<GestureBinding>>(&json) else {
-        return;
-    };
-    if list.is_empty() {
+/// 按插件懒加载映射快照（仅当内存表中尚未记录该插件条目时从磁盘恢复；
+/// 用户主动保存为空数组后内存已有 `Some([])`，不会回填旧文件）。
+fn ensure_plugin_bindings_loaded(app: &tauri::AppHandle, plugin_id: &str) {
+    let already_loaded = BINDINGS
+        .lock()
+        .ok()
+        .map(|g| g.contains_key(plugin_id))
+        .unwrap_or(true);
+    if already_loaded {
         return;
     }
+    let list = bindings_snapshot_path(app, plugin_id)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|json| serde_json::from_str::<Vec<GestureBinding>>(&json).ok())
+        .unwrap_or_default();
     if let Ok(mut g) = BINDINGS.lock() {
-        if g.is_empty() {
-            *g = list;
-        }
+        g.entry(plugin_id.to_string()).or_insert(list);
     }
 }
 

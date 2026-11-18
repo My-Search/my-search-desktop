@@ -122,6 +122,15 @@ export const PERMISSION_CATALOG: readonly PermissionSpec[] = [
     revokeImpact: "插件将无法再读取搜索框里附加的文件/文件夹",
   },
   {
+    id: "file.write",
+    group: "data",
+    title: "保存文件",
+    desc: "把插件收到的内容保存到你通过系统「另存为」对话框明确选择的本地文件（不能静默写入任意路径）",
+    risk: "high",
+    runtime: "both",
+    revokeImpact: "插件将无法再把文件保存到本地",
+  },
+  {
     id: "env.read",
     group: "data",
     title: "使用环境变量",

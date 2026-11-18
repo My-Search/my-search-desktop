@@ -16,8 +16,8 @@
  * （见 useUpdateChecker）。
  */
 
-import { storageGet, storageSet } from "./util";
-import { notifyAutoDownloadChanged } from "./tauri-bridge";
+import { storageGet, storageSet } from "./util.ts";
+import { notifyAutoDownloadChanged } from "./tauri-bridge.ts";
 
 /** 存储键（不含前缀，storageGet/storageSet 会自动补 `my-search-desktop:`） */
 const AUTO_DOWNLOAD_KEY = "auto_download_update";

@@ -43,6 +43,7 @@ import { useMessageDialog } from "../../composables/useMessageDialog";
 import { useToast } from "../../composables/useToast";
 import { useEnvPicker } from "../../composables/useEnvPicker";
 import { setupBuiltinAutoInstall } from "../../lib/plugins/install-builtin";
+import { createPluginAutoUpdater } from "../../lib/plugins/auto-update";
 import MessageDialog from "../../components/MessageDialog.vue";
 import PluginInstallDialog from "../../components/PluginInstallDialog.vue";
 import ToastHost from "../../components/ToastHost.vue";
@@ -141,6 +142,11 @@ const installDialogWarnings = ref<string[]>([]);
 const installDialogInstalledVersion = ref<string | null>(null);
 /** 该插件当前是否在后台运行（覆盖安装时弹窗提示「会先停止再安装」） */
 const installDialogRunning = ref(false);
+const installDialogShowAutoUpdate = ref(false);
+const installDialogAutoUpdate = ref(false);
+let installDialogAutoUpdateCb: ((val: boolean) => void) | null = null;
+/** 本次市场弹窗是否由折叠搜索框状态主动撑高了窗口（关闭时据此恢复高度） */
+let marketDialogResizedWindow = false;
 /**
  * 弹窗本次的来源：`file` = 从 .mspp 文件安装（chip 点击 / 文件选择器），
  * `market` = 市场安装（`ms.market.install` / `update`）。两者共用同一个弹窗组件，
@@ -174,6 +180,8 @@ const INSTALL_DIALOG_HEIGHT = 440;
 /** 打开安装确认弹窗（文件安装）：把窗口撑到弹窗高度，否则弹窗会被折叠窗口裁掉 */
 function openFileInstallDialog(): void {
   installDialogMode = "file";
+  installDialogShowAutoUpdate.value = false;
+  installDialogAutoUpdateCb = null;
   installDialogVisible.value = true;
   void setWindowHeight(INSTALL_DIALOG_HEIGHT);
 }
@@ -185,17 +193,14 @@ function closeFileInstallDialog(): void {
   installDialogIcon.value = null;
   installDialogInstalledVersion.value = null;
   installDialogRunning.value = false;
+  installDialogShowAutoUpdate.value = false;
+  installDialogAutoUpdateCb = null;
   // 关闭后回到内容实测高度（取消时 chip 仍在搜索框、确认时已被摘掉，实测都正确）
   void syncWindowHeightToContent();
 }
 
 /**
- * 市场安装/更新的确认闸门（注入给 `ms.market.install` / `update`）。
- *
- * 由 `usePluginHost` 在插件调用市场安装时回调：把待装插件的清单/权限/警告摆给
- * 用户看，用户点「安装」返回 true，点「取消」（或按 Esc）返回 false。**真正的
- * 下载与落盘在 host.ts**——本组件只画界面、拿答复，插件拿不到也改不了待写入的
- * 内容。已有弹窗开着时直接返回 false：不叠弹窗，也不让第二次安装偷偷绕过确认。
+ * 市场安装/更新的确认闸门（注入给 `ms.market.install` / `update` 及自动更新提权确认）。
  */
 function confirmMarketInstall(req: PluginInstallConfirmRequest): Promise<boolean> {
   if (installDialogVisible.value) return Promise.resolve(false);
@@ -206,11 +211,24 @@ function confirmMarketInstall(req: PluginInstallConfirmRequest): Promise<boolean
   installDialogWarnings.value = req.warnings;
   installDialogInstalledVersion.value = req.installedVersion;
   installDialogRunning.value = req.running === true;
+  installDialogShowAutoUpdate.value = typeof req.autoUpdate === "boolean";
+  installDialogAutoUpdate.value = req.autoUpdate === true;
+  installDialogAutoUpdateCb =
+    typeof req.onAutoUpdateChange === "function" ? req.onAutoUpdateChange : null;
   installDialogVisible.value = true;
-  // 窗口高度不动：插件详情视图已把窗口撑到合适高度（见 INSTALL_DIALOG_HEIGHT 注释）
+  // 若当前详情视图未打开（如呼出时弹出自动更新提权确认），主动撑高窗口避免被 48px 搜索条裁切
+  marketDialogResizedWindow = !detailVisible.value;
+  if (marketDialogResizedWindow) {
+    void setWindowHeight(INSTALL_DIALOG_HEIGHT);
+  }
   return new Promise<boolean>((resolve) => {
     marketInstallResolver = resolve;
   });
+}
+
+function onInstallAutoUpdateChange(val: boolean): void {
+  installDialogAutoUpdate.value = val;
+  installDialogAutoUpdateCb?.(val);
 }
 
 /** 关闭市场安装弹窗并回传用户选择（先回传再复位，避免调用方卡在未决 Promise 上） */
@@ -220,10 +238,17 @@ function closeMarketInstallDialog(ok: boolean): void {
   installDialogIcon.value = null;
   installDialogInstalledVersion.value = null;
   installDialogRunning.value = false;
+  installDialogShowAutoUpdate.value = false;
+  installDialogAutoUpdateCb = null;
   installDialogMode = "file";
+  const needRestoreHeight = marketDialogResizedWindow;
+  marketDialogResizedWindow = false;
   const resolve = marketInstallResolver;
   marketInstallResolver = null;
   resolve?.(ok);
+  if (needRestoreHeight) {
+    void syncWindowHeightToContent();
+  }
 }
 
 /** 详情视图内容（null = 未打开） */
@@ -627,6 +652,21 @@ const pluginViewHost = usePluginViewHost({
 bindPluginHostRuntime({
   search: (kw) => engine.search(kw),
   score: (item) => scoreSelect(item),
+});
+
+/** 宿主后台插件自动更新调度器（按插件级 `autoUpdate` 开关控制，开启即后台全静默更新） */
+const pluginAutoUpdater = createPluginAutoUpdater({
+  isPluginActiveInForeground: (id) =>
+    detailVisible.value &&
+    state.mode === MODE.SHOW_ITEM_DETAIL &&
+    pluginViewHost.activePluginId.value === id,
+  onPluginUpdated: (id) => {
+    // 若该插件有后台保活（最小化）的旧前端会话，卸载之以便下次打开加载新版本
+    pluginViewHost.release(id, "插件后台自动更新完成");
+  },
+  onBatchUpdated: () => {
+    void pluginHost.reload(true);
+  },
 });
 
 // ============== 数据同步（插件 ms.sync.*） ==============
@@ -2054,6 +2094,7 @@ onMounted(async () => {
     // （开启则检查、关闭则立即清空并隐藏叶子上的红箭头）。此处走节流版本——
     // 呼出可能很频繁，每次都真查会迅速打爆 GitHub API 未认证限额并掩盖新版本。
     update.recheckOnSummon();
+    pluginAutoUpdater.recheckOnSummon();
     // 弹窗开着时焦点留在弹窗按钮上（PluginInstallDialog 可见时会自动聚焦「安装」）
     if (!installDialogVisible.value) searchBoxRef.value?.focus();
   });
@@ -2092,6 +2133,7 @@ onMounted(async () => {
     initialLoadDone = true;
   }
   update.scheduleUpdateCheck();
+  pluginAutoUpdater.schedule();
 
   // 托盘菜单「清理缓存」
   await onClearCache(() => {
@@ -2325,6 +2367,7 @@ onBeforeUnmount(() => {
   unlistenDragDrop = null;
   pluginViewHost.disposeAll("应用退出");
   pluginHost.stopDevWatcher();
+  pluginAutoUpdater.dispose();
   update.dispose();
 });
 
@@ -2486,6 +2529,9 @@ defineExpose({ inputValue });
       :warnings="installDialogWarnings"
       :installed-version="installDialogInstalledVersion"
       :running="installDialogRunning"
+      :show-auto-update="installDialogShowAutoUpdate"
+      :auto-update="installDialogAutoUpdate"
+      @update:auto-update="onInstallAutoUpdateChange"
       @confirm="onInstallConfirm"
       @cancel="onInstallCancel"
     />

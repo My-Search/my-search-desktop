@@ -43,8 +43,7 @@ const check = (name, pass, detail) => {
  * ============================================================ */
 const styleCss = readFileSync(path.join(root, "src/css/style.css"), "utf8");
 const themeTs = readFileSync(path.join(root, "src/lib/theme.ts"), "utf8");
-const hostTs = readFileSync(path.join(root, "src/lib/plugins/host.ts"), "utf8");
-
+const hostTs = readFileSync(path.join(root, "src/lib/plugins/host/ui-data-api.ts"), "utf8");
 check(
   "style.css：搜索窗口根定义了浅色基准变量（html / html.theme-light）",
   /(^|\n)(html,\s*html\.theme-light|html)\s*\{[^}]*--card:\s*#ffffff/s.test(styleCss) ||
@@ -66,12 +65,12 @@ check(
 );
 check("theme.ts：导出 effectiveTheme()（读 <html> 上的主题类）", /export function effectiveTheme\(\)/.test(themeTs));
 check(
-  "host.ts：ms.ui 暴露 theme / onThemeChanged / _clearThemeHandlers",
-  /get theme\(\)/.test(hostTs) && /onThemeChanged:/.test(hostTs) && /_clearThemeHandlers:/.test(hostTs),
+  "host/ui-data-api.ts：ms.ui 暴露 theme / onThemeChanged / _clearThemeHandlers",
+  /Object\.defineProperty\(ui,\s*"theme"/.test(hostTs) && /onThemeChanged:/.test(hostTs) && /_clearThemeHandlers:/.test(hostTs),
 );
 check(
-  "usePluginViewHost：会话卸载时清理主题订阅（_clearThemeHandlers）",
-  readFileSync(path.join(root, "src/windows/search/usePluginViewHost.ts"), "utf8").includes("_clearThemeHandlers"),
+  "usePluginViewHost：会话卸载时通过 disposePluginHostSession 统一清理主题等全部订阅",
+  readFileSync(path.join(root, "src/windows/search/usePluginViewHost.ts"), "utf8").includes("disposePluginHostSession"),
 );
 
 /* ============================================================

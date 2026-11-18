@@ -126,7 +126,7 @@ function toggleAutoDownload(): void {
     props.notify(
       next
         ? "已开启自动下载更新，检测到新版本将后台自动下载。"
-        : "已关闭自动下载更新，仅可在「关于」面板手动下载安装。",
+        : "已关闭自动下载更新，仅能在「关于」面板手动下载安装。",
       "ok"
     );
   } catch (e) {

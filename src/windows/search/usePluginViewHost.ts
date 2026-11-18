@@ -41,8 +41,12 @@ import { md2html } from "../../lib/util.ts";
 import { scopeCss } from "../../lib/util.ts";
 import { openExternal } from "../../lib/tauri-bridge.ts";
 import type { SearchItem } from "../../types/index.ts";
-import type { PluginHostContext } from "../../lib/plugins/host.ts";
-import { PluginPermissionError } from "../../lib/plugins/host.ts";
+import {
+  disposePluginHostSession,
+  PluginPermissionError,
+  readPluginThemeProvider,
+  type PluginHostContext,
+} from "../../lib/plugins/host.ts";
 import { pluginIdOf, pluginKeywordOf } from "../../lib/plugins/plugin-items.ts";
 import type { PluginRecord } from "../../lib/plugins/registry.ts";
 import {
@@ -52,7 +56,6 @@ import {
   resolvePluginTheme,
   shouldStopBackendOnClose,
 } from "../../lib/plugins/registry.ts";
-import { readPluginThemeProvider } from "../../lib/plugins/host.ts";
 import { applyThemeOverride, clearThemeOverride } from "../../lib/theme-override.ts";
 import { decideViewClose, decideViewRestore } from "../../lib/plugins/dev-reload.ts";
 import { consumePluginFrontendRestart } from "../../lib/plugins/restart.ts";
@@ -373,28 +376,8 @@ export function usePluginViewHost(opts: PluginViewHostOptions) {
           console.warn("[插件] 会话清理回调失败:", e);
         }
       }
-      const backend = session.api?.backend as Record<string, unknown> | undefined;
-      if (backend && typeof backend._clearNotifications === "function") {
-        (backend._clearNotifications as () => void)();
-      }
-      // 后端状态订阅（ms.backend.onBackendChanged）：同理，会话销毁即失效
-      if (backend && typeof backend._clearBackendHandlers === "function") {
-        (backend._clearBackendHandlers as () => void)();
-      }
-      // 主题订阅（ms.ui.onThemeChanged）：同理，会话销毁即失效
-      const ui = session.api?.ui as Record<string, unknown> | undefined;
-      if (ui && typeof ui._clearThemeHandlers === "function") {
-        (ui._clearThemeHandlers as () => void)();
-      }
-      // 主题 provider（ms.ui.registerThemeProvider）：会话没了，它的诉求也就没了
-      if (ui && typeof ui._clearThemeProvider === "function") {
-        (ui._clearThemeProvider as () => void)();
-      }
-      // 自定义快捷键动作处理器（ms.shortcuts.onAction）：脚本没了，处理器也失效
-      const shortcuts = session.api?.shortcuts as Record<string, unknown> | undefined;
-      if (shortcuts && typeof shortcuts._clearActionHandlers === "function") {
-        (shortcuts._clearActionHandlers as () => void)();
-      }
+      // 统一回收该插件在宿主事件总线上注册的全部监听（backend / screenshot / clipboard / gesture / shortcuts / theme）
+      disposePluginHostSession(pluginId);
     } catch (e) {
       /* ignore */
     }
@@ -1162,7 +1145,7 @@ export type PluginViewHostApi = ReturnType<typeof usePluginViewHost>;
  * 恢复同一个 DOM 与同一次脚本执行（本函数不会再被调用）。因此插件不应
  * 假设「关闭界面 = 重新加载」——需要持久化的状态仍应写 `ms.store` / `ms.backend`。
  */
-function runPluginEntry(
+export function runPluginEntry(
   code: string,
   scope: {
     ms: Record<string, unknown>;

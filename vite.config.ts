@@ -26,6 +26,8 @@ export default defineConfig({
         pin: fileURLToPath(new URL("./pin.html", import.meta.url)),
         // 鼠标手势轨迹 HUD（宿主常驻隐藏窗口「gesture-hud」，手势期间画轨迹）
         gesture: fileURLToPath(new URL("./gesture.html", import.meta.url)),
+        // 插件独立窗口（获授 ui.window 权限的插件通过 ms.ui.openWindow 打开的子窗口「plugin-win-*」）
+        pluginWindow: fileURLToPath(new URL("./plugin-window.html", import.meta.url)),
       },
     },
   },

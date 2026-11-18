@@ -23,7 +23,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const hostTs = readFileSync(path.join(root, "src/lib/plugins/host.ts"), "utf8");
+const hostTs = readFileSync(path.join(root, "src/lib/plugins/host/market-api.ts"), "utf8");
 const usePluginHostTs = readFileSync(
   path.join(root, "src/windows/search/usePluginHost.ts"),
   "utf8",
@@ -43,31 +43,35 @@ const check = (name, cond, extra = "") => {
   }
 };
 
-/* ---------- 1. host.ts：确认先于落盘 ---------- */
-// 取 installOrUpdate 的函数体（从定义到 `self.install =` 之前），只在里面找。
+/* ---------- 1. host/market-api.ts：确认先于落盘 ---------- */
+const updateBody = (() => {
+  const start = hostTs.indexOf("export async function updatePluginFromMarket");
+  const end = hostTs.indexOf("export function createMarketApi", start);
+  return start >= 0 && end > start ? hostTs.slice(start, end) : "";
+})();
 const installOrUpdateBody = (() => {
   const start = hostTs.indexOf("async function installOrUpdate");
-  const end = hostTs.indexOf("self.install =", start);
+  const end = hostTs.indexOf("self.list =", start);
   return start >= 0 && end > start ? hostTs.slice(start, end) : "";
 })();
 
-check("host.ts：存在 installOrUpdate 安装实现", installOrUpdateBody.length > 0);
+check("market-api.ts：存在 installOrUpdate 与 updatePluginFromMarket 安装实现", installOrUpdateBody.length > 0 && updateBody.length > 0);
 
-const confirmIdx = installOrUpdateBody.indexOf("ctx.confirmPluginInstall(");
-const writeIdx = installOrUpdateBody.indexOf("installPluginPackage(");
-check("host.ts：调用确认弹窗 ctx.confirmPluginInstall(...)", confirmIdx >= 0);
-check("host.ts：确认调用发生在落盘 installPluginPackage 之前", confirmIdx >= 0 && writeIdx > confirmIdx, `confirm@${confirmIdx} write@${writeIdx}`);
+const confirmIdx = updateBody.indexOf("confirmPluginInstall(");
+const writeIdx = updateBody.indexOf("installPluginPackage(");
+check("market-api.ts：调用确认弹窗 confirmPluginInstall(...)", confirmIdx >= 0);
+check("market-api.ts：确认调用发生在落盘 installPluginPackage 之前", confirmIdx >= 0 && writeIdx > confirmIdx, `confirm@${confirmIdx} write@${writeIdx}`);
 
 // 取消分支必须提前返回（不能继续往下落盘），且返回 cancelled 标记供 UI 识别。
 check(
-  "host.ts：用户取消时返回 cancelled 且不再落盘",
-  /if\s*\(\s*!confirmed\s*\)\s*return\s*\{[^}]*cancelled:\s*true[^}]*\}/.test(installOrUpdateBody),
+  "market-api.ts：用户取消时返回 cancelled 且不再落盘",
+  /if\s*\(\s*!confirmed\s*\)\s*return\s*\{[^}]*cancelled:\s*true[^}]*\}/.test(updateBody),
 );
 
 // fail-closed：没有确认能力就拒绝安装（不得有静默降级）。
 check(
-  "host.ts：未注入确认能力时拒绝安装（fail-closed）",
-  /if\s*\(\s*!ctx\.confirmPluginInstall\s*\)[\s\S]{0,120}?return\s*\{[^}]*ok:\s*false/.test(installOrUpdateBody),
+  "market-api.ts：未注入确认能力时拒绝安装（fail-closed）",
+  /if\s*\(\s*!ctx\.confirmPluginInstall\s*\)[\s\S]{0,200}?return\s*\{[^}]*ok:\s*false/.test(installOrUpdateBody),
 );
 
 /* ---------- 2. host.ts：install 与 update 共用确认逻辑 ---------- */

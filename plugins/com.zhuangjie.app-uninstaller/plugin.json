@@ -1,9 +1,10 @@
 {
   "id": "com.zhuangjie.app-uninstaller",
   "name": "软件卸载器",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "apiVersion": 1,
   "minAppVersion": "7.9.15",
+  "autoUpdate": true,
   "author": "zhuangjie",
   "description": "列出 Windows 已安装软件（含真实图标），支持卸载 / 强制卸载 / 打开安装位置；卸载结束后自动扫描安装目录、快捷方式与注册表残留，可勾选清理。",
   "repository": "https://github.com/My-Search/my-search-desktop/tree/master/plugins/com.zhuangjie.app-uninstaller",

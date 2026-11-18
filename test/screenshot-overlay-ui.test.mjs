@@ -258,7 +258,8 @@ const INJECT = `
         window.__lastCrop = { x, y, w, h, sf };
         const url = cropFrom(x, y, w, h, sf);
         window.__lastCropUrl = url;
-        return Promise.resolve({ dataUrl: url, width: pw, height: ph });
+        // screenX/screenY = 选区在虚拟桌面里的物理坐标（复制锚点会用到）
+        return Promise.resolve({ dataUrl: url, width: pw, height: ph, screenX: x, screenY: y });
       }
       if (cmd === 'screenshot_selection_image') {
         const s = window.__lastCrop || { x: 0, y: 0, w: 10, h: 10, sf: 1 };
@@ -268,6 +269,11 @@ const INJECT = `
       }
       if (cmd === 'screenshot_copy_text') {
         window.__lastCopyText = args && args.text;
+        return Promise.resolve(null);
+      }
+      if (cmd === 'screenshot_copy_image_at') {
+        // 截图页「复制」：除 PNG 外还带选区在屏幕上的物理坐标（贴图锚点）
+        window.__copyAt = args;
         return Promise.resolve(null);
       }
       return Promise.resolve(null);
@@ -686,21 +692,25 @@ try {
   const box = await evaluate(`(() => {
     const el = document.querySelector('.ov-textbox');
     if (!el) return null;
-    const r = el.getBoundingClientRect();
     const input = el.querySelector('input');
+    const r = input.getBoundingClientRect();
+    const cs = getComputedStyle(input);
+    // 首字的位置 = input 内容盒左上角（外框 + padding 之后）。负 margin 的目的
+    // 就是让这里与点击处/落笔点重合，所以断言内容盒原点而不是包裹层外框。
     return {
-      left: Math.round(r.left), top: Math.round(r.top),
-      inputFont: input ? getComputedStyle(input).fontSize : null,
-      inputColor: input ? getComputedStyle(input).color : null,
+      left: r.left + parseFloat(cs.borderLeftWidth) + parseFloat(cs.paddingLeft),
+      top: r.top + parseFloat(cs.borderTopWidth) + parseFloat(cs.paddingTop),
+      inputFont: cs.fontSize,
+      inputColor: cs.color,
     };
   })()`);
   ok(box !== null, "点文字工具后出现输入框", box ? JSON.stringify(box) : "没出现");
   if (box) {
-    // 期望贴合点击处（容差 3px：边框/取整）
+    // 期望首字正好落在点击处（容差 1.5px：边框/亚像素）
     ok(
-      Math.abs(box.left - 280) <= 3 && Math.abs(box.top - 230) <= 3,
-      "输入框贴在点击的位置（不是选区角上）",
-      `实际 (${box.left},${box.top})，期望约 (280,230)`
+      Math.abs(box.left - 280) <= 1.5 && Math.abs(box.top - 230) <= 1.5,
+      "输入框首字贴在点击的位置（不是选区角上）",
+      `实际 (${box.left.toFixed(1)},${box.top.toFixed(1)})，期望约 (280,230)`
     );
   }
 
@@ -1223,10 +1233,30 @@ try {
     ok((await evaluate("!!document.querySelector('.ov-pick')")) === false, "Ctrl+C 不弹取色芯片");
   }
 
-  /* ---------------- 11. 无未捕获异常 ---------------- */
+  /* ---------------- 11. 复制 → 同时记下选区的屏幕锚点 ---------------- *
+   *
+   * 用户需求：截图复制后，按贴图热键应把同一张图贴回截图时的屏幕位置。
+   * 前端必须把「合成后的 PNG」和「选区物理坐标」一起交给
+   * `screenshot_copy_image_at`；若退回普通 `screenshot_copy_image`，
+   * 宿主就只剩光标居中一种贴法（位置信息丢失）。
+   */
+  {
+    await evaluate("window.__ov.clickSel('.ov-btn.primary')");
+    await sleep(200);
+    const at = await evaluate("window.__copyAt || null");
+    ok(!!at, "点「复制」调用 screenshot_copy_image_at（带屏幕锚点）", JSON.stringify(at && { x: at.x, y: at.y }));
+    ok(!!at && typeof at.dataUrl === "string" && at.dataUrl.startsWith("data:image/png"),
+      "复制传给宿主的是合成 PNG data URL");
+    const lastCrop = await evaluate("window.__lastCrop || null");
+    ok(!!at && !!lastCrop && at.x === lastCrop.x && at.y === lastCrop.y,
+      "复制锚点 = 选区在屏幕上的坐标（与裁片同源）",
+      JSON.stringify({ anchor: at && { x: at.x, y: at.y }, crop: lastCrop && { x: lastCrop.x, y: lastCrop.y } }));
+  }
+
+  /* ---------------- 12. 无未捕获异常 ---------------- */
   ok(pageErrors.length === 0, "全程无未捕获的页面异常", pageErrors.slice(0, 3).join(" | "));
 
-  /* ---------------- 12. 高分屏（scaleFactor=1.5）：模糊涂抹与鼠标轨迹必须对齐 ---------------- *
+  /* ---------------- 13. 高分屏（scaleFactor=1.5）：模糊涂抹与鼠标轨迹必须对齐 ---------------- *
    *
    * 历史 bug：模糊裁片是按**物理像素**生成的，但贴回主画布时主画布已经被
    * scale(sf) 变换过，直接 drawImage 会被**再乘一次 sf**——裁片又放大又跑位，

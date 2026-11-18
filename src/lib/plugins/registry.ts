@@ -23,17 +23,21 @@ import type {
 import {
   compareVersion,
   DEFAULT_CLOSE_BEHAVIOR,
+  DEFAULT_PLUGIN_AUTO_UPDATE,
   DEFAULT_PLUGIN_AUTOSTART,
   DEFAULT_PLUGIN_THEME,
   detailViewCloseBehaviorOf,
   detailViewThemeOf,
   diffNewPermissions,
+  manifestAutoUpdateOf,
   parsePluginManifest,
 } from "./manifest.ts";
 import { hasPermission, permissionBaseId, permissionCovers } from "./permissions.ts";
 
 /** 注册表持久化键（与既有缓存键命名风格一致：大写下划线 + _CACHE_KEY） */
 export const PLUGIN_REGISTRY_KEY = "PLUGIN_REGISTRY_CACHE_KEY";
+/** 同窗口内注册表变更自定义事件名 */
+export const REGISTRY_CHANGED_DOM_EVENT = "ms-plugin-registry-changed";
 /** 插件私有数据的 localStorage 前缀（供无后端插件使用；后端插件用文件存储） */
 export const PLUGIN_DATA_PREFIX = "PLUGIN_DATA:";
 /** 注册表结构版本（结构变更时用于迁移） */
@@ -126,6 +130,13 @@ export interface PluginRecord {
    * 运行时值优先于这里的持久偏好。
    */
   themePreference: PluginThemePreference;
+  /**
+   * 用户选择的「是否自动更新该插件」（仅 `market` / `builtin` 来源生效）。
+   *
+   * 首次安装按清单 `manifest.autoUpdate`（未声明默认 `false`）初始化，用户在安装弹窗
+   * 或插件面板中修改后持久化在此，后续升级保留用户选择。
+   */
+  autoUpdate: boolean;
   /** 已授予权限 */
   grants: PluginGrant[];
   /** 被拒绝过的权限（面板上展示「曾拒绝」，避免反复打扰） */
@@ -227,7 +238,7 @@ export function resolveAutoStartOnUpgrade(input: {
   return input.current === prevSuggestion ? nextSuggestion : input.current;
 }
 
-/** 插件在清单里给出的两个行为建议（面板上展示「插件建议」与「恢复默认」用） */
+/** 插件在清单里给出的行为建议（面板上展示「插件建议」与「恢复默认」用） */
 export interface BehaviorSuggestion {
   /** 建议的后台启动策略（`prompt` 已折叠为 on-demand，另见 fromPrompt） */
   autoStart: AutoStartMode;
@@ -235,6 +246,34 @@ export interface BehaviorSuggestion {
   fromPrompt: boolean;
   /** 建议的「关闭界面时」行为 */
   closeBehavior: CloseBehavior;
+  /** 建议是否开启自动更新（清单未写时默认 false） */
+  autoUpdate: boolean;
+}
+
+/**
+ * 清单换了之后，「自动更新」该落在哪（与 `resolveAutoStartOnUpgrade` 同构）：
+ * 用户主动改过（`current !== prevSuggestion`）则保留用户选择；未改过则跟随新清单建议。
+ */
+export function resolveAutoUpdateOnUpgrade(input: {
+  current: boolean;
+  prevManifest: PluginManifest | null | undefined;
+  nextManifest: PluginManifest | null | undefined;
+}): boolean {
+  const prevSuggestion = manifestAutoUpdateOf(input.prevManifest);
+  const nextSuggestion = manifestAutoUpdateOf(input.nextManifest);
+  return input.current === prevSuggestion ? nextSuggestion : input.current;
+}
+
+/**
+ * 判定一条已安装插件记录是否处于「允许后台从市场自动更新」状态：
+ * 必须来自可更新源（`market` 或 `builtin`），且记录的有效 `autoUpdate` 为 `true`。
+ */
+export function isPluginAutoUpdateEnabled(rec: PluginRecord | null | undefined): boolean {
+  if (!rec) return DEFAULT_PLUGIN_AUTO_UPDATE;
+  if (rec.source.kind !== "market" && rec.source.kind !== "builtin") return false;
+  return typeof rec.autoUpdate === "boolean"
+    ? rec.autoUpdate
+    : manifestAutoUpdateOf(rec.manifest);
 }
 
 /**
@@ -253,6 +292,7 @@ export function behaviorSuggestionOf(manifest: PluginManifest | null | undefined
     autoStart: defaultAutoStartFrom(requested),
     fromPrompt: requested === "prompt",
     closeBehavior: detailViewCloseBehaviorOf(manifest),
+    autoUpdate: manifestAutoUpdateOf(manifest),
   };
 }
 
@@ -318,6 +358,8 @@ export function createPluginRecord(input: {
   dir: string;
   source: PluginSource;
   grants?: string[];
+  /** 安装确认框中用户显式指定的自动更新开关（省略则取清单 `manifest.autoUpdate ?? false`） */
+  autoUpdate?: boolean;
   runtime?: PluginRuntimeState;
   integrity?: { sha256: string | null; signed: boolean };
   now?: number;
@@ -349,6 +391,10 @@ export function createPluginRecord(input: {
     // 界面主题同理：首次安装落在清单建议值上，升级不覆盖用户选择
     //（口径统一由 detailViewThemeOf 计算：只认 contributes.detailView.theme）。
     themePreference: detailViewThemeOf(input.manifest),
+    autoUpdate:
+      typeof input.autoUpdate === "boolean"
+        ? input.autoUpdate
+        : manifestAutoUpdateOf(input.manifest),
     grants: (input.grants ?? []).map((permission) => ({ permission, at: now, source: "install" as const })),
     denied: [],
     runtime: input.runtime ?? emptyRuntime(),
@@ -359,9 +405,8 @@ export function createPluginRecord(input: {
 /**
  * 补齐记录里缺失的字段（结构演进时的就地迁移）。
  *
- * 目前处理 `closeBehavior` 与 `themePreference`：它们都是后加的字段，升级前装的
- * 插件记录里没有。补的是**插件建议值**（等价于「这个字段早就有，只是当时没存」），
- * 已有值一律不动——用户的选择优先于任何迁移。
+ * 处理 `closeBehavior`、`themePreference` 与 `autoUpdate`：升级前装的
+ * 插件记录里没有这些字段时，补上**插件建议值**；已有值一律不动。
  */
 function hydrateRecord(rec: PluginRecord): PluginRecord {
   let out = rec;
@@ -371,6 +416,9 @@ function hydrateRecord(rec: PluginRecord): PluginRecord {
   const t = out.themePreference;
   if (t !== "dark" && t !== "light" && t !== "inherit") {
     out = { ...out, themePreference: detailViewThemeOf(out.manifest) };
+  }
+  if (typeof out.autoUpdate !== "boolean") {
+    out = { ...out, autoUpdate: manifestAutoUpdateOf(out.manifest) };
   }
   return out;
 }
@@ -394,10 +442,17 @@ export function loadRegistry(): PluginRegistryFile {
   }
 }
 
-/** 写入注册表 */
+/** 写入注册表并广播同窗口变更事件 */
 export function saveRegistry(reg: PluginRegistryFile): void {
   try {
     localStorage.setItem("my-search-desktop:" + PLUGIN_REGISTRY_KEY, JSON.stringify(reg));
+    if (
+      typeof window !== "undefined" &&
+      typeof window.dispatchEvent === "function" &&
+      typeof CustomEvent === "function"
+    ) {
+      window.dispatchEvent(new CustomEvent(REGISTRY_CHANGED_DOM_EVENT));
+    }
   } catch (e) {
     console.warn("插件注册表写入失败:", e);
   }
@@ -449,6 +504,19 @@ export function upsertPlugin(
       opts.preserveUserChoices === false
         ? incoming.themePreference
         : prev.themePreference ?? incoming.themePreference,
+    autoUpdate:
+      opts.preserveUserChoices === false
+        ? typeof incoming.autoUpdate === "boolean"
+          ? incoming.autoUpdate
+          : manifestAutoUpdateOf(incoming.manifest)
+        : resolveAutoUpdateOnUpgrade({
+            current:
+              typeof prev.autoUpdate === "boolean"
+                ? prev.autoUpdate
+                : manifestAutoUpdateOf(prev.manifest),
+            prevManifest: prev.manifest,
+            nextManifest: incoming.manifest,
+          }),
     grants: mergeGrants(prev.grants, incoming.grants),
     denied: prev.denied,
     pendingPermission: prev.pendingPermission ?? null,

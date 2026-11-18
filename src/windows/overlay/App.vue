@@ -67,8 +67,8 @@ const selCanvasRef = ref<HTMLCanvasElement | null>(null);
 /** 标注底图（选区的精确裁片，离屏 canvas，马赛克取样/合成用） */
 const baseCanvasRef = ref<HTMLCanvasElement | null>(null);
 
-/** 选区的精确裁片（物理像素尺寸 = 选区画布尺寸） */
-const crop = reactive({ dataUrl: "", width: 0, height: 0 });
+/** 选区的精确裁片（物理像素尺寸 = 选区画布尺寸）+ 其在屏幕上的物理坐标 */
+const crop = reactive({ dataUrl: "", width: 0, height: 0, screenX: 0, screenY: 0 });
 
 /* ---------------- 主题 ---------------- */
 const theme = ref<"dark" | "light">("dark");
@@ -163,6 +163,8 @@ async function onMouseUp(e: MouseEvent): Promise<void> {
     crop.dataUrl = committed.dataUrl;
     crop.width = committed.width;
     crop.height = committed.height;
+    crop.screenX = committed.screenX;
+    crop.screenY = committed.screenY;
     await nextTick();
     // 本地帧先立刻铺上（首次进编辑态不等第二次 IPC），宿主精确裁片随后无缝替换
     renderLiveBase();
@@ -200,6 +202,8 @@ async function refreshSelectionBase(): Promise<void> {
   crop.dataUrl = committed.dataUrl;
   crop.width = committed.width;
   crop.height = committed.height;
+  crop.screenX = committed.screenX;
+  crop.screenY = committed.screenY;
   const selImg = await selectionImage();
   await nextTick();
   setupSelCanvas(selImg ?? committed);
@@ -622,12 +626,24 @@ const saveError = ref("");
  * 目录由宿主拼（`plugin_host::plugin_data_dir`），这里只问一次、之后复用；
  * 读写失败就返回空串，让宿主自己去兜底，不要因为「问不到目录」把保存整条路堵死。
  */
+/**
+ * 触发本次框选遮罩的所属插件 ID（由宿主在打开 `overlay.html?monitor=N&pluginId=xxx` 时透传）。
+ *
+ * 解耦要点：遮罩窗口自身不硬编码任何具体截图插件 ID；有归属插件时把保存的截图
+ * 同步登记进该插件私有画廊目录，无归属插件时仅弹系统另存为对话框。
+ */
+const ownerPluginId =
+  typeof window !== "undefined"
+    ? new URLSearchParams(window.location.search).get("pluginId")?.trim() || ""
+    : "";
+
 let shotsDirCache: string | null = null;
 async function selectShotDir(): Promise<string> {
+  if (!ownerPluginId) return "";
   if (shotsDirCache !== null) return shotsDirCache;
   try {
     shotsDirCache = await invoke<string>("screenshot_shots_dir", {
-      pluginId: "com.zhuangjie.screenshot",
+      pluginId: ownerPluginId,
     });
   } catch {
     shotsDirCache = "";
@@ -642,13 +658,21 @@ function composePng(): string | null {
   return c.toDataURL("image/png");
 }
 
-/** 复制到剪贴板。 */
+/**
+ * 复制到剪贴板，并把选区在屏幕上的物理坐标一并交给宿主。
+ * 之后按贴图热键贴同一张图时，宿主会用这个锚点把贴图钉回截图时的位置
+ *（用户需求：截图后贴图的位置与截图时一致）。
+ */
 async function doCopy(): Promise<void> {
   const png = composePng();
   if (!png || busy.value) return;
   busy.value = true;
   try {
-    await invoke("screenshot_copy_image", { dataUrl: png });
+    await invoke("screenshot_copy_image_at", {
+      dataUrl: png,
+      x: crop.screenX,
+      y: crop.screenY,
+    });
     await invoke("screenshot_close_overlay");
   } finally {
     busy.value = false;
@@ -692,9 +716,9 @@ async function doSave(): Promise<void> {
     let savedPath: string | null = null;
     try {
       savedPath = await invoke<string | null>("screenshot_save_shot_as", {
-        pluginId: "com.zhuangjie.screenshot",
+        pluginId: ownerPluginId || null,
         dataUrl: png,
-        parentDir: shotsDir,
+        parentDir: shotsDir || null,
       });
     } catch (e) {
       saveError.value = `保存失败：${String((e as Error)?.message ?? e)}`;
@@ -729,15 +753,16 @@ function isInShotsDir(dir: string, filePath: string): boolean {
  * 两份都在，符合「我刚保存的东西，在画廊里也能看到」的直觉。
  */
 async function addToGallery(png: string, savedPath: string): Promise<void> {
+  if (!ownerPluginId) return;
   try {
     const dir = await selectShotDir();
-    if (!isInShotsDir(dir, savedPath)) return;
+    if (!dir || !isInShotsDir(dir, savedPath)) return;
     await invoke("screenshot_save_shot", {
-      pluginId: "com.zhuangjie.screenshot",
+      pluginId: ownerPluginId,
       dataUrl: png,
     });
     await invoke("screenshot_notify_saved", {
-      pluginId: "com.zhuangjie.screenshot",
+      pluginId: ownerPluginId,
       relPath: null,
     });
   } catch {
@@ -1176,7 +1201,7 @@ function handleStyle(dir: (typeof HANDLES)[number]): Record<string, string> {
           placeholder="输入文字，回车或点别处确认"
           autofocus
           @keydown.enter.prevent="onCommitText()"
-          @keydown.esc.prevent="cancelText()"
+          @keydown.esc.stop.prevent="cancelText()"
           @blur="onCommitText()"
           @mousedown.stop
         />
@@ -1472,19 +1497,24 @@ function handleStyle(dir: (typeof HANDLES)[number]): Record<string, string> {
   cursor: default;
 }
 .ov-textbox {
+  /*
+   * 内边距变量必须定义在**包裹层**上：下面的负 margin 在包裹层上计算，
+   * 而 CSS 变量只向下继承。若定义在内层 input 上，包裹层读不到 → calc 失效
+   * → 补偿静默消失（与贴图侧输入框错开 5×3px）。
+   */
+  --ov-text-pad-x: 4px;
+  --ov-text-pad-y: 2px;
   position: absolute;
   z-index: 20;
   /*
    * 把输入框往左上挪「内边距 + 边框」那么多：这样**输入框里的第一个字**正好落在
    * 用户点击的位置，与落笔后 ctx.fillText 画出的文字起点重合。
-   * 偏移量由下面那对变量算出来，改 padding 时不会忘掉这处补偿。
+   * 偏移量由上面那对变量算出来，改 padding 时不会忘掉这处补偿。
    */
   margin-left: calc(-1 * (var(--ov-text-pad-x) + 1px));
   margin-top: calc(-1 * (var(--ov-text-pad-y) + 1px));
 }
 .ov-text-input {
-  --ov-text-pad-x: 4px;
-  --ov-text-pad-y: 2px;
   /*
    * 背景**透明**：输入框只是临时脚手架，用户要看到底图本身（输入的文字
    * 以所选颜色直接压在图上）。用极细的浅色描边 + 一圈深色阴影保证在浅底/深底
@@ -1506,6 +1536,7 @@ function handleStyle(dir: (typeof HANDLES)[number]): Record<string, string> {
 /* 输入框里的占位提示也给点阴影，浅底上也看得清 */
 .ov-text-input::placeholder {
   color: rgba(255, 255, 255, 0.55);
+  text-shadow: 0 0 2px rgba(0, 0, 0, 0.65);
 }
 /*
  * 选中标注的四角控制点：拖它缩放 / 改端点 / 改字号。

@@ -72,6 +72,21 @@ export type PluginThemePreference = "dark" | "light" | "inherit";
 /** 主题偏好的默认值（老插件未声明时跟随宿主，行为不变） */
 export const DEFAULT_PLUGIN_THEME: PluginThemePreference = "inherit";
 
+/**
+ * 插件自动更新建议的默认值：作者未声明 `autoUpdate` 时默认 **false**（关闭）。
+ *
+ * 清单中的 `autoUpdate` 只是插件的请求/建议；安装确认弹窗会按此值预填开关，
+ * 用户可在安装当刻关闭或开启，安装后也可在「设置 → 插件」详情中随时修改。
+ */
+export const DEFAULT_PLUGIN_AUTO_UPDATE = false;
+
+/** 取清单声明的自动更新建议值（未声明或非 true 一律按 false 处理） */
+export function manifestAutoUpdateOf(
+  manifest: Pick<PluginManifest, "autoUpdate"> | null | undefined
+): boolean {
+  return manifest?.autoUpdate === true;
+}
+
 /** 后台进程规格 */
 export interface PluginBackendSpec {
   /** 可执行文件相对路径（如 backend/ai-ask.exe） */
@@ -257,6 +272,14 @@ export interface PluginContributes {
   settingsPanel?: PluginSettingsPanelContribution;
   handlers?: PluginInputHandlersContribution;
   shortcut?: PluginShortcutContribution | PluginShortcutContribution[];
+  /**
+   * 是否订阅宿主后台剪贴板持续捕获（仍需同时获授 `clipboard.read` 权限才生效）。
+   *
+   * 将「一次性读取当前剪贴板（如贴图）」与「后台持续捕获剪贴板历史」解耦：
+   * 只有显式声明 `clipboardCapture: true` 且启用并获授 `clipboard.read` 的插件，
+   * 宿主才会挂载系统剪贴板监听并将记录写入该插件私有目录。
+   */
+  clipboardCapture?: boolean;
 }
 
 /** 插件清单 */
@@ -269,6 +292,12 @@ export interface PluginManifest {
   apiVersion: number;
   /** 要求的最低宿主版本（如 "7.9.15"） */
   minAppVersion?: string;
+  /**
+   * 插件是否建议开启自动更新（缺省为 `false`）。
+   *
+   * 仅对市场 / 内置来源安装的插件生效；用户在安装确认框或插件面板中的开关选择优先于此建议值。
+   */
+  autoUpdate?: boolean;
   author?: string;
   description?: string;
   homepage?: string;
@@ -718,6 +747,15 @@ function normalizeContributes(
   if (shortcuts.length === 1) out.shortcut = shortcuts[0];
   else if (shortcuts.length > 1) out.shortcut = shortcuts;
 
+  if ((raw as Record<string, unknown>).clipboardCapture !== undefined) {
+    const cc = (raw as Record<string, unknown>).clipboardCapture;
+    if (typeof cc !== "boolean") {
+      errors.push("contributes.clipboardCapture.invalid");
+    } else {
+      out.clipboardCapture = cc;
+    }
+  }
+
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
@@ -770,6 +808,8 @@ export function describeManifestError(code: string): string {
       return "minAppVersion 格式非法（需形如 7.9.15）";
     case "minAppVersion.tooNew":
       return `插件要求应用版本不低于 ${arg}，当前版本过低，请先升级应用`;
+    case "autoUpdate.invalid":
+      return "autoUpdate 必须是布尔值（true = 建议开启自动更新，false = 默认关闭）";
     case "icon.unsafe":
       return "图标路径不安全（不允许绝对路径或 .. 上跳）";
     case "permissions.invalid":
@@ -854,6 +894,8 @@ export function describeManifestError(code: string): string {
       return `快捷键动作重复：${arg}`;
     case "contributes.shortcut.defaultShortcut.invalid":
       return `快捷键贡献「${arg}」的 defaultShortcut 必须是非空字符串`;
+    case "contributes.clipboardCapture.invalid":
+      return "contributes.clipboardCapture 必须是布尔值";
     case "backend.invalid":
       return "backend 必须是一个对象";
     case "backend.entry.missing":
@@ -987,6 +1029,10 @@ export function parsePluginManifest(
     errors.push("minAppVersion.invalid");
   }
 
+  if (obj.autoUpdate !== undefined && typeof obj.autoUpdate !== "boolean") {
+    errors.push("autoUpdate.invalid");
+  }
+
   const icon = asString(obj.icon);
   if (icon && !isValidIconRef(icon)) errors.push("icon.unsafe");
 
@@ -1044,6 +1090,7 @@ export function parsePluginManifest(
     version: version as string,
     apiVersion,
     minAppVersion: minAppVersion ?? undefined,
+    ...(typeof obj.autoUpdate === "boolean" ? { autoUpdate: obj.autoUpdate } : {}),
     author: asString(obj.author) ?? undefined,
     description: asString(obj.description) ?? undefined,
     homepage: asString(obj.homepage) ?? undefined,

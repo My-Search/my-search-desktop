@@ -225,28 +225,45 @@ export function isEditingSel(): boolean {
 }
 
 
-/** 用宿主抓屏裁出选区 → 本屏进入编辑态（其它屏由宿主关闭）。 */
-export async function commitSelection(): Promise<{ dataUrl: string; width: number; height: number } | null> {
+/** 用宿主抓屏裁出选区 → 本屏进入编辑态（其它屏由宿主关闭）。
+ *  返回值带上选区在**虚拟桌面里的物理坐标**（`screenX/screenY`），
+ *  供「复制时记住屏幕位置 → 贴图原地钉回」使用。 */
+export async function commitSelection(): Promise<{
+  dataUrl: string;
+  width: number;
+  height: number;
+  screenX: number;
+  screenY: number;
+} | null> {
   const s = state.sel;
   const m = state.monitor;
   if (!s || !m) return null;
   try {
-    const crop = await invoke<{ dataUrl: string; width: number; height: number }>(
-      "screenshot_crop",
-      {
-        monitorIndex: m.index,
-        x: s.x,
-        y: s.y,
-        width: s.w,
-        height: s.h,
-      }
-    );
+    const crop = await invoke<{
+      dataUrl: string;
+      width: number;
+      height: number;
+      screenX: number;
+      screenY: number;
+    }>("screenshot_crop", {
+      monitorIndex: m.index,
+      x: s.x,
+      y: s.y,
+      width: s.w,
+      height: s.h,
+    });
     // 进入编辑态：冻结选区，后续标注都画在选区画布上。
     // 只在**首次**进入时落到「选择」工具；调整范围后的重取裁片也会走这里，
     // 那时必须保留用户正拿着的工具（否则画到一半拖了下边缘，笔就变回箭头了）。
     if (!state.active) state.tool = "select";
     state.active = true;
-    return { dataUrl: crop.dataUrl, width: crop.width, height: crop.height };
+    return {
+      dataUrl: crop.dataUrl,
+      width: crop.width,
+      height: crop.height,
+      screenX: crop.screenX,
+      screenY: crop.screenY,
+    };
   } catch (e) {
     state.error = `裁切选区失败：${String((e as Error)?.message ?? e)}`;
     return null;

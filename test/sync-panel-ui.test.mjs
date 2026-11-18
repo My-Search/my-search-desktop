@@ -114,6 +114,10 @@ const check = (name, cond, extra = "") => {
 
 await S("Page.addScriptToEvaluateOnNewDocument", {
   source: `
+    // STUB_TIME 固定为页面加载时刻：首轮（modified > 0）走下载，
+    // 之后（modified 不比 lastSyncAt 新）走上传，两条路径都不再变向。
+    const STUB_TIME = Date.now();
+    const STUB_META = { exists: true, rev: 'stub-rev', modified: STUB_TIME, size: 1572864 }; // 1.5 MB
     window.__TAURI_INTERNALS__ = {
       invoke(cmd, args) {
         if (cmd === 'sync_get_config') return Promise.resolve({
@@ -125,6 +129,16 @@ await S("Page.addScriptToEvaluateOnNewDocument", {
           enabled: true, webdavUrl: 'https://dav.jianguoyun.com/dav/', webdavUser: '',
           remoteFile: 'my-search-backup.msbackup', conflict: 'newer',
           autoOnChange: true, intervalMinutes: 30, hasPassword: false,
+        });
+        if (cmd === 'sync_remote_meta') return Promise.resolve(STUB_META);
+        // 引擎在测试环境里会真的跑同步轮次，把上传/下载/还原全应答，
+        // 否则 UI 状态行会出现 stub 造出的假错误。
+        if (cmd === 'sync_download') return Promise.resolve({ path: 'stub-download.msbackup', size: 1572864 });
+        if (cmd === 'sync_upload') return Promise.resolve(STUB_META);
+        if (cmd === 'backup_snapshot') return Promise.resolve('stub-snapshot.msbackup');
+        if (cmd === 'backup_restore') return Promise.resolve({
+          snapshotPath: 'stub-download.msbackup', localStorageKeys: 0, plugins: 0,
+          pluginData: 0, settings: false, localStorage: {}, manifest: {},
         });
         if (cmd === 'get_shortcut_bindings') return Promise.resolve([{ shortcut: 'ctrl+alt+s', action: 'toggle-window', target: null }]);
         if (cmd === 'get_default_subscribe_text') return Promise.resolve('');
@@ -197,6 +211,13 @@ for (const theme of ["dark", "light"]) {
   check(`[${theme}] 输入框背景走主题（非系统默认灰）`, filled.every(i => i.bg !== 'rgb(59, 59, 59)' && i.bg !== 'rgb(255, 255, 255)'), filled.map(i => i.bg).join());
   check(`[${theme}] 输入框继承面板字体字号`, filled.every(i => i.fontSize === '13px' && i.fontFamily.includes('"PingFang SC"')), filled.map(i => i.fontFamily).join(' | ').slice(0, 120));
   check(`[${theme}] 无横向溢出（按钮行不撑破卡片）`, !geo.hOverflow && !geo.docOverflow, `body=${geo.hOverflow} doc=${geo.docOverflow}`);
+
+  // 云端备份大小：面板加载时会 HEAD 一次远端，开关行下方应显示格式化后的大小
+  const sizeLine = await evalJs(`(() => {
+    const el = document.querySelector('.page.sync .sync-remote-size');
+    return el ? el.textContent.trim() : null;
+  })()`);
+  check(`[${theme}] 显示云端备份大小`, sizeLine === '云端备份：1.5 MB', `got=${sizeLine}`);
 
   const shot = await S("Page.captureScreenshot", { format: "png" }, sessionId);
   const out = path.join(root, "test", `_shot-sync-panel-${theme}.png`);

@@ -6,7 +6,7 @@
  * 导入 = 选择归档文件 → 预览 → 还原。
  * 下方是 WebDAV 同步配置。
  */
-import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import CfgHint from "./CfgHint.vue";
 import {
   syncGetConfig,
@@ -58,6 +58,7 @@ async function saveConfig(): Promise<void> {
     config.value = await syncSetConfig(config.value, passwordInput.value || undefined);
     passwordInput.value = "";
     props.notify("同步配置已保存", "ok");
+    void refreshRemoteMeta();
   } catch (e) { props.notify((e as Error)?.message ?? "保存配置失败", "error"); }
 }
 
@@ -128,6 +129,7 @@ async function doTest(): Promise<void> {
     config.value = cfg;
     const r = await syncTest();
     props.notify(r.message, "ok");
+    void refreshRemoteMeta();
   } catch (e) { props.notify((e as Error)?.message ?? String(e), "error"); }
   finally { testing.value = false; }
 }
@@ -141,6 +143,23 @@ async function doSyncNow(): Promise<void> {
   catch (e) { props.notify((e as Error)?.message ?? "同步失败", "error"); }
 }
 
+/** 云端备份大小（HEAD 拿到的 Content-Length），随同步轮次自动更新 */
+const remoteSizeText = computed<string>(() => {
+  const meta = syncState.value.remoteMeta;
+  if (!meta?.exists || !meta.size) return "";
+  return fmtSize(meta.size);
+});
+
+/** 主动拉一次云端元信息，填充「云端备份」大小。失败静默：只是辅助信息，
+ *  不该在面板加载/保存时弹错误打扰用户（真正的连接错误由测试连接/同步上报）。 */
+async function refreshRemoteMeta(): Promise<void> {
+  if (!config.value.enabled) return;
+  try {
+    const meta = await syncRemoteMeta();
+    if (meta.exists) syncState.value = { ...syncState.value, remoteMeta: meta };
+  } catch { /* 静默 */ }
+}
+
 function initEngine(): void {
   engine = createSyncEngine(
     config.value,
@@ -150,7 +169,7 @@ function initEngine(): void {
     async () => (await props.confirm("远端与本机都有改动：\n「确定」= 远端覆盖本机\n「取消」= 本机覆盖远端")) ? "remote" : "local"
   );
 }
-onMounted(async () => { await loadConfig(); initEngine(); if (config.value.enabled) { engine?.startBackground(); setOnStorageChange(() => engine?.onDataChanged()); } });
+onMounted(async () => { await loadConfig(); initEngine(); if (config.value.enabled) { engine?.startBackground(); void refreshRemoteMeta(); setOnStorageChange(() => engine?.onDataChanged()); } });
 onBeforeUnmount(() => { engine?.stop(); setOnStorageChange(null); });
 watch(() => [config.value.enabled, config.value.autoOnChange, config.value.intervalMinutes], () => engine?.reconfigure(config.value));
 
@@ -158,6 +177,13 @@ function fmt(ts: number): string {
   if (!ts) return "从未";
   const d = new Date(ts);
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}`;
+}
+
+function fmtSize(bytes: number): string {
+  const units = ["B", "KB", "MB", "GB"];
+  let v = bytes, i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${i === 0 || v >= 100 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
 }
 </script>
 
@@ -247,6 +273,7 @@ function fmt(ts: number): string {
       <div class="sync-toggle-meta">
         <span class="sync-toggle-label">{{ config.enabled ? '已开启' : '已关闭' }}</span>
         <span class="sync-toggle-desc">数据变化自动同步，每 {{ config.intervalMinutes }} 分钟兜底检查</span>
+        <span v-if="remoteSizeText" class="sync-toggle-desc sync-remote-size">云端备份：{{ remoteSizeText }}</span>
       </div>
       <button v-if="config.enabled" class="cfg-btn primary sync-now-btn" :disabled="syncState.status !== 'idle'" @click="doSyncNow">立即同步</button>
     </div>
@@ -274,22 +301,26 @@ function fmt(ts: number): string {
       </div>
       <div class="cfg-row">
         <label class="cfg-row-label">冲突策略<CfgHint text="当远端与本机都有改动时，按所选策略决定保留哪份数据。" /></label>
-        <select v-model="config.conflict" class="cfg-select">
-          <option value="newer">按修改时间</option>
-          <option value="local">本机覆盖远端</option>
-          <option value="remote">远端覆盖本机</option>
-          <option value="ask">每次询问</option>
-        </select>
+        <div class="cfg-select-wrap">
+          <select v-model="config.conflict" class="cfg-select">
+            <option value="newer">按修改时间</option>
+            <option value="local">本机覆盖远端</option>
+            <option value="remote">远端覆盖本机</option>
+            <option value="ask">每次询问</option>
+          </select>
+        </div>
       </div>
       <div class="cfg-row">
         <label class="cfg-row-label">兜底间隔<CfgHint text="即使数据无变化，也会按此间隔主动检查一次远端，防止漏同步。" /></label>
-        <select v-model="config.intervalMinutes" class="cfg-select cfg-select-narrow">
-          <option :value="5">5 分钟</option>
-          <option :value="10">10 分钟</option>
-          <option :value="15">15 分钟</option>
-          <option :value="30">30 分钟</option>
-          <option :value="60">60 分钟</option>
-        </select>
+        <div class="cfg-select-wrap cfg-select-narrow">
+          <select v-model="config.intervalMinutes" class="cfg-select">
+            <option :value="5">5 分钟</option>
+            <option :value="10">10 分钟</option>
+            <option :value="15">15 分钟</option>
+            <option :value="30">30 分钟</option>
+            <option :value="60">60 分钟</option>
+          </select>
+        </div>
       </div>
 
       <div class="sync-actions-row">

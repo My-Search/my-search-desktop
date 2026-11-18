@@ -21,11 +21,16 @@ const props = defineProps<{
   installedVersion?: string | null;
   /** 该插件当前是否在后台运行（升级时据此提示「将先停止再安装」） */
   running?: boolean;
+  /** 是否在弹窗中展示「自动更新该插件」开关（市场源安装/升级时展示，本地文件安装隐藏） */
+  showAutoUpdate?: boolean;
+  /** 「自动更新该插件」开关当前状态 */
+  autoUpdate?: boolean;
 }>();
 
 const emit = defineEmits<{
   (e: "confirm"): void;
   (e: "cancel"): void;
+  (e: "update:autoUpdate", value: boolean): void;
 }>();
 
 const okBtn = ref<HTMLButtonElement | null>(null);
@@ -188,6 +193,36 @@ const showForceStopNotice = computed(
         </div>
       </div>
 
+      <!-- 插件级自动更新开关（仅市场安装/升级时展示） -->
+      <div v-if="showAutoUpdate" class="plugin-install-autoupdate">
+        <div class="autoupdate-text">
+          <div class="autoupdate-title">
+            <span>自动更新此插件</span>
+            <span class="autoupdate-suggest">
+              插件建议：{{ manifest?.autoUpdate === true ? "开启" : "关闭" }}
+            </span>
+          </div>
+          <div class="autoupdate-desc">
+            开启后定时检测并在后台静默安装新版本（可在「设置 → 插件」中随时修改）
+          </div>
+        </div>
+        <label
+          class="install-switch"
+          :class="{ on: autoUpdate === true }"
+          :title="autoUpdate ? '自动更新已开启（点击关闭）' : '自动更新已关闭（点击开启）'"
+        >
+          <input
+            type="checkbox"
+            data-act="install-auto-update"
+            :checked="autoUpdate === true"
+            @change="emit('update:autoUpdate', !autoUpdate)"
+          />
+          <span class="install-switch-track" aria-hidden="true">
+            <span class="install-switch-thumb"></span>
+          </span>
+        </label>
+      </div>
+
       <!-- 操作按钮 -->
       <div class="plugin-install-actions">
         <button class="cfg-btn ghost" @click="emit('cancel')">
@@ -204,3 +239,109 @@ const showForceStopNotice = computed(
     </div>
   </div>
 </template>
+
+<style scoped>
+.plugin-install-autoupdate {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(128, 136, 150, 0.22);
+  background: rgba(128, 136, 150, 0.06);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.autoupdate-text {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.autoupdate-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text, #1f2329);
+}
+
+:global(html.theme-dark) .autoupdate-title {
+  color: #e4e6ea;
+}
+
+.autoupdate-suggest {
+  font-size: 11px;
+  font-weight: 400;
+  padding: 1px 6px;
+  border-radius: 999px;
+  color: var(--muted, #6b7280);
+  background: rgba(128, 136, 150, 0.14);
+}
+
+:global(html.theme-dark) .autoupdate-suggest {
+  color: #98a0ab;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.autoupdate-desc {
+  margin-top: 3px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--muted, #6b7280);
+}
+
+:global(html.theme-dark) .autoupdate-desc {
+  color: #98a0ab;
+}
+
+.install-switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  cursor: pointer;
+  user-select: none;
+}
+
+.install-switch input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.install-switch-track {
+  width: 36px;
+  height: 20px;
+  border-radius: 999px;
+  background: rgba(128, 136, 150, 0.38);
+  padding: 2px;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  transition: background-color 0.18s ease;
+}
+
+.install-switch-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22);
+  transition: transform 0.18s ease;
+}
+
+.install-switch.on .install-switch-track,
+.install-switch input:checked + .install-switch-track {
+  background: var(--brand, #5b5bd6);
+}
+
+.install-switch.on .install-switch-thumb,
+.install-switch input:checked + .install-switch-track .install-switch-thumb {
+  transform: translateX(16px);
+}
+</style>

@@ -31,7 +31,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const read = (rel) => readFileSync(path.join(root, rel), "utf8");
 const manifestTs = read("src/lib/plugins/manifest.ts");
 const marketTypesTs = read("src/lib/plugins/market-types.ts");
-const hostTs = read("src/lib/plugins/host.ts");
+const hostTs = read("src/lib/plugins/host/market-api.ts");
 const buildIndex = read("scripts/build-index.mjs");
 const marketJs = read("plugins/market/ui/index.js");
 const marketCss = read("plugins/market/ui/detail.css");

@@ -139,10 +139,30 @@
     if (emptyKey) emptyKey.textContent = key ? prettyShortcut(key) : "快捷键";
   }
 
+  /** 读写本插件「screenshot」动作全局热键（优先走统一 `ms.shortcuts.get/set`，回退兼容旧接口） */
+  function getShortcutBinding() {
+    if (ms.shortcuts && typeof ms.shortcuts.get === "function") {
+      return Promise.resolve(ms.shortcuts.get("screenshot"));
+    }
+    if (typeof ms.screenshot?.getShortcut === "function") {
+      return Promise.resolve(ms.screenshot.getShortcut());
+    }
+    return Promise.resolve("");
+  }
+
+  function setShortcutBinding(combo) {
+    if (ms.shortcuts && typeof ms.shortcuts.set === "function") {
+      return Promise.resolve(ms.shortcuts.set("screenshot", combo));
+    }
+    if (typeof ms.screenshot?.setShortcut === "function") {
+      return Promise.resolve(ms.screenshot.setShortcut(combo));
+    }
+    return Promise.reject(new Error("当前宿主版本不支持在插件内修改快捷键"));
+  }
+
   /** 拉取当前热键（权威在宿主 settings.json；可能有别的入口改过，所以每次都读） */
   function loadHotkey() {
-    if (typeof ms.screenshot?.getShortcut !== "function") return;
-    Promise.resolve(ms.screenshot.getShortcut())
+    getShortcutBinding()
       .then(function (key) { if (alive()) renderHotkey(key); })
       .catch(function () { /* 读不到就保持原样，不打扰用户 */ });
   }
@@ -202,12 +222,7 @@
 
   /** 提交新热键给宿主（冲突等错误原样展示） */
   function applyHotkey(combo) {
-    if (typeof ms.screenshot?.setShortcut !== "function") {
-      setStatus("当前宿主版本不支持在插件内改快捷键，请到「设置 → 快捷键」修改", true);
-      loadHotkey();
-      return;
-    }
-    Promise.resolve(ms.screenshot.setShortcut(combo))
+    setShortcutBinding(combo)
       .then(function (effective) {
         renderHotkey(effective || combo);
         setStatus("已绑定截图快捷键：" + prettyShortcut(effective || combo));
@@ -221,8 +236,7 @@
 
   /** 解绑（关掉全局截图热键） */
   function clearHotkey() {
-    if (typeof ms.screenshot?.setShortcut !== "function") return;
-    Promise.resolve(ms.screenshot.setShortcut(""))
+    setShortcutBinding("")
       .then(function () {
         renderHotkey("");
         setStatus("已解绑截图快捷键");

@@ -47,7 +47,7 @@ const uiSrc = readFileSync(path.join(pluginDir, "ui", "index.js"), "utf8");
 const parsed = parsePluginManifest(manifestRaw, isKnownPermission);
 ok(parsed.ok, "清单通过 parsePluginManifest 校验", (parsed.errors || []).join(", ") || "no errors");
 const manifest = parsed.ok ? parsed.manifest : JSON.parse(manifestRaw);
-ok(manifest.version === "1.1.0", "版本号 1.1.0", manifest.version);
+ok(manifest.version === "1.1.1", "版本号 1.1.1", manifest.version);
 ok(
   Array.isArray(manifest.permissions) && manifest.permissions.includes("backend.spawn"),
   "保留 backend.spawn 权限（图标提取 / 卸载 / 扫描都走后端）",

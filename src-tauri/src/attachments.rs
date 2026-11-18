@@ -123,7 +123,11 @@ fn check_access(plugin_id: &str, path: &str, require_folder: bool) -> Result<(),
         is_under(&r.path, path)
     });
     if !hit {
-        return Err(err("路径不在已附加的内容范围内"));
+        // 用户通过系统「选择文件」对话框显式挑选的文件（上传场景）也放行；
+        // 只对单文件读取生效，目录列举仍必须落在已附加的文件夹内。
+        if require_folder || !crate::plugin_files::is_picked_file(path) {
+            return Err(err("路径不在已附加的内容范围内"));
+        }
     }
     Ok(())
 }

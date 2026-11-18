@@ -45,6 +45,7 @@ mod favicon;
 mod file_assoc;
 mod market;
 mod mouse_gesture;
+mod plugin_files;
 mod plugin_host;
 mod plugin_watch;
 mod pin_image;
@@ -119,11 +120,10 @@ const SHORTCUT_ACTION_CLIPBOARD: &str = "clipboard";
 
 /// 快捷键作用类型：贴图（无需作用对象）。
 ///
-/// 同样是**插件动作**（由「截图」插件声明第二个快捷键）。与截图一样**在 Rust
-/// 里就地完成**：读系统剪贴板位图 → 在光标处开无边框置顶小窗口（见
-/// `pin_image.rs`）。历史包袱说明：该键默认 `ctrl+alt+v`，与剪贴板历史的老
-/// 默认键相同——首次升级由 `migrate_pin_shortcut` 把剪贴板历史迁到
-/// `ctrl+alt+b` 给贴图让位（见该函数注释）。
+/// 同样是**插件动作**（由「截图」插件声明第二个快捷键，默认 `ctrl+alt+p`）。与截图一样
+/// **在 Rust 里就地完成**：读系统剪贴板位图 → 在光标处开无边框置顶小窗口（见
+/// `pin_image.rs`）。首次升级若曾跑过旧版临时键位（`pin=ctrl+alt+v`、`clipboard=ctrl+alt+b`），
+/// 由 `migrate_pin_shortcut` 一次性平滑迁回 `pin=ctrl+alt+p`、`clipboard=ctrl+alt+v`。
 const SHORTCUT_ACTION_PIN: &str = "pin";
 
 /// 快捷键（open-plugin）触发时向主窗口广播的事件名，payload = { pluginId }
@@ -706,13 +706,14 @@ fn open_plugin_view(app: tauri::AppHandle, plugin_id: String) {
     open_plugin_by_shortcut(&app, &plugin_id);
 }
 
-/// 「剪贴板历史」快捷键的落地：确保主窗口可见，然后广播事件由前端打开插件详情视图。
+/// 「剪贴板历史」快捷键的落地：确保主窗口可见，然后广播事件由前端打开对应插件详情视图。
 ///
-/// 与 `open_plugin_by_shortcut` 同构，只是固定作用于内置剪贴板插件：
-/// Rust 侧负责把窗口带到前台 + 投递事件；插件是否存在/启用/有权限都在前端判定。
-/// 单独用一个事件名（而非复用 open-plugin）：前端可据此把「热键呼出」与
-/// 「用户在设置里绑了 open-plugin」区分开，做不同的展示处理。
+/// 解耦要点：Rust 不硬编码任何剪贴板插件 ID，而是从 `PLUGIN_SHORTCUT_OWNERS` /
+/// 网关能力快照动态解析出当前声明了 `clipboard` 热键的启用插件；未安装或未启用时静默跳过。
 fn clipboard_by_shortcut(app: &tauri::AppHandle) {
+    let Some(plugin_id) = resolve_plugin_shortcut_owner(SHORTCUT_ACTION_CLIPBOARD) else {
+        return;
+    };
     if let Some(window) = app.get_webview_window("main") {
         if !window.is_visible().unwrap_or(false) {
             show_main_window(app);
@@ -722,7 +723,7 @@ fn clipboard_by_shortcut(app: &tauri::AppHandle) {
     }
     let _ = app.emit(
         EVENT_SHORTCUT_CLIPBOARD,
-        serde_json::json!({ "pluginId": clipboard_history::CLIPBOARD_PLUGIN_ID }),
+        serde_json::json!({ "pluginId": plugin_id }),
     );
 }
 
@@ -1295,21 +1296,19 @@ pub(crate) fn set_clipboard_unbound(app: &tauri::AppHandle, unbound: bool) {
     }
 }
 
-/// 「贴图热键迁移」已完成的一次性标记（settings.json 里的布尔）。
+/// 「贴图 / 剪贴板默认热键对齐迁移」已完成的一次性标记（settings.json 里的布尔）。
 ///
-/// 背景：贴图（`pin`）的默认键 `ctrl+alt+v` 与剪贴板历史的**老默认键**相同，
-/// 同一个全局热键只能注册一个动作——不迁移的话，老用户升级后贴图的默认键
-/// 注入不上（键被占用），表现为「按 Ctrl+Alt+V 没有贴图」。
-const SETTINGS_KEY_PIN_MIGRATED: &str = "pin_shortcut_migrated_v1";
+/// 背景：贴图（`pin`）默认键现定为 `ctrl+alt+p`，剪贴板历史（`clipboard`）恢复并保持
+/// `ctrl+alt+v`。对于曾经跑过过渡版本（`pin=ctrl+alt+v`、`clipboard=ctrl+alt+b`）的
+/// 配置，需要一次性把两者平滑迁回最新默认键；对于全新安装或更早版本用户，则保持原状不动。
+const SETTINGS_KEY_PIN_MIGRATED: &str = "pin_shortcut_migrated_v2";
 
-/// 一次性迁移：剪贴板历史热键 `ctrl+alt+v` → `ctrl+alt+b`，给「贴图」让位。
+/// 一次性迁移：贴图 `ctrl+alt+v` → `ctrl+alt+p`，剪贴板历史 `ctrl+alt+b` → `ctrl+alt+v`。
 ///
 /// 规则（保守优先，用户意图永远最高）：
-///   - 仅当剪贴板历史**仍绑在**老默认 `ctrl+alt+v`（用户没自定义过）时迁移；
-///   - 用户主动解绑过剪贴板历史 → 不迁移（他本来就不想要热键，`ctrl+alt+v`
-///     自然空出来给贴图）；
-///   - `ctrl+alt+b` 已被其它动作占用 → 不迁移（不挤掉别人的键），贴图注入
-///     交给 reconcile 的「键被占用则跳过」逻辑（用户可在设置里手动改绑）；
+///   - 贴图仅当仍绑在旧默认 `ctrl+alt+v` 且 `ctrl+alt+p` 空闲时迁到 `ctrl+alt+p`；
+///   - 剪贴板历史仅当仍绑在过渡默认 `ctrl+alt+b` 且 `ctrl+alt+v` 空闲时迁回 `ctrl+alt+v`；
+///   - 用户主动自定义过键位、主动解绑过、或目标键已被其它动作占用 → 一律不动；
 ///   - 只跑一次（`SETTINGS_KEY_PIN_MIGRATED` 标记），之后完全尊重用户改动。
 ///
 /// 在 `setup` 里、注册快捷键**之前**调用（迁移结果要参与本次注册）。
@@ -1332,42 +1331,46 @@ fn migrate_pin_shortcut(app: &tauri::AppHandle) {
     let bindings = read_shortcut_bindings(app);
     if let Some(next) = migrate_pin_bindings(&bindings) {
         write_shortcut_bindings(app, &next);
-        eprintln!("贴图热键迁移：剪贴板历史 ctrl+alt+v → ctrl+alt+b（Ctrl+Alt+V 让给贴图）");
+        eprintln!("贴图热键迁移：pin → ctrl+alt+p，clipboard → ctrl+alt+v");
     }
 }
 
 /// `migrate_pin_shortcut` 的纯函数核心（单测友好）：
-/// 剪贴板历史仍绑在老默认 `ctrl+alt+v` 且 `ctrl+alt+b` 空闲 → 返回迁移后的
-/// 绑定列表；否则返回 None（不动）。
+/// 1) `pin` 仍绑在 `ctrl+alt+v` 且 `ctrl+alt+p` 空闲 → 迁到 `ctrl+alt+p`；
+/// 2) `clipboard` 仍绑在 `ctrl+alt+b` 且 `ctrl+alt+v` 空闲 → 迁回 `ctrl+alt+v`；
+/// 任一条发生变更则返回新列表，否则返回 `None`。
 fn migrate_pin_bindings(bindings: &[ShortcutBinding]) -> Option<Vec<ShortcutBinding>> {
-    const OLD_CLIPBOARD_KEY: &str = "ctrl+alt+v";
-    const NEW_CLIPBOARD_KEY: &str = "ctrl+alt+b";
-    // 用户自定义过（≠老默认）或主动解绑（列表里没有）→ 不动
-    if !bindings
-        .iter()
-        .any(|b| b.action == SHORTCUT_ACTION_CLIPBOARD && b.shortcut == OLD_CLIPBOARD_KEY)
-    {
-        return None;
+    const OLD_PIN_KEY: &str = "ctrl+alt+v";
+    const NEW_PIN_KEY: &str = "ctrl+alt+p";
+    const OLD_CLIPBOARD_KEY: &str = "ctrl+alt+b";
+    const NEW_CLIPBOARD_KEY: &str = "ctrl+alt+v";
+
+    let mut next = bindings.to_vec();
+    let mut changed = false;
+
+    let p_taken = next.iter().any(|b| b.shortcut == NEW_PIN_KEY);
+    if !p_taken {
+        if let Some(pin) = next
+            .iter_mut()
+            .find(|b| b.action == SHORTCUT_ACTION_PIN && b.shortcut == OLD_PIN_KEY)
+        {
+            pin.shortcut = NEW_PIN_KEY.to_string();
+            changed = true;
+        }
     }
-    // 目标键被其它动作占用 → 不挤掉别人的键
-    if bindings.iter().any(|b| b.shortcut == NEW_CLIPBOARD_KEY) {
-        return None;
+
+    let v_taken = next.iter().any(|b| b.shortcut == NEW_CLIPBOARD_KEY);
+    if !v_taken {
+        if let Some(clip) = next
+            .iter_mut()
+            .find(|b| b.action == SHORTCUT_ACTION_CLIPBOARD && b.shortcut == OLD_CLIPBOARD_KEY)
+        {
+            clip.shortcut = NEW_CLIPBOARD_KEY.to_string();
+            changed = true;
+        }
     }
-    Some(
-        bindings
-            .iter()
-            .map(|b| {
-                if b.action == SHORTCUT_ACTION_CLIPBOARD && b.shortcut == OLD_CLIPBOARD_KEY {
-                    ShortcutBinding {
-                        shortcut: NEW_CLIPBOARD_KEY.to_string(),
-                        ..b.clone()
-                    }
-                } else {
-                    b.clone()
-                }
-            })
-            .collect(),
-    )
+
+    changed.then_some(next)
 }
 
 
@@ -1375,11 +1378,115 @@ fn migrate_pin_bindings(bindings: &[ShortcutBinding]) -> Option<Vec<ShortcutBind
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PluginShortcutAction {
-    /// 动作 id：宿主原生为 `screenshot` / `clipboard`；插件自定义为 `plugin:<id>:<name>`
+    /// 动作 id：宿主原生为 `screenshot` / `clipboard` / `pin`；插件自定义为 `plugin:<id>:<name>`
     pub(crate) action: String,
+    /// 声明该动作的插件 id（宿主用于权限归属校验与事件派发，不再硬编码内置插件 id）
+    #[serde(default)]
+    pub(crate) plugin_id: String,
     /// 首次注入用的默认组合键（空串 = 不自动注入）
     #[serde(default)]
     pub(crate) default_shortcut: String,
+}
+
+/// 动作 id → 所属插件 id 的运行时映射（由前端 `sync_plugin_shortcut_actions` 同步更新）
+static PLUGIN_SHORTCUT_OWNERS: std::sync::LazyLock<
+    Mutex<std::collections::HashMap<String, String>>,
+> = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+/// 动态解析某个插件快捷键动作当前归属的插件 ID（零硬编码）。
+///
+/// 优先查前端同步的 `PLUGIN_SHORTCUT_OWNERS`；若应用刚冷启动、WebView 尚未完成首次同步，
+/// 则回落到网关快照（`load_gateway_snapshot` 已在 `setup` 中加载）按能力定位启用插件。
+fn resolve_plugin_shortcut_owner(action: &str) -> Option<String> {
+    if let Some(owner) = plugin_defined_action_owner(action) {
+        return Some(owner.to_string());
+    }
+    if let Ok(guard) = PLUGIN_SHORTCUT_OWNERS.lock() {
+        if let Some(pid) = guard.get(action).filter(|s| !s.is_empty()) {
+            return Some(pid.clone());
+        }
+    }
+    match action {
+        SHORTCUT_ACTION_CLIPBOARD => plugin_host::clipboard_capture_plugin_ids()
+            .into_iter()
+            .next(),
+        SHORTCUT_ACTION_SCREENSHOT => plugin_host::active_plugin_ids_with_grant("screenshot.overlay")
+            .into_iter()
+            .next(),
+        SHORTCUT_ACTION_PIN => plugin_host::active_plugin_ids_with_grant("clipboard.read")
+            .into_iter()
+            .next(),
+        _ => None,
+    }
+}
+
+/// 归一化并校验插件对某快捷键动作的归属权（纯归属规则，供 `plugin_shortcut_get/set` 调用）。
+///
+/// 支持三种入参形态：
+///   1. 宿主原生插件动作（`screenshot` / `clipboard` / `pin`）——校验归属或对应权限；
+///   2. 完整插件自定义动作（`plugin:<plugin_id>:<name>`）——要求 `<plugin_id>` 与调用方一致；
+///   3. 简写动作名（如 `"record-toggle"`）——自动补全为 `plugin:<plugin_id>:<name>`。
+fn normalize_plugin_shortcut_action_pure(
+    plugin_id: &str,
+    raw_action: &str,
+    known_owner: Option<&str>,
+) -> Result<String, String> {
+    let pid = plugin_id.trim();
+    if pid.is_empty() {
+        return Err("缺少插件标识（pluginId）".into());
+    }
+    let trimmed = raw_action.trim();
+    if trimmed.is_empty() {
+        return Err("快捷键动作名不能为空".into());
+    }
+    if trimmed == SHORTCUT_ACTION_SCREENSHOT
+        || trimmed == SHORTCUT_ACTION_CLIPBOARD
+        || trimmed == SHORTCUT_ACTION_PIN
+    {
+        if let Some(owner) = known_owner.filter(|s| !s.is_empty()) {
+            if owner != pid {
+                return Err(format!("无权操作其它插件（{owner}）的快捷键动作「{trimmed}」"));
+            }
+        }
+        return Ok(trimmed.to_string());
+    }
+    if let Some(owner) = plugin_defined_action_owner(trimmed) {
+        if owner != pid {
+            return Err(format!("无权操作其它插件（{owner}）的快捷键动作"));
+        }
+        return Ok(trimmed.to_string());
+    }
+    if trimmed.starts_with(PLUGIN_ACTION_PREFIX) || trimmed.contains(':') {
+        return Err(format!("非法的插件快捷键动作名：{trimmed}"));
+    }
+    let full = format!("{PLUGIN_ACTION_PREFIX}{pid}:{trimmed}");
+    if !is_plugin_defined_action(&full) {
+        return Err(format!("非法的插件快捷键动作名：{trimmed}"));
+    }
+    Ok(full)
+}
+
+fn authorize_plugin_shortcut_action(plugin_id: &str, raw_action: &str) -> Result<String, String> {
+    plugin_host::require_enabled(plugin_id)?;
+    let known_owner = PLUGIN_SHORTCUT_OWNERS
+        .lock()
+        .ok()
+        .and_then(|g| g.get(raw_action.trim()).cloned());
+    let canonical =
+        normalize_plugin_shortcut_action_pure(plugin_id, raw_action, known_owner.as_deref())?;
+    // 对宿主原生动作，若尚未同步 owner 映射，再按能力做一道兜底校验
+    if known_owner.is_none() {
+        match canonical.as_str() {
+            SHORTCUT_ACTION_SCREENSHOT => {
+                plugin_host::require_grant(plugin_id, "screenshot.overlay")?;
+            }
+            SHORTCUT_ACTION_CLIPBOARD | SHORTCUT_ACTION_PIN => {
+                plugin_host::require_grant(plugin_id, "clipboard.read")?;
+            }
+            _ => {}
+        }
+    }
+    Ok(canonical)
 }
 
 /// 按「当前可用的插件动作」调和绑定列表（纯函数，便于单测）。
@@ -1543,7 +1650,8 @@ fn dispatch_shortcut_action(app: &tauri::AppHandle, action: &str, target: Option
     } else if action == SHORTCUT_ACTION_SCREENSHOT {
         // 截图是唯一在 Rust 里就地完成的动作：遮罩必须是独立全屏窗口，
         // 而插件详情视图（inlay）开不了窗口。内部自己 spawn，不阻塞事件循环。
-        screenshot::start_overlay_from_shortcut(app);
+        let owner = resolve_plugin_shortcut_owner(SHORTCUT_ACTION_SCREENSHOT);
+        screenshot::start_overlay_from_shortcut(app, owner);
     } else if action == SHORTCUT_ACTION_CLIPBOARD {
         // 剪贴板历史**走前端**（inlay 详情视图能开在主 WebView 里）：
         // 这里只把主窗口带到前台并广播事件，由前端打开内置插件详情视图。
@@ -1775,39 +1883,149 @@ pub(crate) const UA: &str = concat!(
     env!("CARGO_PKG_VERSION")
 );
 
+/// 插件 HTTP 请求的响应（与前端 `ms.net.fetch` 的返回契约一致）。
+///
+/// `text` 始终存在（二进制响应的错误片段也放这里）；`base64` 仅在
+/// `responseType = "base64"` 时填充。`headers` 一律小写键，便于插件读取
+/// `content-type` / `etag` / `last-modified` / `dav` 等。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PluginHttpResponse {
+    pub status: u16,
+    pub ok: bool,
+    pub text: String,
+    pub headers: std::collections::HashMap<String, String>,
+    pub base64: Option<String>,
+    pub content_type: Option<String>,
+}
+
+/// 插件 HTTP 请求的可选参数（从 `plugin_net_fetch` 透传）。
+pub(crate) struct PluginHttpOptions {
+    pub body_base64: Option<String>,
+    pub response_type: Option<String>,
+    pub max_bytes: Option<u64>,
+    pub timeout_secs: Option<u64>,
+}
+
+/// 读取响应体并限制大小（用于二进制 / base64 响应）。
+async fn read_body_limited(resp: &mut reqwest::Response, max: u64) -> Result<Vec<u8>, String> {
+    let mut out: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| format!("读取响应失败: {e}"))?
+    {
+        if out.len() as u64 + chunk.len() as u64 > max {
+            return Err(format!(
+                "响应过大（上限 {} MB）",
+                (max / (1024 * 1024)).max(1)
+            ));
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
+}
+
 /// 供插件网关复用的通用请求实现（插件已在前端与网关双重校验过目标地址）。
-/// 与 `http_request` 的差别：不默认塞 GitHub 的 Accept 头，其余行为一致。
+///
+/// 与 `http_request` 的差别：
+/// - 不默认塞 GitHub 的 Accept 头；
+/// - 支持 base64 请求体（二进制上传）与 base64 响应（图片/PDF/音视频预览）；
+/// - 支持读取响应头、自定义超时与响应大小上限；
+/// - 非 2xx **不在这里报错**（返回 `ok=false` + 状态码 + 响应片段），
+///   由前端按 `throwOnHttpError` 决定是否抛错——这样插件能区分 401/404/409。
 pub(crate) async fn http_request_for_plugin(
     method: String,
     url: String,
     headers: std::collections::HashMap<String, String>,
     body: Option<String>,
-) -> Result<String, String> {
+    options: PluginHttpOptions,
+) -> Result<PluginHttpResponse, String> {
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err("仅支持 http/https 地址".into());
     }
-    let client = build_client(30, UA)?;
+    let timeout = options.timeout_secs.unwrap_or(30).clamp(1, 300);
+    let client = build_client(timeout, UA)?;
     let parsed_method = reqwest::Method::from_bytes(method.to_uppercase().as_bytes())
         .map_err(|e| format!("非法请求方法: {e}"))?;
     let mut req = client.request(parsed_method, &url);
     for (k, v) in headers {
         req = req.header(k, v);
     }
-    if let Some(b) = body {
+    if let Some(b) = options.body_base64 {
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(b)
+            .map_err(|e| format!("请求体 base64 解码失败: {e}"))?;
+        req = req.body(bytes);
+    } else if let Some(b) = body {
         req = req.body(b);
     }
-    let resp = req.send().await.map_err(|e| format!("请求失败: {e}"))?;
+    let mut resp = req.send().await.map_err(|e| format!("请求失败: {e}"))?;
     let status = resp.status();
-    let text = resp
-        .text()
-        .await
-        .map_err(|e| format!("读取响应失败: {e}"))?;
-    if status.is_success() {
-        Ok(text)
-    } else {
-        let snippet: String = text.chars().take(400).collect();
-        Err(format!("HTTP {}: {}", status.as_u16(), snippet))
+    let ok = status.is_success();
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let mut headers_out = std::collections::HashMap::new();
+    for (k, v) in resp.headers() {
+        if let Ok(s) = v.to_str() {
+            headers_out.insert(k.as_str().to_ascii_lowercase(), s.to_string());
+        }
     }
+    let is_base64 = options.response_type.as_deref() == Some("base64");
+    let default_max = if is_base64 {
+        64 * 1024 * 1024
+    } else {
+        32 * 1024 * 1024
+    };
+    let max = options
+        .max_bytes
+        .unwrap_or(default_max)
+        .clamp(1, 256 * 1024 * 1024);
+    let (text, base64) = if is_base64 {
+        let bytes = read_body_limited(&mut resp, max).await?;
+        let snippet = if ok {
+            String::new()
+        } else {
+            String::from_utf8_lossy(&bytes[..bytes.len().min(400)]).to_string()
+        };
+        use base64::Engine as _;
+        (
+            snippet,
+            Some(base64::engine::general_purpose::STANDARD.encode(&bytes)),
+        )
+    } else {
+        if let Some(len) = resp.content_length() {
+            if len > max {
+                return Err(format!(
+                    "响应过大（上限 {} MB）",
+                    (max / (1024 * 1024)).max(1)
+                ));
+            }
+        }
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| format!("读取响应失败: {e}"))?;
+        if text.len() as u64 > max {
+            return Err(format!(
+                "响应过大（上限 {} MB）",
+                (max / (1024 * 1024)).max(1)
+            ));
+        }
+        (text, None)
+    };
+    Ok(PluginHttpResponse {
+        status: status.as_u16(),
+        ok,
+        text,
+        headers: headers_out,
+        base64,
+        content_type,
+    })
 }
 
 /// HTTP GET 代理：供前端拉取订阅内容（绕开 CORS）
@@ -3257,6 +3475,17 @@ fn sync_plugin_shortcut_actions(
             return Err(format!("未知的插件快捷键动作：{}", a.action));
         }
     }
+    if let Ok(mut guard) = PLUGIN_SHORTCUT_OWNERS.lock() {
+        guard.clear();
+        for a in &actions {
+            let pid = a.plugin_id.trim();
+            if !pid.is_empty() {
+                guard.insert(a.action.clone(), pid.to_string());
+            } else if let Some(owner) = plugin_defined_action_owner(&a.action) {
+                guard.insert(a.action.clone(), owner.to_string());
+            }
+        }
+    }
     let current = read_shortcut_bindings(&app);
     let reconciled = reconcile_plugin_actions(current.clone(), &actions, &|action| {
         is_plugin_action_unbound(&app, action)
@@ -3267,6 +3496,71 @@ fn sync_plugin_shortcut_actions(
     // 后台自愈场景（无人盯着）：用 BestEffort——某个插件动作的默认键被临时占用时
     // 只跳过那一条，其余绑定照常落地；否则整批调和失败，自愈永远完不成。
     apply_shortcut_bindings(&app, &reconciled, RegisterMode::BestEffort)
+}
+
+/// 通用插件快捷键读取：按插件身份 + 动作名读取当前绑定的全局组合键（未设置返回空串）。
+///
+/// 统一取代原先各插件定制的 `screenshot_get_shortcut` / `clipboard_history_get_shortcut`，
+/// 权威存储始终是宿主 `settings.json` 的 `shortcut_bindings`。
+#[tauri::command]
+fn plugin_shortcut_get(
+    app: tauri::AppHandle,
+    plugin_id: String,
+    action: String,
+) -> Result<String, String> {
+    let canonical = authorize_plugin_shortcut_action(&plugin_id, &action)?;
+    let bindings = read_shortcut_bindings_for_plugin(&app);
+    Ok(bindings
+        .into_iter()
+        .find(|b| b.action == canonical)
+        .map(|b| b.shortcut)
+        .unwrap_or_default())
+}
+
+/// 通用插件快捷键登记 / 改绑 / 解绑（传空串即解绑并记录用户主动解绑标记）。
+///
+/// 走宿主既有的严格校验 + 原子注册回滚 + 落盘链路，并原样保留其它绑定（含 `target`）。
+#[tauri::command]
+fn plugin_shortcut_set(
+    app: tauri::AppHandle,
+    plugin_id: String,
+    action: String,
+    shortcut: String,
+) -> Result<String, String> {
+    let canonical = authorize_plugin_shortcut_action(&plugin_id, &action)?;
+    let key = shortcut.trim().to_lowercase();
+    let mut list = read_shortcut_bindings_for_plugin(&app);
+
+    if key.is_empty() {
+        list.retain(|b| b.action != canonical);
+        if list.is_empty() {
+            return Err("至少要保留「呼出 / 隐藏搜索框」这一条快捷键".into());
+        }
+        let applied = apply_shortcut_bindings_for_plugin(&app, &list);
+        if applied.is_ok() {
+            set_plugin_action_unbound(&app, &canonical, true);
+        }
+        return applied.map(|_| String::new());
+    }
+
+    if let Some(other) = list
+        .iter()
+        .find(|b| b.shortcut == key && b.action != canonical)
+    {
+        return Err(format!("该组合键已被「{}」占用，请换一个", other.action));
+    }
+
+    match list.iter_mut().find(|b| b.action == canonical) {
+        Some(entry) => entry.shortcut = key.clone(),
+        None => list.push(ShortcutBinding {
+            shortcut: key.clone(),
+            action: canonical.clone(),
+            target: None,
+        }),
+    }
+    apply_shortcut_bindings_for_plugin(&app, &list)?;
+    set_plugin_action_unbound(&app, &canonical, false);
+    Ok(key)
 }
 
 /// 注册整套绑定并持久化（注册失败时回滚且不落盘）。
@@ -3700,6 +3994,8 @@ pub fn run() {
             get_shortcut_bindings,
             set_shortcut_bindings,
             sync_plugin_shortcut_actions,
+            plugin_shortcut_get,
+            plugin_shortcut_set,
             get_autostart_enabled,
             set_autostart_enabled_cmd,
             get_alt_click_enabled,
@@ -3727,6 +4023,11 @@ pub fn run() {
             plugin_host::plugin_open_dir,
             plugin_host::plugin_check_path,
             plugin_host::plugin_gateway_sync,
+            plugin_host::plugin_gateway_sync_batch,
+            plugin_host::plugin_storage_read,
+            plugin_host::plugin_storage_write,
+            plugin_host::plugin_storage_delete,
+            plugin_host::plugin_open_window,
             plugin_host::plugin_net_fetch,
             plugin_host::plugin_backend_start,
             plugin_host::plugin_backend_stop,
@@ -3738,6 +4039,9 @@ pub fn run() {
             plugin_host::plugin_read_dev_manifest,
             // 目录挂载插件（开发模式）的自动重载：登记/取消源目录监听
             plugin_host::plugin_watch_dir,
+            // ---------- 插件文件选择 / 保存（系统对话框） ----------
+            plugin_files::plugin_pick_files,
+            plugin_files::plugin_save_file,
             // ---------- 搜索框附件（粘贴/拖入的文件与文件夹） ----------
             attachments::clipboard_file_paths,
             attachments::fs_describe_paths,
@@ -3764,6 +4068,7 @@ pub fn run() {
             screenshot::screenshot_pick_region,
             // 产出：写剪贴板 / 落盘 / 广播
             screenshot::screenshot_copy_image,
+            screenshot::screenshot_copy_image_at,
             screenshot::screenshot_copy_text,
             screenshot::screenshot_save_shot,
             // 产出的「另存为」：弹系统保存框让用户选目录/文件名
@@ -3775,12 +4080,10 @@ pub fn run() {
             screenshot::screenshot_read_shot,
             screenshot::screenshot_delete_shot,
             screenshot::screenshot_prune_shots,
-            // 插件侧：读/改「截图」快捷键（权威存储是宿主的 shortcut_bindings）
-            screenshot::screenshot_get_shortcut,
-            screenshot::screenshot_set_shortcut,
             // ---------- 贴图（热键钉图 + 光标处小窗） ----------
             // 页面取自己这张图 / 双击与右键菜单关闭 / 异常关闭兜底清理
             pin_image::pin_image_data,
+            pin_image::pin_set_bounds,
             pin_image::pin_close,
             pin_image::pin_cleanup,
             // ---------- 鼠标手势（Ctrl+右键拖拽 → 动作；HUD 轨迹反馈） ----------
@@ -3791,24 +4094,13 @@ pub fn run() {
             mouse_gesture::gesture_list_processes,
             mouse_gesture::gesture_record_start,
             mouse_gesture::gesture_record_cancel,
-            // ---------- 剪贴板历史（原生监听 + 只读抓取 + 插件私有目录落盘） ----------
-            // 列表/读图/删除/清空/复制回剪贴板（复制是唯一的写剪贴板路径，用户显式触发）
+            // ---------- 剪贴板捕获原语（按需监听 + 只读抓取 + 环形缓冲落盘） ----------
             clipboard_history::clipboard_history_list,
-            // 分页列表（每页 30 条、触底加载更多；支持「仅收藏」与关键词过滤后再分页）
-            clipboard_history::clipboard_history_page,
             clipboard_history::clipboard_history_read_image,
             clipboard_history::clipboard_history_delete,
             clipboard_history::clipboard_history_clear,
+            clipboard_history::clipboard_history_set_retained,
             clipboard_history::clipboard_history_copy,
-            // 收藏 / 取消收藏（收藏条目永久保留，不参与上限淘汰与默认清空）
-            clipboard_history::clipboard_history_set_favorite,
-            // 设置 / 清除分类（已分类条目同样永久保留，支持按分类分页查看）
-            clipboard_history::clipboard_history_set_category,
-            // 修改一条文本历史的内容（插件「编辑」按钮；「仅收藏可编辑」是 UI 门禁）
-            clipboard_history::clipboard_history_update,
-            // 插件侧：读/改「剪贴板历史」快捷键
-            clipboard_history::clipboard_history_get_shortcut,
-            clipboard_history::clipboard_history_set_shortcut,
             // ---------- 内置插件 ----------
             builtin::builtin_list,            builtin::builtin_mark_removed,
             builtin::builtin_clear_removed,
@@ -3863,9 +4155,9 @@ pub fn run() {
             // 其余键——尤其呼出键——照常注册；严格模式下一次冲突会回滚全部，
             // 表现为「按快捷键完全没反应」且错误只进看不见的 stderr。
             //
-            // 注册前先做一次「贴图热键迁移」：老用户的剪贴板历史还占着
-            // ctrl+alt+v（贴图的默认键），迁到 ctrl+alt+b 后贴图才能注入
-            // （见 migrate_pin_shortcut）。只跑一次，之后完全尊重用户改动。
+            // 注册前先做一次「贴图 / 剪贴板默认热键对齐迁移」：把过渡键位
+            // （pin=ctrl+alt+v / clipboard=ctrl+alt+b）一次性迁回最新默认键
+            // （pin=ctrl+alt+p / clipboard=ctrl+alt+v，见 migrate_pin_shortcut）。
             migrate_pin_shortcut(app.handle());
             let bindings = read_shortcut_bindings(app.handle());
             if let Err(e) =
@@ -3879,16 +4171,13 @@ pub fn run() {
                 read_alt_click_pref(app.handle()).unwrap_or(DEFAULT_ALT_CLICK_ENABLED),
             );
             alt_click::install(app.handle().clone());
-            // 鼠标手势（Ctrl+右键拖拽）：先读偏好再装钩子 + 启动识别线程 +
-            // 恢复映射快照。失败只记日志，不阻断启动（见 mouse_gesture.rs）。
+            // 先加载插件网关快照，再按「已启用插件 + 实际授予权限」按需挂载原生钩子与监听：
+            // 未安装或禁用对应插件时绝不挂载低级鼠标钩子（WH_MOUSE_LL）或剪贴板监听窗口。
+            plugin_host::load_gateway_snapshot(app.handle());
             mouse_gesture::set_enabled(
                 mouse_gesture::read_gesture_pref(app.handle()).unwrap_or(true),
             );
-            mouse_gesture::load_bindings_snapshot(app.handle());
-            mouse_gesture::install(app.handle().clone());
-            // 剪贴板历史监听：建隐藏 message-only 窗口挂 AddClipboardFormatListener。
-            // 必须在带消息循环的主线程装（本处满足）；失败只记日志，不阻断启动。
-            clipboard_history::install(app.handle().clone());
+            plugin_host::reconcile_native_capabilities(app.handle());
             apply_autostart_preference(app.handle());
             // `.mspp` 文件关联：按偏好登记（正式构建 / dev 逃生门）或清除。
             // 登记是幂等的自愈写入——exe 换位置、图标资源更新都会在这里被纠正。
@@ -3973,7 +4262,8 @@ pub fn run() {
                 plugin_watch::unwatch_all();
                 // 关闭规则库定时更新线程
                 proxy_rules::stop_auto_refresh();
-                // 卸掉剪贴板监听并销毁监听窗口
+                // 卸掉按需挂载的鼠标钩子与剪贴板监听窗口
+                mouse_gesture::uninstall();
                 clipboard_history::uninstall();
                 // 停止所有插件后台进程：Windows 有 Job Object 兜底，Unix 没有——
                 // 不显式停止会留下孤儿进程（继续吃 CPU/内存），也收不回最后日志。
@@ -4207,10 +4497,12 @@ mod tests {
 
         let screenshot = || PluginShortcutAction {
             action: SHORTCUT_ACTION_SCREENSHOT.into(),
+            plugin_id: "com.zhuangjie.screenshot".into(),
             default_shortcut: "ctrl+alt+x".into(),
         };
         let clipboard = || PluginShortcutAction {
             action: SHORTCUT_ACTION_CLIPBOARD.into(),
+            plugin_id: "com.mysearch.clipboard".into(),
             default_shortcut: "ctrl+alt+v".into(),
         };
 
@@ -4272,6 +4564,7 @@ mod tests {
         // 7) 清单没给默认键（空串）→ 不自动注入（用户自行录入）
         let no_default = PluginShortcutAction {
             action: SHORTCUT_ACTION_SCREENSHOT.into(),
+            plugin_id: "com.zhuangjie.screenshot".into(),
             default_shortcut: "".into(),
         };
         let nod = reconcile_plugin_actions(base, &[no_default], &|_| false);
@@ -4283,14 +4576,53 @@ mod tests {
     #[test]
     fn reconcile_plugin_defined_actions() {
         use super::{
-            parse_shortcut_bindings, parse_shortcut_bindings_strict, reconcile_plugin_actions,
-            PluginShortcutAction, SHORTCUT_ACTION_TOGGLE_WINDOW,
+            normalize_plugin_shortcut_action_pure, parse_shortcut_bindings,
+            parse_shortcut_bindings_strict, reconcile_plugin_actions, PluginShortcutAction,
+            SHORTCUT_ACTION_CLIPBOARD, SHORTCUT_ACTION_SCREENSHOT, SHORTCUT_ACTION_TOGGLE_WINDOW,
         };
 
         let rec = || PluginShortcutAction {
             action: "plugin:com.mysearch.recorder:record-toggle".into(),
+            plugin_id: "com.mysearch.recorder".into(),
             default_shortcut: "ctrl+alt+r".into(),
         };
+
+        // 归属权校验：插件可以读写自己的简写/全称动作，但不能越权改其它插件的动作
+        assert_eq!(
+            normalize_plugin_shortcut_action_pure("com.mysearch.recorder", "record-toggle", None)
+                .unwrap(),
+            "plugin:com.mysearch.recorder:record-toggle"
+        );
+        assert_eq!(
+            normalize_plugin_shortcut_action_pure(
+                "com.mysearch.recorder",
+                "plugin:com.mysearch.recorder:record-toggle",
+                None
+            )
+            .unwrap(),
+            "plugin:com.mysearch.recorder:record-toggle"
+        );
+        assert!(normalize_plugin_shortcut_action_pure(
+            "com.evil.plugin",
+            "plugin:com.mysearch.recorder:record-toggle",
+            None
+        )
+        .is_err());
+        assert_eq!(
+            normalize_plugin_shortcut_action_pure(
+                "com.zhuangjie.screenshot",
+                SHORTCUT_ACTION_SCREENSHOT,
+                Some("com.zhuangjie.screenshot")
+            )
+            .unwrap(),
+            SHORTCUT_ACTION_SCREENSHOT
+        );
+        assert!(normalize_plugin_shortcut_action_pure(
+            "com.evil.plugin",
+            SHORTCUT_ACTION_CLIPBOARD,
+            Some("com.mysearch.clipboard")
+        )
+        .is_err());
 
         // 1) 装了录屏插件 → 注入默认录屏键
         let base = parse_shortcut_bindings(&serde_json::json!([
@@ -4375,7 +4707,7 @@ mod tests {
         // 没有 target 也合法
         let parsed = parse_shortcut_bindings_strict(&serde_json::json!([
             { "shortcut": DEFAULT_TOGGLE_SHORTCUT, "action": SHORTCUT_ACTION_TOGGLE_WINDOW },
-            { "shortcut": "ctrl+alt+v", "action": SHORTCUT_ACTION_PIN }
+            { "shortcut": "ctrl+alt+p", "action": SHORTCUT_ACTION_PIN }
         ]))
         .unwrap();
         assert_eq!(parsed.len(), 2);
@@ -4383,15 +4715,11 @@ mod tests {
         assert_eq!(parsed[1].target, None);
     }
 
-    /// 一次性迁移：剪贴板历史 ctrl+alt+v → ctrl+alt+b，给贴图（默认同键）让位。
-    ///
-    /// 回归防线：不迁移的话，老用户升级后 Ctrl+Alt+V 被剪贴板历史占着，
-    /// 贴图的默认键注入不上（reconcile 的「键被占用则跳过」），表现为
-    /// 「按 Ctrl+Alt+V 没有贴图」。
+    /// 一次性迁移：贴图 ctrl+alt+v → ctrl+alt+p，剪贴板历史 ctrl+alt+b → ctrl+alt+v。
     #[test]
-    fn migrate_pin_bindings_moves_clipboard_to_b() {
+    fn migrate_pin_bindings_moves_pin_to_p_and_restores_clipboard_to_v() {
         use super::{
-            migrate_pin_bindings, ShortcutBinding, SHORTCUT_ACTION_CLIPBOARD,
+            migrate_pin_bindings, ShortcutBinding, SHORTCUT_ACTION_CLIPBOARD, SHORTCUT_ACTION_PIN,
             SHORTCUT_ACTION_TOGGLE_WINDOW,
         };
         let b = |shortcut: &str, action: &str, target: Option<&str>| ShortcutBinding {
@@ -4400,38 +4728,45 @@ mod tests {
             target: target.map(|s| s.to_string()),
         };
 
-        // 1) 老默认（clipboard 仍绑 ctrl+alt+v）→ 迁到 ctrl+alt+b，其余原样
-        let old = vec![
+        // 1) 过渡版本配置（pin=ctrl+alt+v，clipboard=ctrl+alt+b）→ pin=ctrl+alt+p，clipboard=ctrl+alt+v
+        let transitional = vec![
             b("ctrl+alt+s", SHORTCUT_ACTION_TOGGLE_WINDOW, None),
-            b("ctrl+alt+v", SHORTCUT_ACTION_CLIPBOARD, None),
+            b("ctrl+alt+b", SHORTCUT_ACTION_CLIPBOARD, None),
+            b("ctrl+alt+v", SHORTCUT_ACTION_PIN, None),
             b("ctrl+alt+1", "open-plugin", Some("com.a.b")),
         ];
-        let next = migrate_pin_bindings(&old).expect("老默认应迁移");
-        assert_eq!(next.len(), 3);
+        let next = migrate_pin_bindings(&transitional).expect("过渡默认键应自动迁移");
+        assert_eq!(next.len(), 4);
+        let pin = next.iter().find(|x| x.action == SHORTCUT_ACTION_PIN).unwrap();
         let clip = next.iter().find(|x| x.action == SHORTCUT_ACTION_CLIPBOARD).unwrap();
-        assert_eq!(clip.shortcut, "ctrl+alt+b");
-        // 其余绑定原样（含作用对象）
+        assert_eq!(pin.shortcut, "ctrl+alt+p");
+        assert_eq!(clip.shortcut, "ctrl+alt+v");
         assert_eq!(next[0].shortcut, "ctrl+alt+s");
-        assert_eq!(next[2].target.as_deref(), Some("com.a.b"));
+        assert_eq!(next[3].target.as_deref(), Some("com.a.b"));
 
-        // 2) 用户自定义过剪贴板键（≠老默认）→ 不动
+        // 2) 更早老版本 / 已对齐配置（clipboard 已经在 ctrl+alt+v）→ 不动
+        let pre_v1 = vec![
+            b("ctrl+alt+s", SHORTCUT_ACTION_TOGGLE_WINDOW, None),
+            b("ctrl+alt+v", SHORTCUT_ACTION_CLIPBOARD, None),
+        ];
+        assert!(migrate_pin_bindings(&pre_v1).is_none());
+
+        // 3) 用户自定义过键位 → 不动
         let custom = vec![
             b("ctrl+alt+s", SHORTCUT_ACTION_TOGGLE_WINDOW, None),
             b("ctrl+alt+c", SHORTCUT_ACTION_CLIPBOARD, None),
+            b("ctrl+alt+q", SHORTCUT_ACTION_PIN, None),
         ];
         assert!(migrate_pin_bindings(&custom).is_none());
 
-        // 3) 用户解绑过剪贴板（列表里没有）→ 不动（V 键自然空给贴图）
-        let unbound = vec![b("ctrl+alt+s", SHORTCUT_ACTION_TOGGLE_WINDOW, None)];
-        assert!(migrate_pin_bindings(&unbound).is_none());
-
-        // 4) ctrl+alt+b 已被其它动作占用 → 不挤掉别人的键
-        let b_taken = vec![
+        // 4) ctrl+alt+p 已被其它动作占用 → pin 不挤掉别人的键，clipboard 也不强占 ctrl+alt+v
+        let p_taken = vec![
             b("ctrl+alt+s", SHORTCUT_ACTION_TOGGLE_WINDOW, None),
-            b("ctrl+alt+v", SHORTCUT_ACTION_CLIPBOARD, None),
-            b("ctrl+alt+b", "quick-open", Some("某常用头")),
+            b("ctrl+alt+b", SHORTCUT_ACTION_CLIPBOARD, None),
+            b("ctrl+alt+v", SHORTCUT_ACTION_PIN, None),
+            b("ctrl+alt+p", "quick-open", Some("某常用头")),
         ];
-        assert!(migrate_pin_bindings(&b_taken).is_none());
+        assert!(migrate_pin_bindings(&p_taken).is_none());
     }
 
     /// 桥接读写**必须保留每条绑定的作用对象**。

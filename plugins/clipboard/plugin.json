@@ -1,12 +1,13 @@
 {
   "id": "com.mysearch.clipboard",
   "name": "剪贴板历史",
-  "version": "1.5.1",
+  "version": "1.6.0",
   "apiVersion": 1,
-  "minAppVersion": "7.9.15",
+  "minAppVersion": "7.9.35",
+  "autoUpdate": true,
   "author": "zhuangjie",
-  "description": "自动记录你复制过的文本与图片，按快捷键呼出即可搜索、复制、删除、收藏、分类。收藏与已分类的条目永久保留、不会被上限淘汰或清空；「全部」标签下可按分类筛选查看，分类条目还可就地编辑内容。监听在后台原生完成，不干扰系统剪贴板。",
-  "changelog": "默认快捷键从 Ctrl+Alt+V 调整为 Ctrl+Alt+B：Ctrl+Alt+V 让给新的「贴图」功能；老用户升级后自动迁移（自定义过热键的不受影响）。",
+  "description": "自动记录你复制过的文本与图片，按快捷键呼出即可搜索、复制、删除、收藏、分类。收藏与已分类的条目永久保留、不会被上限淘汰或清空；「全部」标签下可按分类筛选查看，收藏文本还可就地编辑内容。监听按需挂载，禁用即卸载，不干扰系统剪贴板。",
+  "changelog": "默认快捷键恢复为 Ctrl+Alt+V；架构解耦升级（收藏、分类、文本二次编辑与多维过滤分页回归插件自治存储并自动无损迁移历史数据）；显式声明 clipboardCapture 与默认自动更新。",
   "repository": "https://github.com/My-Search/my-search-desktop/tree/master/plugins/clipboard",
   "icon": "icon.svg",
   "permissions": [
@@ -17,6 +18,7 @@
     "clipboard.write"
   ],
   "contributes": {
+    "clipboardCapture": true,
     "searchItem": {
       "title": "剪贴板历史",
       "desc": "查看 / 搜索 / 复制最近复制过的文本与图片",
@@ -34,7 +36,7 @@
     "shortcut": {
       "action": "clipboard",
       "title": "剪贴板历史",
-      "defaultShortcut": "ctrl+alt+b"
+      "defaultShortcut": "ctrl+alt+v"
     }
   }
 }

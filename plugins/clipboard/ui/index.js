@@ -1,76 +1,51 @@
 /**
- * 剪贴板历史插件 - 前台入口脚本
+ * 剪贴板历史插件 - 前台入口脚本（领域自治版）
  *
  * 宿主注入参数: ms, env, plugin, host, keyword, inputValue, onSubKeyword, md2html, openExternal
- * （宿主用 `new Function("ms","env","plugin","host",... , code)` 调用本文件，
- *  所以下面 IIFE 的形参声明 + 末尾实参回传是必需的：既拿到注入值，
- *  又让本文件能被当普通 <script> 直接加载调试。）
  *
- * ============================ 这个插件做了什么 ============================
+ * ============================ 架构边界 ============================
  *
- * 前台只有一件事：**展示并操作剪贴板历史**——
- *
- *   1) **列表（分页）**：`ms.clipboard.page()` 每次拿 30 条（`PAGE_SIZE`），
- *      文本直接渲染预览，图片懒加载缩略图。滚动到底部由 IntersectionObserver
- *      自动追加下一页（触底加载更多），直到 `hasMore` 为假。
- *      老宿主没有 `page` 命令时退回 `list()` 全量 + 本地切片，功能不缺失。
- *   2) **搜索**：输入关键词交给宿主**先过滤再分页**，前端即时呈现。
- *   3) **复制 / 删除 / 清空**：分别走 `ms.clipboard.copy/remove/clear`。
- *      其中 **copy 是唯一会写系统剪贴板的动作，且必须由用户点击触发**——
- *      宿主的监听路径是纯只读的，绝不会在你复制别的东西时把剪贴板改掉。
- *   4) **收藏 / 编辑**：`ms.clipboard.setFavorite(id, on)` 打标（收藏/取消都先确认）；
- *      顶部「全部 / 收藏」标签切换时从第一页重拉（过滤在宿主侧）。
- *      收藏条目在宿主侧永久保留（不参与上限淘汰），「清空」默认也保留收藏。
- *      **已收藏的文本条目**可点「编辑」就地修改内容
- *      （`ms.clipboard.update(id, text)`，Enter 保存 / Shift+Enter 换行 /
- *      Esc 取消）。只改内容，创建时间与收藏标记都不动；图片没有可编辑的
- *      文本形态，未收藏条目是临时噪音，两者都不开放编辑。
- *   5) **呼出快捷键**：读写宿主「剪贴板历史」动作的绑定（`ms.clipboard.getShortcut/
- *      setShortcut`），不自己存一份，因而与「设置 → 快捷键」永远一致。
- *   6) **自动刷新**：视图开着时，宿主原监听到剪贴板变更会广播
- *      `my-search://clipboard-updated`，`ms.clipboard.onUpdated` 收到后重拉第一页。
- *      视图没开时事件自然丢弃，下次打开 list/page 兜底——所以不需要常驻轮询。
- *      **编辑中**这一路要特别小心：重拉会重写列表 DOM，草稿暂存在 `editDraft`、
- *      重写后回填并补聚焦，否则用户正敲的字会被冲掉（见 3c/3d）。
- *
- * ============================ 数据放在哪 ============================
- *
- * 文本索引：`<app_data>/plugin-data/com.mysearch.clipboard/clipboard/index.json`
- * 图片文件：`<app_data>/plugin-data/com.mysearch.clipboard/clipboard/*.png`
- *   —— 宿主原生监听在 Rust 侧读写；插件只能拿到相对路径与 data URL，
- *   拿不到也拼不出私有目录之外的任何路径（防目录穿越）。
- * 界面偏好：`ms.store`（localStorage，按插件 id 命名空间隔离），例如搜索词。
+ * 「系统原语归宿主，业务逻辑归插件」：
+ *   1) **宿主原语层**（`ms.clipboard.list / readImage / copy / remove / clear / setRetained`）：
+ *      仅负责按需监听系统剪贴板、捕获原始文本/图片帧、按插件声明的 `retained` ID 集合豁免环形缓冲淘汰。
+ *      宿主不再感知「收藏」「分类」「文本二次编辑」「多维分页」等业务概念。
+ *   2) **插件领域层**（本文件）：
+ *      在插件自身的 `kv/annotations.json`（经 `ms.store.readJson/writeJson` 持久化，随 `.msbackup` 备份）
+ *      中独立维护每条记录的 `{ favorite, category, editedText }`，并在启动时一次性接管历史版本迁移文件
+ *      `annotations.legacy`；所有标签切换、分类聚合、编辑草稿与分页均由插件自主完成。
+ *   3) **通用热键通道**：通过 `ms.shortcuts.get("clipboard") / set("clipboard", combo)` 读写全局快捷键。
  */
 (function (ms, env, plugin, host, keyword, inputValue, onSubKeyword, md2html, openExternal) {
   "use strict";
 
   /* ======================= 常量 ======================= */
 
-  /** 图片缩略图并发上限：一次别把几十张图全读进来（每张都是完整 PNG 的 base64） */
   var THUMB_CONCURRENCY = 4;
+  var PAGE_SIZE = 30;
+  var MAX_TEXT_CHARS = 100000;
+  var ANNOTATIONS_KEY = "annotations";
+  var LEGACY_ANNOTATIONS_KEY = "annotations.legacy";
 
   /* ======================= DOM ======================= */
   var dom = {};
   ["cb-status", "cb-meta", "cb-list", "cb-empty", "cb-empty-text", "cb-empty-key",
    "cb-search", "cb-refresh", "cb-clear", "cb-hotkey-btn", "cb-hotkey-clear",
-   "cb-viewer", "cb-viewer-img", "cb-viewer-name", "cb-tabs", "cb-fav-count",
-   "cb-cats", "cb-cat-options"].forEach(function (id) {
+   "cb-viewer", "cb-viewer-img", "cb-viewer-name", "cb-viewer-close", "cb-viewer-copy",
+   "cb-tabs", "cb-fav-count", "cb-cats", "cb-cat-options"].forEach(function (id) {
     dom[id] = document.getElementById(id);
   });
-  /** 本实例根节点：会话被宿主「保活」后旧实例仍在内存里，靠它判活（别打扰新实例） */
   var rootEl = document.getElementById("app");
 
-  /** 每页条数（触底加载更多每次追加这么多） */
-  var PAGE_SIZE = 30;
-
   /* ======================= 状态 ======================= */
-  /** 已加载的条目（宿主已按时间从新到旧排序；跨页累积） */
+  /** 当前过滤条件下已展示的条目（跨页累积，从新到旧） */
   var items = [];
-  /** 当前过滤条件下的**总条数**（由宿主返回，非已加载数） */
+  /** 最近一次从宿主拉回并合并完插件注解的全量条目（从新到旧） */
+  var allMerged = [];
+  /** 当前过滤条件下的总条数 */
   var total = 0;
-  /** 是否还有下一页（触底加载的依据） */
+  /** 是否还有下一页 */
   var hasMore = false;
-  /** 收藏总条数（供「收藏」标签徽标；单独向宿主取，与当前页无关） */
+  /** 收藏总条数（供「收藏」标签徽标） */
   var favTotal = 0;
   /** 当前搜索词 */
   var query = "";
@@ -78,36 +53,38 @@
   var filter = "all";
   /** 当前选中的分类（null = 不按分类筛选；只在「全部」标签下生效） */
   var activeCategory = null;
-  /** 现有分类及各自条目数（由宿主 list() 聚合；只用于分类栏展示） */
+  /** 现有分类及各自条目数 */
   var categories = [];
-  /** 正在行内编辑的条目 id（null = 无）。编辑态在 render() 里体现：
-   *  该行换成 textarea + 保存/取消，其余行照旧。 */
+  /** 正在行内编辑的条目 id（null = 无） */
   var editingId = null;
-  /** 正在编辑分类的条目 id（null = 无）。与 editingId 互斥。 */
+  /** 正在编辑分类的条目 id（null = 无） */
   var categorizingId = null;
-  /** 分类编辑草稿：与 editDraft 同理，宿主事件重建列表时回填，避免冲掉输入。 */
+  /** 分类编辑草稿 */
   var categoryDraft = "";
-  /** 编辑中的草稿文本。render() 会用 innerHTML 重建列表、textarea 随之失效，
-   *  所以把当前输入暂存到这里，重建后回填——否则宿主每广播一次
-   *  clipboard-updated（复制任何东西都会）就会冲掉用户正敲的字。 */
+  /** 编辑中的草稿文本（防自动刷新重建列表冲掉正敲的字） */
   var editDraft = "";
   /** 正在刷新/加载（防重入） */
   var loading = false;
-  /** 待重扫标记：刷新中又有新事件时，等这轮结束再补一次 */
+  /** 待重扫标记 */
   var pendingReload = false;
   /** 大图预览当前项 */
   var viewerItem = null;
-  /** 缩略图缓存：relPath → dataUrl（避免重复读同一张） */
+  /** 缩略图缓存：relPath → dataUrl */
   var thumbCache = {};
+
+  /**
+   * 插件领域注解表：`id -> { favorite?: boolean, category?: string, editedText?: string }`。
+   * 权威持久化在 `ms.store.readJson("annotations")`。
+   */
+  var annotations = Object.create(null);
+  var annotationsLoadedPromise = null;
 
   /* ======================= 小工具 ======================= */
 
-  /** 当前视图是否还活着（宿主关闭视图 / 换插件后旧实例要停止动作） */
   function alive() {
     return !!rootEl && rootEl.isConnected;
   }
 
-  /** 写状态行（只放异常/过程消息；成功后清空并整行隐藏，不留空行） */
   function setStatus(text, isError) {
     if (!dom["cb-status"]) return;
     if (!text) {
@@ -121,21 +98,18 @@
     dom["cb-status"].classList.toggle("error", !!isError);
   }
 
-  /** 错误对象 → 可读文本（宿主抛的是带中文 message 的 Error） */
   function errorText(e) {
     if (!e) return "未知错误";
     return String(e.message || e);
   }
 
-  /** 毫秒时间戳 → 本地「MM-DD HH:mm」 */
-  function formatTime(ms) {
-    var d = new Date(Number(ms) || 0);
+  function formatTime(ts) {
+    var d = new Date(Number(ts) || 0);
     if (isNaN(d.getTime())) return "";
     function p(n) { return (n < 10 ? "0" : "") + n; }
     return p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " + p(d.getHours()) + ":" + p(d.getMinutes());
   }
 
-  /** 字节数 → 人类可读（图片尺寸行用） */
   function formatBytes(n) {
     var v = Number(n) || 0;
     if (v < 1024) return v + " B";
@@ -143,7 +117,6 @@
     return (v / 1024 / 1024).toFixed(1) + " MB";
   }
 
-  /** 把「ctrl+alt+v」转为展示形态「Ctrl+Alt+V」 */
   function prettyShortcut(key) {
     return String(key || "")
       .split("+")
@@ -155,7 +128,6 @@
       .join("+");
   }
 
-  /** 转义 HTML（文本历史直接渲染，必须防注入） */
   function escapeHtml(s) {
     return String(s == null ? "" : s)
       .replace(/&/g, "&amp;")
@@ -165,9 +137,237 @@
       .replace(/'/g, "&#39;");
   }
 
+  /**
+   * 文本编辑归一化（与宿主捕获侧 `normalize_captured_text` 同口径）：
+   * 剥掉尾部 `\r\n`、拒绝纯空白、按 Unicode 码点截断至 `MAX_TEXT_CHARS`（绝不切碎多字节字符）。
+   */
+  function normalizeEditText(raw) {
+    var s = String(raw == null ? "" : raw).replace(/[\r\n]+$/, "");
+    if (!s.trim()) return null;
+    var cps = Array.from(s);
+    if (cps.length > MAX_TEXT_CHARS) {
+      return cps.slice(0, MAX_TEXT_CHARS).join("");
+    }
+    return s;
+  }
+
+  /** UTF-8 字节数（与 Rust `content.len()` 同口径） */
+  function utf8Len(s) {
+    if (typeof TextEncoder === "function") {
+      try { return new TextEncoder().encode(s).length; } catch (e) { /* fallback */ }
+    }
+    var encoded = encodeURIComponent(s);
+    var percent = 0;
+    for (var i = 0; i < encoded.length; i++) {
+      if (encoded.charAt(i) === "%") percent++;
+    }
+    return encoded.length - 2 * percent;
+  }
+
+  /* ======================= 领域存储与保留集同步 ======================= */
+
+  function readStoreJson(key) {
+    if (ms.store && typeof ms.store.readJson === "function") {
+      return Promise.resolve(ms.store.readJson(key, null));
+    }
+    if (ms.store && typeof ms.store.get === "function") {
+      return Promise.resolve(ms.store.get(key, null));
+    }
+    return Promise.resolve(null);
+  }
+
+  function writeStoreJson(key, val) {
+    if (ms.store && typeof ms.store.writeJson === "function") {
+      return Promise.resolve(ms.store.writeJson(key, val));
+    }
+    if (ms.store && typeof ms.store.set === "function") {
+      return Promise.resolve(ms.store.set(key, val));
+    }
+    return Promise.resolve(false);
+  }
+
+  function removeStoreJson(key) {
+    if (ms.store && typeof ms.store.removeJson === "function") {
+      return Promise.resolve(ms.store.removeJson(key));
+    }
+    if (ms.store && typeof ms.store.remove === "function") {
+      return Promise.resolve(ms.store.remove(key));
+    }
+    return Promise.resolve(false);
+  }
+
+  function sanitizeAnnotationEntry(raw) {
+    if (!raw || typeof raw !== "object") return null;
+    var fav = raw.favorite === true;
+    var cat = typeof raw.category === "string" ? raw.category.replace(/\s+/g, " ").trim().slice(0, 24) : "";
+    var edt = typeof raw.editedText === "string" ? raw.editedText : undefined;
+    if (!fav && !cat && edt === undefined) return null;
+    var out = {};
+    if (fav) out.favorite = true;
+    if (cat) out.category = cat;
+    if (edt !== undefined) out.editedText = edt;
+    return out;
+  }
+
+  /** 计算当前需要宿主豁免环形缓冲淘汰的记录 ID 集合（已收藏或已归类） */
+  function retainedIdsOfAnnotations() {
+    var ids = [];
+    var keys = Object.keys(annotations);
+    for (var i = 0; i < keys.length; i++) {
+      var id = keys[i];
+      var a = annotations[id];
+      if (a && (a.favorite === true || (typeof a.category === "string" && a.category.length > 0))) {
+        ids.push(id);
+      }
+    }
+    return ids;
+  }
+
+  function syncRetainedToHost() {
+    if (typeof ms.clipboard?.setRetained !== "function") return Promise.resolve();
+    return Promise.resolve(ms.clipboard.setRetained(retainedIdsOfAnnotations()))
+      .catch(function () { /* 非关键路径不阻塞界面 */ });
+  }
+
+  function persistAnnotationsAndSync() {
+    var plain = {};
+    var keys = Object.keys(annotations);
+    for (var i = 0; i < keys.length; i++) {
+      var cleaned = sanitizeAnnotationEntry(annotations[keys[i]]);
+      if (cleaned) {
+        annotations[keys[i]] = cleaned;
+        plain[keys[i]] = cleaned;
+      } else {
+        delete annotations[keys[i]];
+      }
+    }
+    return writeStoreJson(ANNOTATIONS_KEY, plain).then(function () {
+      return syncRetainedToHost();
+    });
+  }
+
+  /**
+   * 首次加载插件注解，并自动接管宿主从旧版 `index.json` 剥离出的 `annotations.legacy`。
+   */
+  function ensureAnnotationsLoaded() {
+    if (annotationsLoadedPromise) return annotationsLoadedPromise;
+    annotationsLoadedPromise = Promise.all([
+      readStoreJson(ANNOTATIONS_KEY).catch(function () { return null; }),
+      readStoreJson(LEGACY_ANNOTATIONS_KEY).catch(function () { return null; }),
+    ]).then(function (pair) {
+      var saved = pair[0];
+      var legacy = pair[1];
+      var nextMap = Object.create(null);
+
+      if (saved && typeof saved === "object") {
+        Object.keys(saved).forEach(function (id) {
+          var c = sanitizeAnnotationEntry(saved[id]);
+          if (c) nextMap[id] = c;
+        });
+      }
+
+      var migrated = false;
+      if (legacy && typeof legacy === "object") {
+        Object.keys(legacy).forEach(function (id) {
+          var leg = sanitizeAnnotationEntry(legacy[id]);
+          if (!leg) return;
+          var cur = nextMap[id] || {};
+          nextMap[id] = sanitizeAnnotationEntry({
+            favorite: cur.favorite === true || leg.favorite === true,
+            category: cur.category || leg.category || "",
+            editedText: cur.editedText,
+          });
+          migrated = true;
+        });
+      }
+
+      annotations = nextMap;
+      if (migrated) {
+        return persistAnnotationsAndSync().then(function () {
+          return removeStoreJson(LEGACY_ANNOTATIONS_KEY).catch(function () {});
+        });
+      }
+      return syncRetainedToHost();
+    });
+    return annotationsLoadedPromise;
+  }
+
+  function setItemAnnotation(id, patch) {
+    var prev = annotations[id] ? Object.assign({}, annotations[id]) : null;
+    var merged = Object.assign({}, prev || {}, patch);
+    var cleaned = sanitizeAnnotationEntry(merged);
+    if (cleaned) annotations[id] = cleaned;
+    else delete annotations[id];
+    return {
+      commit: function () { return persistAnnotationsAndSync(); },
+      rollback: function () {
+        if (prev) annotations[id] = prev;
+        else delete annotations[id];
+      },
+    };
+  }
+
+  /** 将宿主原始捕获项与插件领域注解合并为视图模型 */
+  function enrichItem(raw) {
+    var ann = annotations[raw.id] || null;
+    var isText = raw.kind === "text";
+    var hasEdited = isText && ann && typeof ann.editedText === "string";
+    var effectiveText = hasEdited ? ann.editedText : raw.text;
+    return {
+      id: raw.id,
+      kind: raw.kind,
+      rawText: raw.text,
+      text: effectiveText,
+      edited: !!hasEdited,
+      relPath: raw.relPath,
+      width: raw.width,
+      height: raw.height,
+      size: hasEdited ? utf8Len(effectiveText) : raw.size,
+      createdAt: raw.createdAt,
+      source: raw.source,
+      favorite: !!(ann && ann.favorite === true),
+      category: ann && ann.category ? ann.category : undefined,
+    };
+  }
+
+  /** 根据最新全量列表重算统计徽标、分类栏与过滤结果 */
+  function recomputeStatsAndFiltered() {
+    var favCount = 0;
+    var catMap = Object.create(null);
+    for (var i = 0; i < allMerged.length; i++) {
+      var it = allMerged[i];
+      if (it.favorite === true) favCount++;
+      if (it.category) {
+        if (!catMap[it.category]) catMap[it.category] = { name: it.category, count: 0 };
+        catMap[it.category].count++;
+      }
+    }
+    favTotal = favCount;
+    categories = Object.keys(catMap).map(function (k) { return catMap[k]; });
+    categories.sort(function (a, b) { return a.name.localeCompare(b.name, "zh-Hans-CN"); });
+    if (activeCategory && !catMap[activeCategory]) {
+      activeCategory = null;
+    }
+
+    var needle = String(query || "").trim().toLowerCase();
+    var filtered = [];
+    for (var j = 0; j < allMerged.length; j++) {
+      var row = allMerged[j];
+      if (filter === "fav" && row.favorite !== true) continue;
+      if (filter === "all" && activeCategory && row.category !== activeCategory) continue;
+      if (needle) {
+        var hay = row.kind === "text"
+          ? String(row.text || "").toLowerCase()
+          : String(row.source || "").toLowerCase();
+        if (hay.indexOf(needle) < 0) continue;
+      }
+      filtered.push(row);
+    }
+    return filtered;
+  }
+
   /* ======================= 列表渲染 ======================= */
 
-  /** 单条的历史展示文案（文本预览 / 图片来源行） */
   function itemSubline(it) {
     if (it.kind === "image") {
       var dim = (it.width && it.height) ? (it.width + "×" + it.height + " · ") : "";
@@ -177,12 +377,10 @@
     return chars + " 字 · " + formatTime(it.createdAt);
   }
 
-  /** 当前标签下已在内存里的条目（Rust 侧已按标签过滤，这里直接返回） */
   function visibleItems() {
     return items;
   }
 
-  /** 同步标签高亮与收藏计数徽标 */
   function renderTabs() {
     var tabs = dom["cb-tabs"];
     if (tabs) {
@@ -193,19 +391,11 @@
     }
     var badge = dom["cb-fav-count"];
     if (badge) {
-      // favTotal 由宿主单独统计（收藏可能不在当前已加载页里，不能靠 items 数）
       badge.textContent = favTotal > 0 ? String(favTotal) : "";
       badge.hidden = favTotal === 0;
     }
   }
 
-  /**
-   * 渲染「全部」标签下方的分类栏。
-   *
-   * 只在 filter === "all" 且有分类时出现；切换标签后分类栏隐藏（收藏视图里
-   * 再露一排分类会让人误以为分类与收藏是同一维度）。
-   * 点当前分类可取消筛选（再点一次 = 返回全部）。
-   */
   function renderCategories() {
     var box = dom["cb-cats"];
     if (!box) return;
@@ -228,7 +418,6 @@
     box.innerHTML = html;
     box.hidden = false;
 
-    // 分类输入框的候选（datalist 必须挂在文档里，各编辑框用 list= 引用）
     if (dom["cb-cat-options"]) {
       dom["cb-cat-options"].innerHTML = categories.map(function (c) {
         return '<option value="' + escapeHtml(c.name) + '"></option>';
@@ -236,36 +425,6 @@
     }
   }
 
-  /**
-   * 从宿主全量列表聚合分类（名称 + 条数）。
-   *
-   * 只读、失败静默：分类栏是锦上添花，读不到也不该影响主列表。
-   * 分类数据在 Rust 索引里，因此这里用 list() 一次拿全（最多几百条，可接受）。
-   */
-  function refreshCategories() {
-    if (typeof ms.clipboard?.list !== "function") {
-      categories = [];
-      renderCategories();
-      return Promise.resolve();
-    }
-    return Promise.resolve(ms.clipboard.list())
-      .then(function (list) {
-        if (!alive()) return;
-        var map = Object.create(null);
-        (Array.isArray(list) ? list : []).forEach(function (it) {
-          var name = it && typeof it.category === "string" ? it.category.trim() : "";
-          if (!name) return;
-          if (!map[name]) map[name] = { name: name, count: 0 };
-          map[name].count++;
-        });
-        categories = Object.keys(map).map(function (k) { return map[k]; });
-        categories.sort(function (a, b) { return a.name.localeCompare(b.name, "zh-Hans-CN"); });
-        renderCategories();
-      })
-      .catch(function () { /* 分类栏读失败不影响列表 */ });
-  }
-
-  /** 渲染整个列表 */
   function render() {
     var list = dom["cb-list"];
     var empty = dom["cb-empty"];
@@ -280,7 +439,6 @@
       if (!total) {
         dom["cb-meta"].textContent = "";
       } else {
-        // 显示「已加载 / 总数」，让用户知道还有多少没滚出来
         var prefix = filter === "fav" ? "收藏 " : (activeCategory ? "分类「" + activeCategory + "」 " : "共 ");
         var text = prefix + total + " 条";
         if (shown.length < total) text += "（已显示 " + shown.length + "）";
@@ -299,7 +457,7 @@
           else dom["cb-empty-text"].textContent = "还没有剪贴板历史。";
         }
       }
-      if (dom["cb-clear"]) dom["cb-clear"].disabled = true;
+      if (dom["cb-clear"]) dom["cb-clear"].disabled = allMerged.length === 0;
       return;
     }
     if (empty) empty.hidden = true;
@@ -309,14 +467,10 @@
     for (var i = 0; i < shown.length; i++) {
       html += itemHtml(shown[i]);
     }
-    // 底部哨兵：触底加载更多时显示「加载中… / 已全部加载」
     html += '<div id="cb-sentinel" class="cb-sentinel">' +
       (hasMore ? "加载中…" : "已全部加载") + "</div>";
     list.innerHTML = html;
 
-    // 编辑中：innerHTML 重建会换掉 textarea 节点，焦点与光标位置随之丢失。
-    // 这里补一次聚焦并把光标放回末尾——宿主每广播一次 clipboard-updated
-    // （复制任何东西都会）就会走到这里，不补的话用户敲几个字就得重点一次。
     if (editingId) {
       var ta = editBoxOf(editingId);
       if (ta) {
@@ -327,7 +481,6 @@
       }
     }
 
-    // 分类编辑中：同上，重建后补聚焦，否则宿主广播一次刷新就得重点
     if (categorizingId) {
       var catBox = catBoxOf(categorizingId);
       if (catBox) {
@@ -337,26 +490,10 @@
       }
     }
 
-    // 图片缩略图懒加载（并发受限）
     loadVisibleThumbs();
-
-    // 重排后哨兵位置可能变化，重新评估一次是否需要继续加载
     scheduleSentinelCheck();
   }
 
-  /**
-   * 单条目的 HTML。
-   *
-   * 三种形态：
-   *   1) **编辑态**（`editingId === it.id`）：该行换成 textarea + 保存/取消，
-   *      不再显示「★/复制/删除」——避免编辑中误触其它动作把行删了。
-   *   2) **分类态**（`categorizingId === it.id`）：换成分类输入框 + 保存/取消。
-   *   3) **普通态**：原样展示，动作按钮 `★  复制  [编辑]  分类  删除`。
-   *
-   * 「编辑」按钮只在**已收藏的文本**上出现：图片没有可编辑的文本形态，
-   * 未收藏条目是临时噪音、按产品定义不值得整理（见 3c 的 startEdit 注释）。
-   * 「分类」按钮对所有条目开放（文本/图片、收藏/未收藏都能分类）。
-   */
   function itemHtml(it) {
     var isImg = it.kind === "image";
     var isFav = it.favorite === true;
@@ -374,12 +511,10 @@
     var sourceLine = it.source
       ? '<div class="cb-item-sub">' + escapeHtml(it.source) + "</div>"
       : "";
-    // 分类徽标：分类是宿主索引里的字段，重渲染后仍在
     var catLine = it.category
       ? '<div class="cb-item-sub"><span class="cb-item-cat" title="已分类（永久保留）">分类：' +
         escapeHtml(it.category) + "</span></div>"
       : "";
-    // 「编辑」只在收藏的文本条目上出现
     var editBtn = (!isImg && isFav)
       ? '<button class="cb-item-btn" data-act="edit" title="修改这条收藏的内容">编辑</button>'
       : "";
@@ -387,8 +522,6 @@
     return (
       '<div class="cb-item" data-id="' + escapeHtml(it.id) + '" data-kind="' + escapeHtml(it.kind) + '"' +
         (it.relPath ? ' data-rel-path="' + escapeHtml(it.relPath) + '"' : "") + ">" +
-        // 图片：左侧独立的缩略图区（点击放大前就能在列表里看到预览）；
-        // 文本：保留原来的「文本/图片」类型小标。
         (isImg
           ? '<div class="cb-item-thumb" data-thumb="' + escapeHtml(it.relPath) + '">图片</div>'
           : '<div class="cb-item-kind">文本</div>') +
@@ -409,12 +542,6 @@
       "</div>");
   }
 
-  /**
-   * 分类编辑态那一行的 HTML：输入框 + 保存/取消。
-   *
-   * 与编辑态同理：内容回填 `categoryDraft`，宿主事件重写列表时不会冲掉输入。
-   * 留空并保存 = 取消分类（该条恢复成可被上限淘汰的临时条目）。
-   */
   function categoryRowHtml(it, isImg) {
     return (
       '<div class="cb-item cb-item-categorizing" data-id="' + escapeHtml(it.id) + '"' +
@@ -434,16 +561,6 @@
       "</div>");
   }
 
-  /**
-   * 编辑态那一行的 HTML：textarea + 保存/取消。
-   *
-   * 内容回填 `editDraft` 而不是 `it.text`——列表会被宿主事件触发重建
-   * （复制任何东西都会广播 clipboard-updated → reload → innerHTML 重写），
-   * 用草稿才能不让用户正敲的字被冲掉。
-   *
-   * textarea 内容走 `escapeHtml`——它转义 `& < > " '`，在 RCDATA 里既能防
-   * 注入，读 `.value` 时又会被浏览器还原成原字符（不会重复转义）。
-   */
   function editRowHtml(it, isImg) {
     return (
       '<div class="cb-item cb-item-editing" data-id="' + escapeHtml(it.id) + '"' +
@@ -462,20 +579,12 @@
       "</div>");
   }
 
-  /** 为列表里的图片项按并发上限加载缩略图。
-   *
-   *  **必须先回填缓存，再加载新图**：`render()` 每次都用 innerHTML 整块重建
-   *  列表，旧的 `<img>` 节点随之销毁；若只加载「未缓存」的图，已缓存过的图
-   *  在重渲染后就再也不会被填回 DOM，永远停在「图片」占位——复制任何东西
-   *  （宿主广播 clipboard-updated）、切标签、刷新都会触发一次重渲染，所以这个
-   *  问题在真实使用中几乎必然出现。 */
   function loadVisibleThumbs() {
     var pending = [];
     for (var i = 0; i < items.length; i++) {
       var it = items[i];
       if (it.kind !== "image" || !it.relPath) continue;
       if (thumbCache[it.relPath]) {
-        // 已读过：直接把缓存填回刚重建出来的占位节点（幂等）
         applyThumb(it.relPath, thumbCache[it.relPath]);
         continue;
       }
@@ -493,13 +602,12 @@
           thumbCache[rel] = dataUrl;
           applyThumb(rel, dataUrl);
         })
-        .catch(function () { /* 单张读失败不影响其它 */ })
+        .catch(function () {})
         .then(worker);
     }
     for (var w = 0; w < Math.min(THUMB_CONCURRENCY, pending.length); w++) worker();
   }
 
-  /** 把读到的缩略图填进对应条目的占位块（按 data-thumb 精确定位） */
   function applyThumb(rel, dataUrl) {
     var list = dom["cb-list"];
     if (!list) return;
@@ -508,23 +616,15 @@
     node.innerHTML = '<img alt="" src="' + dataUrl + '">';
   }
 
-  /** CSS.escape 兜底（老 WebView 可能没有） */
   function cssEscape(s) {
     if (window.CSS && typeof window.CSS.escape === "function") return window.CSS.escape(s);
     return String(s).replace(/["\\]/g, "\\$&");
   }
 
   /* ======================= 触底加载（自动无限滚） ======================= */
-  //
-  // 用 IntersectionObserver 监听列表底部的哨兵节点：当它进入视口（或接近视口）
-  // 就加载下一页。相比监听 scroll 事件，它由浏览器在合成层判断，不受插件视图
-  // 高度/滚动容器变化影响，且不产生滚动回调的开销。
-  //
-  // 注意：插件的滚动容器是 `.cb-app` 自身（宿主给它固定 max-height + overflow-y），
-  // 因此 `root` 传该元素，`rootMargin` 留一点提前量，滚到距底 ~120px 就预加载。
+
   var sentinelObserver = null;
 
-  /** 确保观察器存在（懒创建，且只创建一次） */
   function ensureSentinelObserver() {
     if (sentinelObserver || typeof IntersectionObserver !== "function") return;
     var scroller = document.querySelector(".cb-app");
@@ -536,17 +636,9 @@
     }, { root: scroller || null, rootMargin: "0px 0px 120px 0px", threshold: 0 });
   }
 
-  /**
-   * 重新把哨兵挂到观察器上。
-   *
-   * 每次 render() 都会重建列表 DOM，旧哨兵节点被替换，观察器必须重新绑定；
-   * 另外首屏若一页没填满视口（无可滚动区域），IntersectionObserver 不会触发，
-   * 这里用一次手动检查兜底，避免「列表明明还有更多却卡住」。
-   */
   function scheduleSentinelCheck() {
     ensureSentinelObserver();
     if (!sentinelObserver) {
-      // 极老 WebView 没有 IntersectionObserver：退回滚动事件监听
       bindScrollFallback();
       return;
     }
@@ -556,7 +648,6 @@
     sentinelObserver.observe(sentinel);
   }
 
-  /** 无 IntersectionObserver 时的兜底：监听 .cb-app 滚动，接近底部就加载 */
   var scrollFallbackBound = false;
   function bindScrollFallback() {
     if (scrollFallbackBound) return;
@@ -569,67 +660,46 @@
     });
   }
 
-  /* ======================= 数据加载（分页） ======================= */
+  /* ======================= 数据加载与本地分页 ======================= */
 
-  /** 宿主的「分页」能力是否可用（老宿主只有 list，用它兜底） */
-  function canPage() {
-    return typeof ms.clipboard?.page === "function";
-  }
-
-  /**
-   * 拉取「第 offset 条起的一页」。
-   *
-   * 有 `page` 能力时走真分页（宿主在**过滤之后**再切片，返回 total/hasMore）；
-   * 老宿主没有该命令时退回 list()：一次拿全量，前端自己切，
-   * 保证功能在旧宿主上也能用（只是没有服务端分页的内存收益）。
-   */
-  function fetchPage(offset, limit) {
-    if (canPage()) {
-      return Promise.resolve(ms.clipboard.page({
-        query: query,
-        favoriteOnly: filter === "fav",
-        category: activeCategory || undefined,
-        offset: offset,
-        limit: limit,
-      })).then(function (p) {
-        p = p || {};
-        return {
-          items: Array.isArray(p.items) ? p.items : [],
-          total: Number(p.total) || 0,
-          hasMore: !!p.hasMore,
-        };
+  /** 拉取原始捕获列表并与插件领域注解合并 */
+  function fetchMergedAll() {
+    return ensureAnnotationsLoaded().then(function () {
+      return Promise.resolve(ms.clipboard.list());
+    }).then(function (rawList) {
+      var arr = Array.isArray(rawList) ? rawList : [];
+      var aliveIds = Object.create(null);
+      allMerged = arr.map(function (r) {
+        aliveIds[r.id] = true;
+        return enrichItem(r);
       });
-    }
-    // 兜底：老宿主 list() 返回全量数组，本地过滤 + 切片
-    return Promise.resolve(ms.clipboard.list(query)).then(function (list) {
-      var all = Array.isArray(list) ? list : [];
-      if (filter === "fav") all = all.filter(function (it) { return it.favorite === true; });
-      if (activeCategory) {
-        all = all.filter(function (it) { return (it.category || "") === activeCategory; });
+      // 顺手清掉已被宿主删除/淘汰记录的孤儿注解，避免长期使用产生残留键
+      var dirty = false;
+      Object.keys(annotations).forEach(function (id) {
+        if (!aliveIds[id]) {
+          delete annotations[id];
+          dirty = true;
+        }
+      });
+      if (dirty) {
+        persistAnnotationsAndSync().catch(function () {});
       }
-      var page = all.slice(offset, offset + limit);
-      return {
-        items: page,
-        total: all.length,
-        hasMore: offset + page.length < all.length,
-      };
+      return recomputeStatsAndFiltered();
     });
   }
 
-  /** 重新从第一页拉取（搜索词 / 标签变化、删除、清空、外部更新后调用） */
   function reload(showStatus, q) {
     if (typeof q === "string") query = q;
     if (loading) { pendingReload = true; return; }
     loading = true;
     if (showStatus) setStatus("正在刷新…");
 
-    Promise.all([fetchPage(0, PAGE_SIZE), fetchFavoriteTotal(), refreshCategories()])
-      .then(function (res) {
+    fetchMergedAll()
+      .then(function (filtered) {
         if (!alive()) return;
-        var page = res[0];
-        items = page.items;
-        total = page.total;
-        hasMore = page.hasMore;
+        total = filtered.length;
+        items = filtered.slice(0, PAGE_SIZE);
+        hasMore = items.length < total;
         render();
         if (showStatus) setStatus("");
       })
@@ -646,64 +716,51 @@
       });
   }
 
-  /**
-   * 触底加载下一页（追加到现有列表，不闪、不清空）。
-   *
-   * 用 `loading` 防重入：滚动事件会高频触发，同一时刻只允许一页在途。
-   */
   function loadMore() {
     if (loading || !hasMore) return;
-    loading = true;
-    Promise.resolve(fetchPage(items.length, PAGE_SIZE))
-      .then(function (page) {
-        if (!alive()) return;
-        items = items.concat(page.items);
-        total = page.total;
-        hasMore = page.hasMore;
-        render();
-      })
-      .catch(function (e) {
-        if (!alive()) return;
-        setStatus("加载更多失败：" + errorText(e), true);
-      })
-      .then(function () { loading = false; });
+    var filtered = recomputeStatsAndFiltered();
+    var nextSlice = filtered.slice(items.length, items.length + PAGE_SIZE);
+    items = items.concat(nextSlice);
+    total = filtered.length;
+    hasMore = items.length < total;
+    render();
   }
 
-  /** 取收藏总数（仅用于「收藏」标签徽标；失败不影响主流程） */
-  function fetchFavoriteTotal() {
-    if (!canPage()) {
-      // 老宿主：从 list() 全量里数
-      return Promise.resolve(ms.clipboard.list())
-        .then(function (list) {
-          var n = 0;
-          (Array.isArray(list) ? list : []).forEach(function (it) { if (it.favorite) n++; });
-          favTotal = n;
-        })
-        .catch(function () { /* 忽略 */ });
-    }
-    return Promise.resolve(ms.clipboard.page({ favoriteOnly: true, offset: 0, limit: 1 }))
-      .then(function (p) { favTotal = Number(p && p.total) || 0; })
-      .catch(function () { /* 忽略 */ });
+  function loadFirstPageQuiet() {
+    if (loading) { pendingReload = true; return; }
+    loading = true;
+    fetchMergedAll()
+      .then(function (filtered) {
+        if (!alive()) return;
+        total = filtered.length;
+        items = filtered.slice(0, PAGE_SIZE);
+        hasMore = items.length < total;
+        render();
+      })
+      .catch(function () {})
+      .then(function () { loading = false; });
   }
 
   /* ======================= 条目操作 ======================= */
 
-  /** 复制某条到系统剪贴板（用户点击触发；这是唯一会写剪贴板的路径）。
-   *
-   *  成功在右上角弹一条轻量的「已复制」提示（走宿主 ui.toast）：复制是高频动作，
-   *  用右上角浮层而非底部状态条，既给明确反馈又不会一直顶着状态区；
-   *  失败仍要报错——那是用户需要知道、否则会以为复制成功的事。 */
   function copyItem(it) {
-    Promise.resolve(ms.clipboard.copy(it.id))
+    // 若用户对收藏文本做过二次编辑，复制时把编辑后的文本传给宿主 `copy(id, textOverride)`
+    var override = (it.kind === "text" && it.edited && typeof it.text === "string")
+      ? it.text
+      : undefined;
+    Promise.resolve(
+      override !== undefined
+        ? ms.clipboard.copy(it.id, override)
+        : ms.clipboard.copy(it.id)
+    )
       .then(function () {
         if (ms.ui && typeof ms.ui.toast === "function") {
-          try { ms.ui.toast("已复制", "ok"); } catch (e) { /* 浮层失败不阻塞主流程 */ }
+          try { ms.ui.toast("已复制", "ok"); } catch (e) {}
         }
       })
       .catch(function (e) { setStatus("复制失败：" + errorText(e), true); });
   }
 
-  /** 删除某条（先确认） */
   function removeItem(it) {
     var label = it.kind === "image" ? "这张图片" : "这条文本";
     Promise.resolve(ms.ui && ms.ui.confirm ? ms.ui.confirm("删除" + label + "？") : true)
@@ -712,9 +769,10 @@
         return Promise.resolve(ms.clipboard.remove(it.id));
       })
       .then(function (r) {
-        if (r === null) return; // 用户取消
+        if (r === null) return;
+        delete annotations[it.id];
+        persistAnnotationsAndSync().catch(function () {});
         if (viewerItem && viewerItem.id === it.id) closeViewer();
-        // 删掉的正是正在编辑的那行：清掉行内编辑态，别让 render() 找不到目标行
         if (categorizingId === it.id) categorizingId = null;
         if (editingId === it.id) editingId = null;
         reload(false);
@@ -722,20 +780,7 @@
       .catch(function (e) { setStatus("删除失败：" + errorText(e), true); });
   }
 
-  /** 收藏 / 取消收藏某条。
-   *
-   *  先弹确认框（收藏 / 取消收藏都要确认），确认后才本地切换并重渲染
-   *  （即时反馈），再通知宿主落盘；失败则回滚。
-   *  成功后不弹状态提示；宿主保存后也会广播 clipboard-updated，重拉的列表
-   *  与本地状态一致。
-   *
-   *  计数维护：收藏数加减 1；在「收藏」标签下取消收藏会把该条从当前列表移除，
-   *  否则会出现「已取消收藏却还留在收藏列表里」的错觉。 */
   function toggleFavorite(it) {
-    if (typeof ms.clipboard?.setFavorite !== "function") {
-      setStatus("当前宿主版本不支持收藏，请升级", true);
-      return;
-    }
     var next = !(it.favorite === true);
     var ask = next
       ? "收藏这条内容？收藏后不会被上限淘汰，清空时也会保留。"
@@ -743,26 +788,25 @@
     Promise.resolve(ms.ui && ms.ui.confirm ? ms.ui.confirm(ask) : true)
       .then(function (ok) {
         if (ok === false) return null;
+        var tx = setItemAnnotation(it.id, { favorite: next });
         it.favorite = next;
-        favTotal = Math.max(0, favTotal + (next ? 1 : -1));
+        var mergedTarget = findInAllMerged(it.id);
+        if (mergedTarget) mergedTarget.favorite = next;
+        var filtered = recomputeStatsAndFiltered();
         if (filter === "fav" && !next) {
-          // 收藏标签下取消收藏：从列表移除该条，并递减总数
           items = items.filter(function (x) { return x.id !== it.id; });
-          total = Math.max(0, total - 1);
         }
-        // 编辑态边界：不收藏了就不该还能编辑——若正在编辑这一行，先退出编辑态，
-        // 否则 render() 会把 textarea 换成只读预览，用户敲的字凭空消失。
+        total = filtered.length;
+        hasMore = items.length < total;
         if (editingId === it.id) editingId = null;
         render();
-        return Promise.resolve(ms.clipboard.setFavorite(it.id, next));
-      })
-      .then(function (r) {
-        if (r === null) return; // 用户取消：不动
+        return tx.commit().catch(function (err) {
+          tx.rollback();
+          throw err;
+        });
       })
       .catch(function (e) {
-        // 回滚：把标记与计数改回去，避免界面与磁盘不一致
         it.favorite = !next;
-        favTotal = Math.max(0, favTotal + (next ? -1 : 1));
         loadFirstPageQuiet();
         setStatus((next ? "收藏失败：" : "取消收藏失败：") + errorText(e), true);
       });
@@ -770,17 +814,10 @@
 
   /* ======================= 条目编辑（仅收藏的文本） ======================= */
 
-  /**
-   * 进入某条的行内编辑态。
-   *
-   * 只对**已收藏的文本**开放：图片没有可编辑的文本形态；未收藏条目是临时
-   * 噪音，按产品定义不值得整理（要整理先收藏）。按钮本就不在这两类条目上
-   * 渲染，这里再兜一层，防止别处误调。
-   */
   function startEdit(it) {
-    if (editingId === it.id) return;                 // 已在编辑这一行：不重渲染（会打断输入）
+    if (editingId === it.id) return;
     if (it.kind !== "text" || it.favorite !== true) return;
-    categorizingId = null;                            // 与分类编辑互斥
+    categorizingId = null;
     categoryDraft = "";
     editingId = it.id;
     editDraft = it.text || "";
@@ -790,11 +827,9 @@
     ta.focus();
     ta.select();
     growEditBox(ta);
-    // 编辑框要露出来：这一行可能在视口下方（列表可滚动）
     if (typeof ta.scrollIntoView === "function") ta.scrollIntoView({ block: "nearest" });
   }
 
-  /** 退出编辑态（不保存）。 */
   function cancelEdit() {
     if (editingId === null) return;
     editingId = null;
@@ -802,18 +837,6 @@
     render();
   }
 
-  /**
-   * 保存编辑结果。
-   *
-   * 顺序是有意的：
-   *   1. 输入框没了 → 直接退出（列表被外部重建过，没有可保存的东西）；
-   *   2. 空内容 → 报错并**留在编辑态**（让用户接着改，不丢已敲的字）；
-   *   3. 内容没变 → 直接退出，**不发 IPC**（纯本地操作不该白写一次盘）；
-   *   4. 乐观更新 → 先让界面响应，失败再回滚（与 toggleFavorite 同手法）。
-   *
-   * 空白判定用 `trim()`，与 Rust 侧 `normalize_edit_text` 的口径一致：
-   * 纯空白在宿主那里会被拒，前端先拦一次能少一次无谓往返。
-   */
   function saveEdit(id) {
     var it = findItem(id);
     var ta = editBoxOf(id);
@@ -825,53 +848,61 @@
       setStatus("内容不能为空", true);
       return;
     }
-    if (raw === (it.text || "")) {
+    var normalized = normalizeEditText(raw);
+    if (normalized === null) {
+      editDraft = raw;
+      setStatus("内容不能为空", true);
+      return;
+    }
+    if (normalized === (it.text || "")) {
       cancelEdit();
       setStatus("内容未变化");
       setTimeout(function () { if (alive()) setStatus(""); }, 2000);
       return;
     }
 
-    if (typeof ms.clipboard?.update !== "function") {
-      setStatus("当前宿主版本不支持编辑，请升级", true);
-      return;
-    }
-
-    // 乐观更新：先落本地，失败回滚。
-    // size 只在图片条目上展示（文本显示字数），这里仍按宿主口径（UTF-8 字节）
-    // 填一份近似值——真要精确得等下次重拉，而那时 Rust 的权威值就回来了。
     var oldText = it.text;
     var oldSize = it.size;
-    it.text = raw;
-    it.size = utf8Len(raw);
+    var oldEdited = it.edited;
+    var nextEdited = normalized === it.rawText ? undefined : normalized;
+    var tx = setItemAnnotation(it.id, { editedText: nextEdited });
+
+    it.text = normalized;
+    it.size = utf8Len(normalized);
+    it.edited = nextEdited !== undefined;
+    var mergedTarget = findInAllMerged(it.id);
+    if (mergedTarget) {
+      mergedTarget.text = it.text;
+      mergedTarget.size = it.size;
+      mergedTarget.edited = it.edited;
+    }
     editingId = null;
     editDraft = "";
     render();
 
-    Promise.resolve(ms.clipboard.update(it.id, raw))
+    tx.commit()
       .then(function () {
         if (!alive()) return;
         setStatus("已保存");
         setTimeout(function () { if (alive()) setStatus(""); }, 2000);
       })
       .catch(function (e) {
+        tx.rollback();
         if (!alive()) return;
-        // 回滚，避免界面与磁盘不一致
         it.text = oldText;
         it.size = oldSize;
+        it.edited = oldEdited;
         loadFirstPageQuiet();
         setStatus("保存失败：" + errorText(e), true);
       });
   }
 
-  /** 按 id 取当前列表里的编辑框（列表是整块 innerHTML 重建的，只能现查） */
   function editBoxOf(id) {
     var list = dom["cb-list"];
     if (!list) return null;
     return list.querySelector('[data-edit-input="' + cssEscape(id) + '"]');
   }
 
-  /** 按 id 取当前列表里的分类输入框（同上，整块重建后只能现查） */
   function catBoxOf(id) {
     var list = dom["cb-list"];
     if (!list) return null;
@@ -880,10 +911,6 @@
 
   /* ======================= 条目分类 ======================= */
 
-  /**
-   * 进入某条的分类编辑态。文本 / 图片、收藏 / 未收藏都可以分类。
-   * 与内容编辑互斥：同时开两个输入框会让「保存」语义变得不可预期。
-   */
   function startCategorize(it) {
     if (categorizingId === it.id) return;
     editingId = null;
@@ -898,7 +925,6 @@
     if (typeof input.scrollIntoView === "function") input.scrollIntoView({ block: "nearest" });
   }
 
-  /** 退出分类编辑态（不保存）。 */
   function cancelCategorize() {
     if (categorizingId === null) return;
     categorizingId = null;
@@ -906,24 +932,10 @@
     render();
   }
 
-  /**
-   * 保存分类。
-   *
-   * - 空串 = 取消分类（`null` 交给宿主，条目恢复成临时条目）；
-   * - 与当前值相同 → 不发 IPC；
-   * - 乐观更新 + 失败回滚（与 toggleFavorite / saveEdit 同手法）；
-   * - 正在按分类筛选且改到了别的分类 → 先从当前列表移除该条，
-   *   否则会出现「列表里躺着一条不属于当前分类的内容」。
-   */
   function saveCategory(id) {
     var it = findItem(id);
     var input = catBoxOf(id);
     if (!it || !input) { cancelCategorize(); return; }
-
-    if (typeof ms.clipboard?.setCategory !== "function") {
-      setStatus("当前宿主版本不支持分类，请升级", true);
-      return;
-    }
 
     var next = String(input.value || "").replace(/\s+/g, " ").trim().slice(0, 24) || null;
     var prev = it.category || null;
@@ -934,78 +946,48 @@
       return;
     }
 
-    // 乐观更新
+    var tx = setItemAnnotation(it.id, { category: next || "" });
     if (next) it.category = next;
     else delete it.category;
+    var mergedTarget = findInAllMerged(it.id);
+    if (mergedTarget) {
+      if (next) mergedTarget.category = next;
+      else delete mergedTarget.category;
+    }
     categorizingId = null;
     categoryDraft = "";
+
+    var filtered = recomputeStatsAndFiltered();
     if (activeCategory && next !== activeCategory) {
       items = items.filter(function (x) { return x.id !== it.id; });
-      total = Math.max(0, total - 1);
     }
+    total = filtered.length;
+    hasMore = items.length < total;
     render();
-    refreshCategories();
 
-    Promise.resolve(ms.clipboard.setCategory(it.id, next))
+    tx.commit()
       .then(function () {
         if (!alive()) return;
         setStatus(next ? "已分类到「" + next + "」" : "已取消分类");
         setTimeout(function () { if (alive()) setStatus(""); }, 2000);
       })
       .catch(function (e) {
+        tx.rollback();
         if (!alive()) return;
-        // 回滚，避免界面与磁盘不一致
         if (prev) it.category = prev;
         else delete it.category;
         loadFirstPageQuiet();
-        refreshCategories();
         setStatus("分类保存失败：" + errorText(e), true);
       });
   }
 
-  /** 按内容自适应 textarea 高度（长文本不会把整个视图撑爆，有 max-height 兜底） */
   function growEditBox(ta) {
     if (!ta || !ta.style) return;
     ta.style.height = "auto";
     ta.style.height = ta.scrollHeight + "px";
   }
 
-  /**
-   * UTF-8 字节数（与 Rust 侧 `content.len()` 同口径）。
-   *
-   * 老 WebView 可能没有 TextEncoder，退回 `encodeURIComponent` 的等价算法：
-   * 它把每个非 ASCII 字符编成 `%XX%XX%XX`（每 3 个字符 = 1 字节），所以
-   * 字节数 = 编码后字符数 − 2 × `%` 的个数。
-   */
-  function utf8Len(s) {
-    if (typeof TextEncoder === "function") {
-      try { return new TextEncoder().encode(s).length; } catch (e) { /* 落到近似算法 */ }
-    }
-    var encoded = encodeURIComponent(s);
-    var percent = 0;
-    for (var i = 0; i < encoded.length; i++) {
-      if (encoded.charAt(i) === "%") percent++;
-    }
-    return encoded.length - 2 * percent;
-  }
-
-  /** 静默重拉第一页（失败回滚后校正列表，不显示状态） */
-  function loadFirstPageQuiet() {
-    if (loading) { pendingReload = true; return; }
-    loading = true;
-    Promise.resolve(fetchPage(0, PAGE_SIZE))
-      .then(function (page) {
-        if (!alive()) return;
-        items = page.items;
-        total = page.total;
-        hasMore = page.hasMore;
-        render();
-      })
-      .catch(function () { /* 静默：回滚路径不再叠加报错 */ })
-      .then(function () { loading = false; });
-  }
-
-  /** 清空历史（保留收藏与已分类条目；确认框里讲清楚）。 */
+  /** 清空未保留的剪贴板历史（已收藏与已分类条目通过 `retainIds` 显式保留） */
   function clearAll() {
     var favCount = favTotal;
     var catCount = categories.reduce(function (n, c) { return n + c.count; }, 0);
@@ -1018,14 +1000,14 @@
     Promise.resolve(ms.ui && ms.ui.confirm ? ms.ui.confirm(msg) : true)
       .then(function (ok) {
         if (ok === false) return null;
-        // keepFavorites=true：收藏条目永久保留（宿主侧同步实现）
-        return Promise.resolve(ms.clipboard.clear({ keepFavorites: true }));
+        var retainIds = retainedIdsOfAnnotations();
+        return Promise.resolve(ms.clipboard.clear({ keepRetained: true, retainIds: retainIds }));
       })
       .then(function (r) {
         if (r === null) return;
         thumbCache = {};
         reload(false);
-        setStatus(favCount ? "已清空未收藏的历史（收藏已保留）" : "已清空剪贴板历史");
+        setStatus(favCount || catCount ? "已清空临时历史（收藏与分类已保留）" : "已清空剪贴板历史");
         setTimeout(function () { if (alive()) setStatus(""); }, 2000);
       })
       .catch(function (e) { setStatus("清空失败：" + errorText(e), true); });
@@ -1047,7 +1029,7 @@
     Promise.resolve(ms.clipboard.readImage(rel))
       .then(function (dataUrl) {
         if (!alive() || !dom["cb-viewer-img"]) return;
-        if (!viewerItem || viewerItem.relPath !== rel) return; // 期间换了目标
+        if (!viewerItem || viewerItem.relPath !== rel) return;
         dom["cb-viewer-img"].src = dataUrl;
       })
       .catch(function (e) { setStatus("加载图片失败：" + errorText(e), true); });
@@ -1060,15 +1042,33 @@
     viewerItem = null;
   }
 
-  /** 把预览中的图片复制到剪贴板 */
   function copyViewer() {
     if (!viewerItem) return;
     copyItem(viewerItem);
   }
 
-  /* ======================= 快捷键 ======================= */
+  /* ======================= 快捷键（统一 `ms.shortcuts.get/set`） ======================= */
 
-  /** 显示当前绑定的呼出热键 */
+  function getShortcutBinding() {
+    if (ms.shortcuts && typeof ms.shortcuts.get === "function") {
+      return Promise.resolve(ms.shortcuts.get("clipboard"));
+    }
+    if (typeof ms.clipboard?.getShortcut === "function") {
+      return Promise.resolve(ms.clipboard.getShortcut());
+    }
+    return Promise.resolve("");
+  }
+
+  function setShortcutBinding(combo) {
+    if (ms.shortcuts && typeof ms.shortcuts.set === "function") {
+      return Promise.resolve(ms.shortcuts.set("clipboard", combo));
+    }
+    if (typeof ms.clipboard?.setShortcut === "function") {
+      return Promise.resolve(ms.clipboard.setShortcut(combo));
+    }
+    return Promise.reject(new Error("当前宿主版本不支持在插件内修改快捷键"));
+  }
+
   function renderHotkey(key) {
     var btn = dom["cb-hotkey-btn"];
     var clear = dom["cb-hotkey-clear"];
@@ -1081,23 +1081,12 @@
     if (emptyKey) emptyKey.textContent = key ? prettyShortcut(key) : "快捷键";
   }
 
-  /** 拉取当前热键（权威在宿主 settings.json，可能被别的入口改过，每次重读） */
   function loadHotkey() {
-    if (typeof ms.clipboard?.getShortcut !== "function") return;
-    Promise.resolve(ms.clipboard.getShortcut())
+    getShortcutBinding()
       .then(function (key) { if (alive()) renderHotkey(key); })
-      .catch(function () { /* 读不到保持原样，不打扰用户 */ });
+      .catch(function () {});
   }
 
-  /**
-   * 录入新热键：点击后监听下一次 keydown，取「修饰键 + 主键」拼成宿主格式。
-   * 只认带修饰键的组合（与宿主面板一致：单一主键做全局热键太易误触/冲突）。
-   *
-   * 主键优先用 `e.code`（KeyV / Digit1 / ArrowDown / Space …）——这正是宿主
-   * 后端 `global-hotkey` 白名单认的命名；只有 `code` 缺失时才回退 `e.key`。
-   * 用 `e.key` 直接拼会在方向键 / 空格等键上得到宿主不认的名字（箭头键得到
-   * "arrowdown"、空格得到 " "），导致「改绑后按下去没反应」。
-   */
   function startCapture() {
     var btn = dom["cb-hotkey-btn"];
     if (!btn || btn.classList.contains("capturing")) return;
@@ -1120,7 +1109,6 @@
       if (e.shiftKey) parts.push("shift");
       if (e.metaKey) parts.push("super");
 
-      // 只按了修饰键本身：继续等主键
       var modKeys = ["Control", "Alt", "Shift", "Meta"];
       if (modKeys.indexOf(e.key) >= 0) return;
       if (/^(Control|Alt|Shift|Meta)(Left|Right)$/.test(e.code || "")) return;
@@ -1148,7 +1136,6 @@
     document.addEventListener("keydown", onKey, true);
   }
 
-  /** 取主键名（优先 e.code，回退 e.key），归一成宿主 global-hotkey 认的形式 */
   function mainKeyOf(e) {
     var code = typeof e.code === "string" ? e.code : "";
     if (code) {
@@ -1156,23 +1143,16 @@
       if (letter) return letter[1].toLowerCase();
       var digit = code.match(/^Digit([0-9])$/);
       if (digit) return digit[1];
-      // 其余 code（ArrowDown / Space / F5 / Backquote …）原样小写交给宿主校验
       return code.toLowerCase();
     }
     var key = typeof e.key === "string" ? e.key : "";
     if (!key) return "";
     if (key === " ") return "space";
-    return key.length === 1 ? key.toLowerCase() : key.toLowerCase();
+    return key.toLowerCase();
   }
 
-  /** 提交新热键给宿主（冲突等错误原样展示） */
   function applyHotkey(combo) {
-    if (typeof ms.clipboard?.setShortcut !== "function") {
-      setStatus("当前宿主版本不支持在插件内改快捷键，请到「设置 → 快捷键」修改", true);
-      loadHotkey();
-      return;
-    }
-    Promise.resolve(ms.clipboard.setShortcut(combo))
+    setShortcutBinding(combo)
       .then(function (effective) {
         renderHotkey(effective || combo);
         setStatus("已绑定呼出快捷键：" + prettyShortcut(effective || combo));
@@ -1184,10 +1164,8 @@
       });
   }
 
-  /** 解绑（关掉全局呼出热键） */
   function clearHotkey() {
-    if (typeof ms.clipboard?.setShortcut !== "function") return;
-    Promise.resolve(ms.clipboard.setShortcut(""))
+    setShortcutBinding("")
       .then(function () {
         renderHotkey("");
         setStatus("已解绑呼出快捷键");
@@ -1198,13 +1176,20 @@
 
   /* ======================= 事件绑定 ======================= */
 
+  function onDocKeydown(e) {
+    if (e.key !== "Escape") return;
+    if (dom["cb-viewer"] && !dom["cb-viewer"].hidden) {
+      e.preventDefault();
+      closeViewer();
+    }
+  }
+
   function bind() {
     dom["cb-hotkey-btn"]?.addEventListener("click", startCapture);
     dom["cb-hotkey-clear"]?.addEventListener("click", clearHotkey);
     dom["cb-refresh"]?.addEventListener("click", function () { reload(true); });
     dom["cb-clear"]?.addEventListener("click", clearAll);
 
-    // 标签：全部 / 收藏（过滤在宿主侧完成，切换后从第一页重拉）
     dom["cb-tabs"]?.addEventListener("click", function (e) {
       var btn = e.target.closest(".cb-tab[data-tab]");
       if (!btn) return;
@@ -1212,18 +1197,14 @@
       if (tab !== "all" && tab !== "fav") return;
       if (tab === filter) return;
       filter = tab;
-      // 分类筛选只在「全部」下有意义；切到收藏时清掉，避免切回来还停在某个分类上
       activeCategory = null;
       persistFilter(tab);
-      // 过滤条件变了：正在编辑的那行可能不在新列表里，先退出编辑态，
-      // 否则 render() 后 textarea 消失、用户敲的字凭空丢了
       cancelEdit();
-      // 从头拉：避免把另一个标签的已加载页混进当前列表
+      // 从头拉：切换标签后重算分页
       cancelCategorize();
       reload(false);
     });
 
-    // 分类栏（只在「全部」标签下显示）：点分类筛选 / 再点取消
     dom["cb-cats"]?.addEventListener("click", function (e) {
       var clear = e.target.closest('[data-act="cat-clear"]');
       if (clear) {
@@ -1236,13 +1217,11 @@
         if (!cat) return;
         activeCategory = activeCategory === cat ? null : cat;
       }
-      // 分类变化会换掉整页数据，先退出两种行内编辑
       cancelEdit();
       cancelCategorize();
       reload(false);
     });
 
-    // 搜索：输入即筛（交给宿主 Rust 侧粗筛，避免前端遍历大文本）
     var searchTimer = null;
     dom["cb-search"]?.addEventListener("input", function (e) {
       var v = String(e.target.value || "");
@@ -1250,14 +1229,12 @@
       searchTimer = setTimeout(function () {
         if (!alive()) return;
         persistQuery(v);
-        // 同切标签：搜索会重拉列表，先退出行内编辑（原因见 tab handler）
         cancelCategorize();
         cancelEdit();
         reload(false, v);
       }, 200);
     });
 
-    // 列表事件委托：收藏 / 复制 / 删除 / 编辑 / 点图片看大图
     dom["cb-list"]?.addEventListener("click", function (e) {
       var btn = e.target.closest("button[data-act]");
       var row = e.target.closest(".cb-item");
@@ -1279,19 +1256,14 @@
         else if (act === "cat-cancel") cancelCategorize();
         return;
       }
-      // 点条目本身：图片看大图，文本直接复制
       if (it.kind === "image") openViewer(it);
       else copyItem(it);
     });
 
-    // 编辑框键盘：Enter 保存（Shift+Enter 换行）、Esc 取消。
-    // 委托在列表容器上——行是整块 innerHTML 重建的，绑定在元素上会失效。
-    // `isComposing`：中文输入法选字期间的回车不能当保存，否则选不字。
     dom["cb-list"]?.addEventListener("keydown", function (e) {
       var ta = e.target;
       if (!ta || !ta.getAttribute) return;
 
-      // 分类输入框：Enter 保存、Esc 取消（单行输入框，不必区分 Shift）
       var catId = ta.getAttribute("data-cat-input");
       if (catId) {
         if (e.key === "Enter" && !e.isComposing) {
@@ -1315,8 +1287,6 @@
       }
     });
 
-    // 编辑框内容变化：按需长高（长文本不用一开始就把视图撑满），并暂存草稿，
-    // 供列表被外部重建时回填
     dom["cb-list"]?.addEventListener("input", function (e) {
       var ta = e.target;
       if (!ta || !ta.getAttribute) return;
@@ -1335,16 +1305,9 @@
     });
     dom["cb-viewer-copy"]?.addEventListener("click", copyViewer);
 
-    document.addEventListener("keydown", function (e) {
-      if (e.key !== "Escape") return;
-      if (dom["cb-viewer"] && !dom["cb-viewer"].hidden) {
-        e.preventDefault();
-        closeViewer();
-      }
-    });
+    document.addEventListener("keydown", onDocKeydown);
   }
 
-  /** 按 id 在当前列表里找条目 */
   function findItem(id) {
     for (var i = 0; i < items.length; i++) {
       if (items[i].id === id) return items[i];
@@ -1352,10 +1315,17 @@
     return null;
   }
 
+  function findInAllMerged(id) {
+    for (var i = 0; i < allMerged.length; i++) {
+      if (allMerged[i].id === id) return allMerged[i];
+    }
+    return null;
+  }
+
   /* ======================= 偏好持久化 ======================= */
 
   function persistQuery(v) {
-    try { ms.store?.set("query", v); } catch (e) { /* 未授权：忽略 */ }
+    try { ms.store?.set("query", v); } catch (e) {}
   }
 
   function restoreQuery() {
@@ -1365,19 +1335,52 @@
         query = saved;
         if (dom["cb-search"]) dom["cb-search"].value = saved;
       }
-    } catch (e) { /* 忽略 */ }
+    } catch (e) {}
   }
 
   function persistFilter(v) {
-    try { ms.store?.set("filter", v); } catch (e) { /* 未授权：忽略 */ }
+    try { ms.store?.set("filter", v); } catch (e) {}
   }
 
-  /** 恢复上次停留的标签（记住用户习惯，默认「全部」） */
   function restoreFilter() {
     try {
       var saved = ms.store?.get("filter", "all");
       if (saved === "fav" || saved === "all") filter = saved;
-    } catch (e) { /* 忽略 */ }
+    } catch (e) {}
+  }
+
+  /* ======================= 会话回收与测试钩子 ======================= */
+
+  if (host && typeof host === "object") {
+    host.__msPluginCleanup = function () {
+      if (sentinelObserver) {
+        sentinelObserver.disconnect();
+        sentinelObserver = null;
+      }
+      document.removeEventListener("keydown", onDocKeydown);
+    };
+  }
+
+  if (typeof window !== "undefined" && window.__CB_TEST_HOOK__) {
+    window.__CB_TEST__ = {
+      ensureAnnotationsLoaded: ensureAnnotationsLoaded,
+      fetchMergedAll: fetchMergedAll,
+      normalizeEditText: normalizeEditText,
+      utf8Len: utf8Len,
+      retainedIdsOfAnnotations: retainedIdsOfAnnotations,
+      setItemAnnotation: setItemAnnotation,
+      getAnnotations: function () { return Object.assign({}, annotations); },
+      getState: function () {
+        return {
+          items: items.slice(),
+          allMerged: allMerged.slice(),
+          total: total,
+          hasMore: hasMore,
+          favTotal: favTotal,
+          categories: categories.slice(),
+        };
+      },
+    };
   }
 
   /* ======================= 启动 ======================= */
@@ -1388,10 +1391,6 @@
   loadHotkey();
   reload(false);
 
-  /**
-   * 宿主原生监听到剪贴板变更后广播 → 自动刷新。
-   * 视图没打开时事件丢弃，下次打开 list() 兜底，因此不必常驻轮询。
-   */
   if (typeof ms.clipboard?.onUpdated === "function") {
     ms.clipboard.onUpdated(function () {
       if (!alive()) return;

@@ -1,9 +1,10 @@
 {
   "id": "com.zhuangjie.mouse-gesture",
   "name": "鼠标手势",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "apiVersion": 1,
   "minAppVersion": "7.9.34",
+  "autoUpdate": true,
   "author": "zhuangjie",
   "description": "按住 Ctrl + 右键拖拽画手势，触发动作：休眠/关机/重启/命令行/资源管理器/强制关闭前台程序，也可映射到任意程序、文件夹、文件或网址。轨迹 HUD 实时反馈。",
   "repository": "https://github.com/My-Search/my-search-desktop/tree/master/plugins/com.zhuangjie.mouse-gesture",

@@ -25,7 +25,7 @@
  */
 import { ref, computed, nextTick, onMounted, onBeforeUnmount } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWindow, PhysicalPosition, PhysicalSize } from "@tauri-apps/api/window";
+import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
 import {
   COLORS,
   TOOLS,
@@ -61,7 +61,7 @@ import MarkerToolbar from "../../components/MarkerToolbar.vue";
 /* ---------------- 状态 ---------------- */
 
 const canvasEl = ref<HTMLCanvasElement | null>(null);
-const textEl = ref<HTMLTextAreaElement | null>(null);
+const textEl = ref<HTMLInputElement | null>(null);
 
 /** 宿主侧注册表的 label（onMounted 里从窗口元数据读出） */
 let label = "";
@@ -80,10 +80,24 @@ const winMetrics = { frame: false, dpr: 1 };
 const mode = ref<"view" | "edit">("view");
 
 /**
- * 编辑态工具条悬浮条的高度（CSS 像素）：进入编辑时窗口向上扩出这一条，
- * 工具条画在扩出来的区域里，永不压住图片（Snipaste 同款交互）。
+ * 编辑态为工具条扩出的高度（CSS 像素）：进入编辑时窗口多出这一条放工具条。
+ * 图片本身在屏幕上的位置/尺寸完全不动。
  */
 const EDIT_HUD = 48;
+
+/**
+ * 工具条放在哪：下方有空间 → 向下扩；下方不够但上方够 → 向上扩（窗口上移，
+ * 图片不动）；上下都不够（截图几乎占满屏幕）→ 工具条悬浮在图片底部内侧。
+ */
+type EditPlacement = "down" | "up" | "overlay";
+const editPlacement = ref<EditPlacement>("down");
+
+/** 图片在窗口内的上偏移：向上扩窗时 = EDIT_HUD（窗口上移了同样距离），否则 0 */
+const imgTop = ref(0);
+/** 工具条左偏移（相对窗口）：默认相对图片居中，工具条比图片宽时贴左缘 */
+const toolbarLeft = ref(0);
+/** 工具条 top（相对窗口）：下方/悬浮模式在图片下沿，向上扩窗时在图片上沿之外 */
+const toolbarTop = ref(0);
 
 /** 悬浮条是否可见（编辑态常显；完成编辑后短暂停留 1.2s 再淡出） */
 const hudVisible = ref(false);
@@ -159,16 +173,65 @@ function imgCanvas(): HTMLCanvasElement | null {
 
 /* ---------------- 编辑态进出 ---------------- */
 
+/**
+ * 选展开方向：优先向下（不动窗口坐标）；贴图贴近屏幕底部就向上；上下都放不下
+ *（截图几乎占满屏幕）则悬浮在图片底部。用显示器**工作区**，避开任务栏/ Dock。
+ */
+async function chooseEditPlacement(): Promise<EditPlacement> {
+  try {
+    const win = getCurrentWindow();
+    const [scale, pos, mon] = await Promise.all([
+      win.scaleFactor(),
+      win.outerPosition(),
+      currentMonitor(),
+    ]);
+    if (!mon) return "down";
+    const need = Math.round(EDIT_HUD * scale);
+    const bottom = pos.y + Math.round(cssSize.value.h * scale);
+    const wa = mon.workArea;
+    const roomBelow = wa.position.y + wa.size.height - bottom;
+    const roomAbove = pos.y - wa.position.y;
+    if (roomBelow >= need) return "down";
+    if (roomAbove >= need) return "up";
+    return "overlay";
+  } catch {
+    return "down";
+  }
+}
+
+/** 按当前 placement 摆好图片与工具条（进入编辑前先算，避免工具条先出现在错误方向） */
+function layoutEditChrome() {
+  const imgH = cssSize.value.h;
+  if (editPlacement.value === "up") {
+    imgTop.value = EDIT_HUD;
+    toolbarTop.value = 4;
+    return;
+  }
+  imgTop.value = 0;
+  if (editPlacement.value === "overlay") {
+    // 悬浮模式：工具条贴图片底部内侧；高度要等渲染后才能量准，先用 44 兜底
+    const tb = document.querySelector(".pin-toolbar") as HTMLElement | null;
+    const th = tb ? tb.getBoundingClientRect().height : 44;
+    toolbarTop.value = Math.max(4, imgH - th - 4);
+    return;
+  }
+  toolbarTop.value = imgH + 4;
+}
+
 /** 菜单：显示编辑工具（进入编辑态；激活引擎 + 落到「选择」工具） */
-function startEdit() {
+async function startEdit() {
   menu.value.visible = false;
   st.active = true;
   setTool("select");
   editBaseIds = st.strokes.map((s) => s.id);
+  // 先定扩窗方向与工具条位置，再渲染工具条：避免先出现在错误方向的闪烁
+  editPlacement.value = await chooseEditPlacement();
+  layoutEditChrome();
   mode.value = "edit";
   hudVisible.value = true;
   drawAll();
-  // 编辑态向上扩出工具条悬浮条（先扩窗再画，避免工具条压住图片首帧）
+  // 等工具条渲染后再扩窗：要量它的自然宽度决定窗口是否横向扩宽
+  await nextTick();
   void applyEditGeometry(true);
 }
 
@@ -258,48 +321,63 @@ function refreshDblClickGuard(e: MouseEvent) {
 }
 
 /**
- * 编辑态窗口几何：进入编辑时窗口向上扩出 EDIT_HUD（CSS 像素），工具条画在
- * 扩出来的区域里、永不压住图片（Snipaste 同款）；退出编辑恢复原窗口尺寸。
- * 扩出量按 DIP 计算（× scale 转物理像素），与显示器缩放无关。
+ * 编辑态窗口几何（使用**物理像素**，与显示器缩放无关）：
+ *   - down：高度 + EDIT_HUD，工具条在图片下沿；
+ *   - up：高度 + EDIT_HUD 且窗口上移 EDIT_HUD，画布下移 EDIT_HUD，图片原地不动；
+ *   - overlay：窗口不动，工具条悬浮在图片底部内侧。
+ * 工具栏比图片宽时再向右扩宽（图片仍贴左）。退出编辑恢复原尺寸/坐标。
+ *
+ * 画布宽高锁定为图片尺寸（`--pin-img-w/h`），扩出的透明区域不会拉伸图片。
+ * 位置与尺寸用 `pin_set_bounds` 一次原子生效，避免先 resize 再 move 的抖动。
  */
 async function applyEditGeometry(editing: boolean) {
   const win = getCurrentWindow();
   try {
     const scale = await win.scaleFactor();
+    const imgW = cssSize.value.w;
+    const imgH = cssSize.value.h;
+    let cssW = imgW;
+    if (editing) {
+      // 工具条相对**图片**居中：图片够宽时居中；比工具条窄就贴图片左缘，
+      // 窗口向右扩到装得下整条工具栏（多出来的是透明区，图片本身不动）。
+      const tb = document.querySelector(".pin-toolbar") as HTMLElement | null;
+      const tbW = tb ? tb.getBoundingClientRect().width : 0;
+      toolbarLeft.value = tbW > 0 ? Math.max(0, (imgW - tbW) / 2) : 0;
+      if (tbW > 0) cssW = Math.max(imgW, toolbarLeft.value + tbW + 8);
+      // 悬浮模式的 top 依赖工具条实际高度，渲染后再校准一次
+      if (editPlacement.value === "overlay") layoutEditChrome();
+    }
+    const grow = editing && editPlacement.value !== "overlay";
+    const w = Math.round(cssW * scale);
+    const h = Math.round((imgH + (grow ? EDIT_HUD : 0)) * scale);
     const pos = await win.outerPosition();
-    const w = Math.round(cssSize.value.w * scale);
-    const h = Math.round((cssSize.value.h + (editing ? EDIT_HUD : 0)) * scale);
-    // 不走 @tauri-apps/api 的 PhysicalSize/PhysicalPosition 类（测试 stub 环境
-    // 里它们序列化出的字段 stub 不认识）；直接发裸 invoke，字段用 tauri 内部
-    // 约定的 Physical{Width,Height,X,Y} 大写驼峰。
-    const internals = window as unknown as {
-      __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-    };
-    await internals.__TAURI_INTERNALS__.invoke("plugin:window|set_size", {
+    const dy = Math.round(EDIT_HUD * scale);
+    const y =
+      pos.y +
+      (editPlacement.value === "up" ? (editing ? -dy : dy) : 0);
+    await invoke("pin_set_bounds", {
       label: win.label,
-      value: { type: "Physical", Width: w, Height: h },
+      x: pos.x,
+      y,
+      width: w,
+      height: h,
     });
-    await internals.__TAURI_INTERNALS__.invoke("plugin:window|set_position", {
-      label: win.label,
-      value: {
-        type: "Physical",
-        X: pos.x,
-        Y: pos.y + (editing ? -1 : 1) * Math.round(EDIT_HUD * scale),
-      },
-    });
+    if (!editing) {
+      // 退出编辑：工具条已卸载，画布/边框回到窗口顶部
+      imgTop.value = 0;
+      toolbarLeft.value = 0;
+      toolbarTop.value = 0;
+      editPlacement.value = "down";
+    }
   } catch (e) {
     console.error("[贴图] 编辑扩窗失败:", e);
   }
 }
 
 /**
- * 边框开关（右键菜单「隐藏边框 / 显示边框」）。
- * 宿主创建窗口时把 decorations 状态写进 location hash，这里读它同步初始 UI。
- */
-/**
- * 边框开关（右键菜单「隐藏边框 / 显示边框」）。
- * 纯 CSS（canvas 的 outline）：不调 set_decorations——窗口是无边框创建的，
- * 打开系统 decorations 会带出标题栏，破坏贴图观感；页面也没申请该权限。
+ * 边框开关（右键菜单「隐藏边框 / 显示边框」）：切换 .pin-frame 覆盖层显隐。
+ * 不调 set_decorations——窗口是无边框创建的，打开系统 decorations 会带出标题栏、
+ * 破坏贴图观感；页面也没申请该权限。
  */
 function toggleFrame() {
   frameVisible.value = !frameVisible.value;
@@ -340,8 +418,12 @@ let resizeCorner: ResizeCorner | null = null;
 
 /** 画布按下：编辑态才标注（文字命中=拖动移位；空白+文字工具=开输入框） */
 function onCanvasDown(e: MouseEvent) {
-  if (mode.value !== "edit" || st.showTextInput) return;
+  if (mode.value !== "edit") return;
   menu.value.visible = false;
+  // 输入框开着时点画布：先把草稿落笔，再让这次点击继续生效（与截图遮罩
+  // 同款）。mousedown 早于 blur，若等 blur 提交，本次点击会被直接吞掉
+  // （截图侧曾出现「点别处后还得再点一下才能继续画」）。
+  if (st.showTextInput) onCommitText();
   const p = toEngine(e);
   if (st.tool === "text") {
     // 单击在已有文字上 → 选中并开始拖动移位（与截图同款：拖动移位、双击编辑）
@@ -354,6 +436,11 @@ function onCanvasDown(e: MouseEvent) {
       }
     }
     // 空白处 → 新文字输入框（引擎记下落点，提交时用它）
+    // preventDefault：拦下 mousedown 的默认「焦点移交」——否则浏览器在事件派发
+    // 完成后把焦点从刚插入并聚焦的 input 抢回 body，输入框立即 blur →
+    // onCommitText 空提交 → 输入框一闪而过（真机表现为「文字标注没反应」）。
+    // 画布本身无可选文本/无默认拖选行为，preventDefault 无副作用。
+    e.preventDefault();
     beginStroke(p.x, p.y);
     drawAll();
     nextTick(() => textEl.value?.focus());
@@ -430,17 +517,19 @@ function cancelText() {
   drawAll();
 }
 
-/** 文字输入框坐标：引擎的 textPos 是 CSS 像素（窗口坐标），textarea 直接用 */
-const textStyle = computed(() => {
-  const c = canvasEl.value;
-  const k = c && c.width > 0 ? c.getBoundingClientRect().width / c.width : 1;
-  return {
-    left: `${(st.textPos?.x ?? 0) * k}px`,
-    top: `${(st.textPos?.y ?? 0) * k + (mode.value === "edit" ? EDIT_HUD : 0)}px`,
-    fontSize: `${textFontSize(st.lineWidth) * k}px`,
-    color: st.color,
-  };
-});
+/**
+ * 文字输入框坐标/字号：引擎的 textPos 与字号都是 **CSS 像素**（相对于画布），
+ * 输入框也活在 CSS 像素里，直接摆过去即可，不能再乘「CSS/画布物理像素」的
+ * 比例（那会在非 100% 缩放下把框缩小、往左上挪，与落笔位置错开）。
+ * 画布画字时才需要 ctx.scale(物理/CSS)（见 drawAll）。
+ */
+const textStyle = computed(() => ({
+  left: `${st.textPos?.x ?? 0}px`,
+  // 向上扩窗时画布整体下移 EDIT_HUD，输入框要跟着图片走
+  top: `${(st.textPos?.y ?? 0) + imgTop.value}px`,
+  fontSize: `${textFontSize(st.lineWidth)}px`,
+  color: st.color,
+}));
 
 /* ---------------- 工具条回调（MarkerToolbar emit） ---------------- */
 
@@ -478,15 +567,16 @@ function onDelete() {
 
 /* ---------------- 选中框显示 ---------------- */
 
-/** 选中标注的包围盒（CSS 像素；高亮框与四角控制点用） */
+/** 选中标注的包围盒（CSS 像素；高亮框与四角控制点用）。
+ *  strokeBounds 返回的就是画布内 CSS 像素（与引擎/指针坐标同一套），
+ *  DOM 覆盖层也按 CSS 像素摆，不做任何缩放；只补上画布相对窗口的偏移。 */
 const selectedBox = computed(() => {
   if (mode.value !== "edit" || st.selectedId == null || st.showTextInput) return null;
   const s = st.strokes.find((it) => it.id === st.selectedId);
   if (!s) return null;
   const b = strokeBounds(s);
-  const k = cssScale();
-  // 编辑态画布整体下移 EDIT_HUD（顶部让给工具条悬浮条），选中框随之偏移
-  return { x: b.x * k, y: b.y * k + EDIT_HUD, w: b.w * k, h: b.h * k };
+  // 向上扩窗时画布整体下移 EDIT_HUD，选中框/控制点跟随图片
+  return { x: b.x, y: b.y + imgTop.value, w: b.w, h: b.h };
 });
 
 const A_CORNERS: ResizeCorner[] = ["nw", "ne", "se", "sw"];
@@ -612,17 +702,29 @@ onBeforeUnmount(() => {
 <template>
   <div
     class="pin-root"
+    :style="cssSize.h > 0 ? {
+      '--pin-img-w': cssSize.w + 'px',
+      '--pin-img-h': cssSize.h + 'px',
+      '--pin-img-top': imgTop + 'px',
+    } : {}"
     @mousedown="onRootMouseDown"
     @dblclick="onDblClick"
     @contextmenu.prevent="onContextMenu"
   >
-    <!-- 浏览态按住即拖动移窗；编辑态换成标注画布交互（见 onCanvasDown） -->
+    <!-- 画布宽高在图片加载后锁定为图片自身 CSS 尺寸（--pin-img-w/h），不依赖扩窗时机，
+         图片永不形变；加载前 cssSize=0，CSS 的 100% fallback 让画布先铺满窗口，
+         否则首次 getBoundingClientRect 会读到 0 导致画布塌成 0 高。 -->
     <canvas
       ref="canvasEl"
       class="pin-canvas"
-      :class="{ 'is-edit': mode === 'edit', 'is-hud-shift': mode === 'edit', 'is-framed': frameVisible }"
+      :class="{ 'is-edit': mode === 'edit' }"
       @mousedown="mode === 'view' ? onBrowseMouseDown($event) : onCanvasDown($event)"
     ></canvas>
+
+    <!-- 边框覆盖层：独立透明层画四边，避开 canvas outline 在窗口边缘被裁剪、
+         编辑态被工具条遮住上边的问题（pointer-events:none 不影响标注交互）。
+         高度同样锁定为图片尺寸，与画布严格重合。 -->
+    <div v-if="frameVisible" class="pin-frame"></div>
 
     <!-- 选中标注：高亮框 + 四角控制点（缩放/改端点/改字号），与截图同款交互 -->
     <template v-if="mode === 'edit' && selectedBox">
@@ -647,6 +749,7 @@ onBeforeUnmount(() => {
     <MarkerToolbar
       v-if="mode === 'edit'"
       class="pin-toolbar"
+      :style="{ top: toolbarTop + 'px', left: toolbarLeft + 'px' }"
       :tools="TOOLS"
       :colors="COLORS"
       :tool="st.tool"
@@ -669,8 +772,9 @@ onBeforeUnmount(() => {
       </template>
     </MarkerToolbar>
 
-    <!-- 文字输入（贴在引擎记下的落点；编辑已有文字时预填原文） -->
-    <textarea
+    <!-- 文字输入（贴在引擎记下的落点；编辑已有文字时预填原文）。
+         单行 input 与截图遮罩同款：引擎 fillText 不渲染换行，多行输入会导致所见非所得。 -->
+    <input
       v-if="st.showTextInput"
       ref="textEl"
       v-model="st.textDraft"
@@ -679,10 +783,10 @@ onBeforeUnmount(() => {
       placeholder="输入文字，回车或点别处确认"
       @mousedown.stop
       @dblclick.stop
-      @keydown.enter.exact.prevent="onCommitText"
-      @keydown.esc.stop="cancelText"
+      @keydown.enter.prevent="onCommitText"
+      @keydown.esc.stop.prevent="cancelText"
       @blur="onCommitText"
-    ></textarea>
+    >
 
     <!-- 右键菜单（浏览态） -->
     <div
@@ -715,30 +819,37 @@ onBeforeUnmount(() => {
   background: transparent;
 }
 
-/* 画布：窗口多大铺多大；浏览器把画布像素缩放到这个框（1:1 时无缩放） */
+/* 画布：宽高由 --pin-img-w/h 锁定为图片 CSS 尺寸（外层内联 style 提供）。
+ * 绝不写 height:100% / calc(100% - HUD)：编辑扩窗是异步的，依赖窗口高度的
+ * 写法会让画布先被 WebView 缩短、图片被压扁（真机踩过）。 */
 .pin-canvas {
   display: block;
-  width: 100%;
-  height: 100%;
+  /* 宽高都锁定为图片 CSS 尺寸：编辑态窗口可能横向扩宽/向下扩高，
+     图片本身绝不跟着拉伸变形；加载前 fallback 100% 铺满窗口 */
+  position: relative;
+  top: var(--pin-img-top, 0px);
+  width: var(--pin-img-w, 100%);
+  height: var(--pin-img-h, 100%);
   outline: none;
 }
 .pin-canvas.is-edit {
   cursor: crosshair;
 }
-/* 编辑态：画布整体下移，顶部 EDIT_HUD 区域让给工具条悬浮条（窗口已同步扩高） */
-.pin-canvas.is-hud-shift {
+
+/* CSS 边框（右键菜单可开关）：独立覆盖层 + inset 阴影画四边 1px 半透明白线。
+ * 不用 canvas 的 outline：outline 落在窗口最外 1px，会被无边框窗口的边缘
+ * 裁剪/抗锯齿吃掉某些边；编辑态还会被工具条盖住上边。覆盖层在图片之上、
+ * 工具条之下，pointer-events:none 不影响标注。高度与画布同为图片尺寸。 */
+.pin-frame {
   position: absolute;
   left: 0;
-  top: 48px;
-  height: calc(100% - 48px);
-}
-
-/* CSS 边框（右键菜单可开关）：贴在窗口四周的 1px 半透明白线。
- * 画在 canvas 上用 outline（绘制在位图之上，inset box-shadow 会被
- * canvas 位图盖住）；窗口本身 transparent，观感即「贴图带了一圈边框」。 */
-.pin-canvas.is-framed {
-  outline: 1px solid rgba(255, 255, 255, 0.55);
-  outline-offset: -1px;
+  top: var(--pin-img-top, 0px);
+  /* 与画布严格重合：窗口横向扩宽后边框也只包住图片，不包透明区 */
+  width: var(--pin-img-w, 100%);
+  height: var(--pin-img-h, 100%);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.55);
+  pointer-events: none;
+  z-index: 5;
 }
 
 /* 选中标注：高亮框（细虚线）+ 四角控制点（白底蓝框圆点），与截图遮罩同款视觉 */
@@ -766,18 +877,30 @@ onBeforeUnmount(() => {
   cursor: nesw-resize;
 }
 
-/* 编辑态工具条：画在窗口顶部扩出来的悬浮条区域里（不压图片）。
- * 覆盖组件默认 top/bottom 的同时**必须两边都写**：只写 top 会留下组件的
- * bottom:28px → top+bottom 同时生效把盒子拉满整窗（真机踩过的坑）。 */
+/* 编辑态工具条：top/left 由内联 style 固定为「图片下沿 + 4px」与「相对图片居中
+ * （放不下则贴左缘）」，不依赖扩窗时机。覆盖组件默认 top/bottom 时**必须两边
+ * 都写**：只写 top 会留下组件的 bottom:28px → top+bottom 同时生效把盒子拉满
+ * 整窗（真机踩过的坑）。 */
 .pin-toolbar {
   position: absolute;
-  top: 5px;
   bottom: auto;
-  left: 50%;
-  transform: translateX(-50%);
-  max-width: calc(100vw - 16px);
+  /* 共享组件的默认定位是 left:50% + translateX(-50%)；这里改由内联 left 控制，
+     必须同时清掉 transform，否则会被它再左移半个宽度 */
+  transform: none;
+  /* 共享组件的 max-width: calc(100vw - 24px) 会把窄贴图下的工具条量窄，
+     导致窗口误判「装得下」而不扩宽；这里按内容自然宽度排布 */
+  max-width: none;
+  width: max-content;
   padding: 5px 8px;
   z-index: 30;
+}
+/* 工具条按钮/色块一律不许被窄贴图窗口压扁；no wrap + 不设 max-width，
+ * 让工具条保持自然宽度（超宽时靠窗口扩宽兜底，按钮本身绝不缩水变形）。 */
+.pin-toolbar :deep(.ov-tool),
+.pin-toolbar :deep(.ov-color),
+.pin-toolbar :deep(.ov-sep),
+.pin-toolbar :deep(.ov-wval) {
+  flex: none;
 }
 /* actions 插槽里的取消 / 完成：宿主作用域渲染，样式归本组件 */
 .pt-action {
@@ -812,26 +935,41 @@ onBeforeUnmount(() => {
   flex: none;
 }
 
-/* 文字输入：贴在点击处，半透明深底 + 虚线框（与截图输入框同一观感） */
+/* 文字输入：与截图输入框（.ov-text-input）同一套宿主样式 */
 .pin-text-input {
+  --pin-text-pad-x: 4px;
+  --pin-text-pad-y: 2px;
   position: absolute;
   z-index: 25;
-  min-width: 120px;
+  min-width: 200px;
   max-width: 90%;
-  min-height: 28px;
-  padding: 4px 8px;
+  /*
+   * 把输入框往左上挪「内边距 + 边框」：输入框里的第一个字正好落在
+   * 用户点击的位置，与落笔后 ctx.fillText 画出的文字起点重合（截图遮罩同款）。
+   */
+  margin-left: calc(-1 * (var(--pin-text-pad-x) + 1px));
+  margin-top: calc(-1 * (var(--pin-text-pad-y) + 1px));
+  /*
+   * 背景**透明**：输入框只是临时脚手架，用户要看到贴图本身（文字最终以
+   * 所选颜色直接压在图上）。细虚线描边 + 一圈深色阴影保证在浅底/深底上都
+   * 看得出输入范围，但都不遮挡贴图内容。
+   */
+  background: transparent;
   border: 1px dashed rgba(255, 255, 255, 0.75);
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55);
   border-radius: 3px;
-  background: rgba(20, 20, 22, 0.55);
   color: inherit;
   font-family: sans-serif;
-  line-height: 1.25;
-  resize: none;
+  /* line-height 与画布 textBaseline:"top" 对齐，行内文字位置和最终绘制一致 */
+  line-height: 1;
+  padding: var(--pin-text-pad-y) var(--pin-text-pad-x);
   outline: none;
+  text-shadow: 0 0 2px rgba(0, 0, 0, 0.65);
 }
+/* 输入框里的占位提示也给点阴影，浅底上也看得清 */
 .pin-text-input::placeholder {
   color: rgba(255, 255, 255, 0.55);
+  text-shadow: 0 0 2px rgba(0, 0, 0, 0.65);
 }
 
 /* 右键菜单 */

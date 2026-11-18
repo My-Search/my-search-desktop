@@ -1,0 +1,40 @@
+{
+  "id": "com.zhuangjie.webdav",
+  "name": "WebDAV 网盘",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "minAppVersion": "7.9.35",
+  "autoUpdate": true,
+  "author": "zhuangjie",
+  "description": "把任意 WebDAV 服务器（坚果云、Alist、Nextcloud、自建等）当作网盘用：浏览目录、上传下载、复制剪切粘贴、重命名、收藏夹、图片/文本预览",
+  "homepage": "https://github.com/My-Search/my-search-desktop/tree/master/plugins/com.zhuangjie.webdav",
+  "repository": "https://github.com/My-Search/my-search-desktop/tree/master/plugins/com.zhuangjie.webdav",
+  "icon": "icon.svg",
+  "permissions": [
+    "ui.inlay",
+    "ui.notify",
+    "store",
+    "net.fetch:*",
+    "file.read",
+    "file.write"
+  ],
+  "optionalPermissions": [
+    "clipboard.write"
+  ],
+  "contributes": {
+    "searchItem": {
+      "title": "WebDAV 网盘",
+      "desc": "浏览/上传/下载任意 WebDAV 服务器文件，支持多服务器、收藏夹与预览",
+      "keyword": "网盘"
+    },
+    "handlers": {
+      "files": true
+    },
+    "detailView": {
+      "entry": "ui/detail.html",
+      "script": "ui/index.js",
+      "mode": "inlay",
+      "closeBehavior": "exit"
+    }
+  }
+}

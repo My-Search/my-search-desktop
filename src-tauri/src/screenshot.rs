@@ -871,11 +871,52 @@ fn err(msg: &str) -> String {
     msg.to_string()
 }
 
+/// 是否为宿主受控的内部媒体窗口（`overlay-*` 截图遮罩窗 / `pin-*` 贴图窗）。
+///
+/// 内部窗口由宿主原生入口创建，按自身 capability 放行；来自 `main` 或 `plugin-win-*`
+/// 的调用则一律视为插件侧调用，必须通过网关第二道权限校验。
+fn is_internal_media_window(webview: &tauri::WebviewWindow) -> bool {
+    let label = webview.label();
+    label.starts_with(OVERLAY_LABEL_PREFIX)
+        || label.starts_with(crate::pin_image::PIN_LABEL_PREFIX)
+}
+
+fn require_screenshot_caller(
+    webview: &tauri::WebviewWindow,
+    plugin_id: Option<&str>,
+    permission: &str,
+) -> Result<(), String> {
+    if is_internal_media_window(webview) {
+        return Ok(());
+    }
+    let pid = plugin_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| err("缺少插件标识（pluginId）"))?;
+    crate::plugin_host::require_grant(pid, permission).map(|_| ())
+}
+
+fn require_screenshot_read_or_write(
+    webview: &tauri::WebviewWindow,
+    plugin_id: &str,
+) -> Result<(), String> {
+    if is_internal_media_window(webview) {
+        return Ok(());
+    }
+    crate::plugin_host::require_grant(plugin_id, "screenshot.read")
+        .or_else(|_| crate::plugin_host::require_grant(plugin_id, "screenshot.write"))
+        .map(|_| ())
+}
+
 /// 全屏（虚拟桌面）抓屏 → PNG data URL。
 ///
 /// 不依赖遮罩窗口，插件后台也能用同一条路径兜底。
 #[tauri::command]
-pub fn screenshot_capture() -> Result<CaptureResult, String> {
+pub fn screenshot_capture(
+    webview: tauri::WebviewWindow,
+    plugin_id: Option<String>,
+) -> Result<CaptureResult, String> {
+    require_screenshot_caller(&webview, plugin_id.as_deref(), "screenshot.capture")?;
     let (x, y, w, h, rgba) = capture_virtual_screen()?;
     let png = encode_png(w, h, &rgba)?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
@@ -1064,29 +1105,31 @@ fn take_cached_base(idx: usize) -> Option<(String, u32, u32)> {
     }
 }
 
-#[tauri::command]
-pub async fn screenshot_open_overlay(app: tauri::AppHandle) -> Result<usize, String> {
+async fn open_overlay_inner(
+    app: &tauri::AppHandle,
+    owner_plugin_id: Option<&str>,
+) -> Result<usize, String> {
     let t_all = Instant::now();
     let t = Instant::now();
-    let strip = hide_main_window_for_capture(&app).await;
+    let strip = hide_main_window_for_capture(app).await;
     tlog("隐藏搜索窗", t);
     // 按内容确认搜索窗真的从屏幕上撤下去了，否则残影会被拍进冻结底图
     let t = Instant::now();
     settle_after_hide(strip.as_ref());
     tlog("等待合成器（settle）", t);
     let t = Instant::now();
-    let frame = match grab_screen(&app) {
+    let frame = match grab_screen(app) {
         Ok(f) => f,
         Err(e) => {
             // 抓屏失败：立刻把窗口放回去，别让用户面对一个消失了的搜索框
-            restore_main_window_after_capture(&app);
+            restore_main_window_after_capture(app);
             return Err(e);
         }
     };
     tlog("抓屏", t);
     let monitors = frame.monitors.clone();
     if monitors.is_empty() {
-        restore_main_window_after_capture(&app);
+        restore_main_window_after_capture(app);
         return Err(err("未检测到显示器"));
     }
     let count = monitors.len();
@@ -1094,15 +1137,25 @@ pub async fn screenshot_open_overlay(app: tauri::AppHandle) -> Result<usize, Str
     dispatch_base_encode(&frame);
     let t = Instant::now();
     for m in monitors.iter() {
-        if let Err(e) = build_overlay_window(&app, m) {
-            restore_main_window_after_capture(&app);
+        if let Err(e) = build_overlay_window(app, m, owner_plugin_id) {
+            restore_main_window_after_capture(app);
             return Err(e);
         }
     }
     tlog(&format!("创建遮罩窗口 ×{count}"), t);
-    dump_overlay_geometry(&app, &frame);
+    dump_overlay_geometry(app, &frame);
     tlog("open_overlay 总计", t_all);
     Ok(count)
+}
+
+#[tauri::command]
+pub async fn screenshot_open_overlay(
+    app: tauri::AppHandle,
+    webview: tauri::WebviewWindow,
+    plugin_id: Option<String>,
+) -> Result<usize, String> {
+    require_screenshot_caller(&webview, plugin_id.as_deref(), "screenshot.overlay")?;
+    open_overlay_inner(&app, plugin_id.as_deref()).await
 }
 
 /// 关闭所有遮罩窗口，并清掉抓屏缓存。
@@ -1167,12 +1220,17 @@ fn take_selection_with_origin() -> Option<(SelRect, i32, i32)> {
 /// 返回 `Ok(None)` 的两种情况：用户按 Esc 取消（窗口关了但没产生选区）、
 /// 或 90 秒没有动作（兜底，免得这条命令一直悬着）。
 #[tauri::command]
-pub async fn screenshot_pick_region(app: tauri::AppHandle) -> Result<Option<PickRect>, String> {
+pub async fn screenshot_pick_region(
+    app: tauri::AppHandle,
+    webview: tauri::WebviewWindow,
+    plugin_id: Option<String>,
+) -> Result<Option<PickRect>, String> {
+    require_screenshot_caller(&webview, plugin_id.as_deref(), "screenshot.overlay")?;
     // 上一次残留的选区必须先清掉，否则遮罩刚打开就可能读到旧值
     if let Ok(mut guard) = PENDING_SELECTION.lock() {
         *guard = None;
     }
-    screenshot_open_overlay(app.clone()).await?;
+    open_overlay_inner(&app, plugin_id.as_deref()).await?;
     let deadline = Instant::now() + Duration::from_secs(90);
     loop {
         if let Some((sel, origin_x, origin_y)) = take_selection_with_origin() {
@@ -1206,7 +1264,13 @@ pub async fn screenshot_pick_region(app: tauri::AppHandle) -> Result<Option<Pick
 /// **分辨率**：物理像素原样编码，不降采样——底图铺满的是物理像素的窗口区域，
 /// 降到逻辑尺寸会让截图区外整屏发糊（150% 缩放下必现）。快速压缩只影响体积。
 #[tauri::command]
-pub fn screenshot_overlay_image(monitor_index: usize) -> Result<OverlayImage, String> {
+pub fn screenshot_overlay_image(
+    webview: tauri::WebviewWindow,
+    monitor_index: usize,
+) -> Result<OverlayImage, String> {
+    if !is_internal_media_window(&webview) {
+        return Err(err("仅限截图遮罩窗口调用"));
+    }
     let frame = pending_capture()?;
     let m = frame
         .monitors
@@ -1251,12 +1315,16 @@ pub struct OverlayImage {
 /// 在遮罩页里「框选某个显示器内的一块」并直接得到 PNG（宿主侧裁切，少一次往返）。
 #[tauri::command]
 pub fn screenshot_crop(
+    webview: tauri::WebviewWindow,
     monitor_index: usize,
     x: f64,
     y: f64,
     width: f64,
     height: f64,
 ) -> Result<CropResult, String> {
+    if !is_internal_media_window(&webview) {
+        return Err(err("仅限截图遮罩窗口调用"));
+    }
     let frame = pending_capture()?;
     let m = frame
         .monitors
@@ -1311,7 +1379,10 @@ static PENDING_SELECTION: Mutex<Option<SelRect>> = Mutex::new(None);
 /// 与 `screenshot_overlay_image`（整屏底图）不同，这里按 `PENDING_SELECTION`
 /// 从帧里裁出选区那一块，标注页 `drawImage` 时就是 1:1 清晰底图。
 #[tauri::command]
-pub fn screenshot_selection_image() -> Result<SelectionImage, String> {
+pub fn screenshot_selection_image(webview: tauri::WebviewWindow) -> Result<SelectionImage, String> {
+    if !is_internal_media_window(&webview) {
+        return Err(err("仅限截图遮罩窗口调用"));
+    }
     let frame = pending_capture()?;
     let sel = PENDING_SELECTION
         .lock()
@@ -1350,19 +1421,95 @@ pub struct CropResult {
     pub screen_y: i32,
 }
 
+/// 最近一次「截图复制」的屏幕锚点：图片左上角的物理坐标 + 像素指纹。
+///
+/// 用途（用户需求：截图后贴图的位置与截图时一致）：截图页点「复制」时记住
+/// 选区在屏幕上的位置；贴图热键读到剪贴板图片后比对指纹，一致就贴回原位，
+/// 不一致（用户复制了别的图）仍按光标居中。**一次性**：取走即清，贴完失效。
+#[derive(Debug, Clone, Copy)]
+struct CaptureAnchor {
+    x: i32,
+    y: i32,
+    fingerprint: u64,
+}
+
+static CAPTURE_ANCHOR: Mutex<Option<CaptureAnchor>> = Mutex::new(None);
+
+/// 对解码后的 RGBA 计算稳定指纹（同一进程内一致即可；不跨进程持久化）。
+pub(crate) fn pixel_fingerprint(w: u32, h: u32, rgba: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    w.hash(&mut hasher);
+    h.hash(&mut hasher);
+    rgba.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// 取走截图复制留下的屏幕锚点（一次性；贴图热键用）。
+pub(crate) fn take_capture_anchor() -> Option<(i32, i32, u64)> {
+    CAPTURE_ANCHOR
+        .lock()
+        .ok()?
+        .take()
+        .map(|a| (a.x, a.y, a.fingerprint))
+}
+
 /// 把一张 PNG（data URL）写进系统剪贴板。
 #[tauri::command]
-pub fn screenshot_copy_image(data_url: String) -> Result<(), String> {
+pub fn screenshot_copy_image(
+    webview: tauri::WebviewWindow,
+    plugin_id: Option<String>,
+    data_url: String,
+) -> Result<(), String> {
+    require_screenshot_caller(&webview, plugin_id.as_deref(), "clipboard.write")?;
     let bytes = parse_data_url(&data_url)?;
     if bytes.is_empty() {
         return Err(err("图片内容为空"));
     }
-    set_clipboard_png(&bytes)
+    let result = set_clipboard_png(&bytes);
+    // 剪贴板已不是「截图复制」那一张：锚点失效，避免贴图按旧坐标贴错位置。
+    if result.is_ok() {
+        if let Ok(mut guard) = CAPTURE_ANCHOR.lock() {
+            *guard = None;
+        }
+    }
+    result
+}
+
+/// 截图页「复制」专用：写剪贴板的同时记住这张图在屏幕上的位置。
+///
+/// `x/y` 是选区左上角的**物理屏幕坐标**（由 `screenshot_crop` 的
+/// `screen_x/screen_y` 提供）。贴图热键随后贴同一张图时会用这个锚点原地钉图。
+#[tauri::command]
+pub fn screenshot_copy_image_at(
+    webview: tauri::WebviewWindow,
+    plugin_id: Option<String>,
+    data_url: String,
+    x: i32,
+    y: i32,
+) -> Result<(), String> {
+    require_screenshot_caller(&webview, plugin_id.as_deref(), "clipboard.write")?;
+    let bytes = parse_data_url(&data_url)?;
+    if bytes.is_empty() {
+        return Err(err("图片内容为空"));
+    }
+    let (w, h, rgba) = decode_png(&bytes)?;
+    set_clipboard_png(&bytes)?;
+    let fingerprint = pixel_fingerprint(w, h, &rgba);
+    if let Ok(mut guard) = CAPTURE_ANCHOR.lock() {
+        *guard = Some(CaptureAnchor { x, y, fingerprint });
+    }
+    Ok(())
 }
 
 /// 把一段文本写进系统剪贴板（遮罩页「按 C 取色」把 HEX 交给用户）。
 #[tauri::command]
-pub fn screenshot_copy_text(text: String) -> Result<(), String> {
+pub fn screenshot_copy_text(
+    webview: tauri::WebviewWindow,
+    plugin_id: Option<String>,
+    text: String,
+) -> Result<(), String> {
+    require_screenshot_caller(&webview, plugin_id.as_deref(), "clipboard.write")?;
     write_text_to_clipboard(&text)
 }
 
@@ -1407,12 +1554,14 @@ fn shot_entry_for(path: &std::path::Path, rel_path: String) -> Result<ShotEntry,
 ///
 /// 只允许写进 `<app_data>/plugin-data/<plugin_id>/shots/`，
 /// 文件名由宿主生成（不接受调用方传路径），从根上杜绝目录穿越。
-///
-/// 注意：这是**插件 API** 的落盘（`ms.screenshot.save`）。宿主遮罩页的
-/// 「保存」按钮走的是 `screenshot_save_shot_as`（系统另存为对话框），
-/// 那条路径会落盘成功后**再调本命令**把同一张图收进画廊。
 #[tauri::command]
-pub fn screenshot_save_shot(app: tauri::AppHandle, plugin_id: String, data_url: String) -> Result<ShotEntry, String> {
+pub fn screenshot_save_shot(
+    app: tauri::AppHandle,
+    webview: tauri::WebviewWindow,
+    plugin_id: String,
+    data_url: String,
+) -> Result<ShotEntry, String> {
+    require_screenshot_caller(&webview, Some(&plugin_id), "screenshot.write")?;
     let bytes = decode_shot_payload(&data_url)?;
     let dir = shots_dir(&app, &plugin_id)?;
     let name = new_shot_name();
@@ -1422,32 +1571,34 @@ pub fn screenshot_save_shot(app: tauri::AppHandle, plugin_id: String, data_url: 
 }
 
 /// 把一张 PNG **另存到用户选定的位置**（系统文件保存对话框）。
-///
-/// 宿主遮罩页「保存」按的就是它：弹系统保存框让用户选目录与文件名，
-/// 用户取消 → `Ok(None)`（既不写盘也不算失败）；确认为 `Ok(Some(落盘路径))`。
-///
-/// 用户可能在对话框里把扩展名改掉（或删掉），落盘前统一校正成 `.png`——
-/// data URL 里的字节始终是 PNG，扩展名与内容必须一致，否则有些看图软件
-/// 会按扩展名猜错解码器而打不开。
-///
-/// 打开中的插件画廊要不要收录，由调用方决定：遮罩页在落盘成功后，若目标
-/// 正好在**本插件截图目录**内，会再调 `screenshot_save_shot` + 广播事件。
 #[tauri::command]
 pub async fn screenshot_save_shot_as(
     app: tauri::AppHandle,
-    plugin_id: String,
+    webview: tauri::WebviewWindow,
+    plugin_id: Option<String>,
     data_url: String,
     parent_dir: Option<String>,
 ) -> Result<Option<String>, String> {
+    require_screenshot_caller(&webview, plugin_id.as_deref(), "screenshot.write")?;
     let bytes = decode_shot_payload(&data_url)?;
-    let dir = shots_dir(&app, &plugin_id)?;
+    let fallback_dir = plugin_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|pid| shots_dir(&app, pid).ok())
+        .or_else(|| app.path().picture_dir().ok())
+        .or_else(|| app.path().download_dir().ok());
 
     // 起始目录：调用方给的（如插件画廊正打开的那张截图所在目录）优先；
-    // 非法/不存在（被删了）就回落到截图目录，别让对话框打不开。
+    // 非法/不存在（被删了）就回落到截图目录或系统图片目录，别让对话框打不开。
     let mut builder = app.dialog().file().set_title("保存截图").add_filter("PNG 图片", &["png"]);
     match parent_dir.as_deref().map(std::path::Path::new) {
         Some(p) if p.is_dir() => builder = builder.set_directory(p),
-        _ => builder = builder.set_directory(&dir),
+        _ => {
+            if let Some(dir) = fallback_dir.as_deref() {
+                builder = builder.set_directory(dir);
+            }
+        }
     }
 
     let picked = tauri::async_runtime::spawn_blocking(move || builder.blocking_save_file())
@@ -1485,24 +1636,35 @@ pub async fn screenshot_save_shot_as(
 
 /// 列出插件私有目录里的截图（按时间从新到旧）。
 #[tauri::command]
-pub fn screenshot_list_shots(app: tauri::AppHandle, plugin_id: String) -> Result<Vec<ShotEntry>, String> {
+pub fn screenshot_list_shots(
+    app: tauri::AppHandle,
+    webview: tauri::WebviewWindow,
+    plugin_id: String,
+) -> Result<Vec<ShotEntry>, String> {
+    require_screenshot_caller(&webview, Some(&plugin_id), "screenshot.read")?;
     scan_shots(&app, &plugin_id)
 }
 
 /// 返回插件截图目录的**绝对路径**（宿主自己拼，不接受调用方传路径）。
-///
-/// 用途只有一个：遮罩页要把系统「另存为」对话框的起始目录设到这里，
-/// 并在落盘后判断「用户是不是存进了截图目录」以决定要不要同时收进画廊。
-/// 目录不存在时会就地建出来（`shots_dir` 的语义），所以这条命令不会失败到
-/// 让保存走不下去。
 #[tauri::command]
-pub fn screenshot_shots_dir(app: tauri::AppHandle, plugin_id: String) -> Result<String, String> {
+pub fn screenshot_shots_dir(
+    app: tauri::AppHandle,
+    webview: tauri::WebviewWindow,
+    plugin_id: String,
+) -> Result<String, String> {
+    require_screenshot_caller(&webview, Some(&plugin_id), "screenshot.write")?;
     Ok(shots_dir(&app, &plugin_id)?.to_string_lossy().to_string())
 }
 
 /// 读回一张截图 → data URL（画廊缩略图/大图）。
 #[tauri::command]
-pub fn screenshot_read_shot(app: tauri::AppHandle, plugin_id: String, rel_path: String) -> Result<String, String> {
+pub fn screenshot_read_shot(
+    app: tauri::AppHandle,
+    webview: tauri::WebviewWindow,
+    plugin_id: String,
+    rel_path: String,
+) -> Result<String, String> {
+    require_screenshot_caller(&webview, Some(&plugin_id), "screenshot.read")?;
     let path = safe_shot_path(&app, &plugin_id, &rel_path)?;
     let md = std::fs::metadata(&path).map_err(|e| err(&format!("截图不存在: {e}")))?;
     if !md.is_file() {
@@ -1527,14 +1689,26 @@ pub fn screenshot_read_shot(app: tauri::AppHandle, plugin_id: String, rel_path: 
 
 /// 删除一张截图。
 #[tauri::command]
-pub fn screenshot_delete_shot(app: tauri::AppHandle, plugin_id: String, rel_path: String) -> Result<(), String> {
+pub fn screenshot_delete_shot(
+    app: tauri::AppHandle,
+    webview: tauri::WebviewWindow,
+    plugin_id: String,
+    rel_path: String,
+) -> Result<(), String> {
+    require_screenshot_read_or_write(&webview, &plugin_id)?;
     let path = safe_shot_path(&app, &plugin_id, &rel_path)?;
     std::fs::remove_file(&path).map_err(|e| err(&format!("删除截图失败: {e}")))
 }
 
 /// 删除早于 `days` 天的截图，返回删掉的张数（画廊「只留最近 N 天」用）。
 #[tauri::command]
-pub fn screenshot_prune_shots(app: tauri::AppHandle, plugin_id: String, days: u64) -> Result<usize, String> {
+pub fn screenshot_prune_shots(
+    app: tauri::AppHandle,
+    webview: tauri::WebviewWindow,
+    plugin_id: String,
+    days: u64,
+) -> Result<usize, String> {
+    require_screenshot_caller(&webview, Some(&plugin_id), "screenshot.write")?;
     let cutoff = std::time::SystemTime::now()
         .checked_sub(std::time::Duration::from_secs(days.saturating_mul(86400)));
     let cutoff = match cutoff {
@@ -1563,88 +1737,20 @@ pub fn screenshot_prune_shots(app: tauri::AppHandle, plugin_id: String, days: u6
 
 /// 广播「新截图已保存」（遮罩页保存后调用，插件画廊据此刷新）。
 #[tauri::command]
-pub fn screenshot_notify_saved(app: tauri::AppHandle, plugin_id: Option<String>, rel_path: Option<String>) -> Result<(), String> {
+pub fn screenshot_notify_saved(
+    app: tauri::AppHandle,
+    webview: tauri::WebviewWindow,
+    plugin_id: Option<String>,
+    rel_path: Option<String>,
+) -> Result<(), String> {
+    if !is_internal_media_window(&webview) {
+        require_screenshot_caller(&webview, plugin_id.as_deref(), "screenshot.write")?;
+    }
     let _ = app.emit(
         EVENT_SCREENSHOT_SAVED,
         serde_json::json!({ "pluginId": plugin_id, "relPath": rel_path }),
     );
     Ok(())
-}
-
-// ===================== 插件侧：截图快捷键 =====================
-
-/// 读「截图」动作当前绑的键（没有则返回空串 = 未设置）。
-///
-/// 插件前台要显示「当前快捷键」，而快捷键的权威存储是宿主的 settings.json
-/// （`shortcut_bindings`），插件不该自己存一份、否则两边会不一致。
-///
-/// 返回空串的语义是「**没绑**」：只要「截图」插件已安装，宿主就会按清单里的
-/// `contributes.shortcut.defaultShortcut` 自动注入一条默认热键
-/// （见 lib.rs `reconcile_plugin_actions`），因此正常情况这里总能读到键；
-/// 读到空串只可能是插件未安装或用户主动解绑过——那种情况下如实返回，让前台显示
-/// 「未设置」，而不是再报一个并不能按下去用的默认值。
-#[tauri::command]
-pub fn screenshot_get_shortcut(app: tauri::AppHandle) -> Result<String, String> {
-    let bindings = crate::read_shortcut_bindings_for_plugin(&app);
-    Ok(bindings
-        .into_iter()
-        .find(|b| b.action == crate::SHORTCUT_ACTION_SCREENSHOT)
-        .map(|b| b.shortcut)
-        .unwrap_or_default())
-}
-
-/// 给「截图」动作**登记/改绑**一个全局快捷键（插件前台的设置项）。
-///
-/// 语义是「认领」而不是「替换整套绑定」：
-///   - 已有 screenshot 绑定 → 改这一条的键（其余绑定原样保留）；
-///   - 没有 → 追加一条；
-///   - 键为空串 → 删除该条（等于关掉截图热键），并记下「用户主动解绑」，
-///     否则读绑定时的自愈补齐会在下次启动把它加回来。
-///
-/// 走宿主既有的严格校验 + 注册 + 落盘链路（`apply_shortcut_bindings`），
-/// 因此「与其它热键冲突」这类错误会原样返回给插件展示。
-#[tauri::command]
-pub fn screenshot_set_shortcut(app: tauri::AppHandle, shortcut: String) -> Result<String, String> {
-    let key = shortcut.trim().to_lowercase();
-    let mut list = crate::read_shortcut_bindings_for_plugin(&app);
-
-    // 空串 = 解绑（移除这一条）
-    if key.is_empty() {
-        list.retain(|b| b.action != crate::SHORTCUT_ACTION_SCREENSHOT);
-        if list.is_empty() {
-            return Err(err("至少要保留「呼出 / 隐藏搜索框」这一条快捷键"));
-        }
-        let applied = crate::apply_shortcut_bindings_for_plugin(&app, &list);
-        // 标记只在解绑真正生效后写：注册失败（列表原样回滚）时不该记成已解绑
-        if applied.is_ok() {
-            crate::set_screenshot_unbound(&app, true);
-        }
-        return applied.map(|_| String::new());
-    }
-
-    // 同一按键已被别的动作占用 → 明确报错，避免静默抢键
-    if let Some(other) = list
-        .iter()
-        .find(|b| b.shortcut == key && b.action != crate::SHORTCUT_ACTION_SCREENSHOT)
-    {
-        return Err(err(&format!("该组合键已被「{}」占用，请换一个", other.action)));
-    }
-
-    match list
-        .iter_mut()
-        .find(|b| b.action == crate::SHORTCUT_ACTION_SCREENSHOT)
-    {
-        Some(entry) => entry.shortcut = key.clone(),
-        None => list.push(crate::ShortcutBinding {
-            shortcut: key.clone(),
-            action: crate::SHORTCUT_ACTION_SCREENSHOT.to_string(),
-            target: None,
-        }),
-    }
-    crate::apply_shortcut_bindings_for_plugin(&app, &list)?;
-    // 用户重新绑定了 → 撤掉「主动解绑」标记，否则下次读绑定会被误判成不要它
-    crate::set_screenshot_unbound(&app, false);
-    Ok(key)
 }
 
 // ===================== 遮罩窗口 =====================
@@ -1657,7 +1763,11 @@ pub fn screenshot_set_shortcut(app: tauri::AppHandle, shortcut: String) -> Resul
 /// - `transparent(true)`：让遮罩层自己能画半透明暗角。
 /// - `always_on_top + skip_taskbar + decorations(false)`：盖住一切、不抢任务栏。
 /// - `set_position/set_size` 用 **Physical** 值：混合 DPI 下不做逻辑换算最稳。
-fn build_overlay_window(app: &tauri::AppHandle, m: &MonitorRect) -> Result<(), String> {
+fn build_overlay_window(
+    app: &tauri::AppHandle,
+    m: &MonitorRect,
+    owner_plugin_id: Option<&str>,
+) -> Result<(), String> {
     use tauri::{PhysicalPosition, PhysicalSize, WebviewWindowBuilder, WebviewUrl};
 
     let label = format!("{OVERLAY_LABEL_PREFIX}{}", m.index);
@@ -1671,7 +1781,14 @@ fn build_overlay_window(app: &tauri::AppHandle, m: &MonitorRect) -> Result<(), S
         return Ok(());
     }
 
-    let url = WebviewUrl::App(format!("overlay.html?monitor={}", m.index).into());
+    let mut query = format!("monitor={}", m.index);
+    if let Some(pid) = owner_plugin_id.map(str::trim).filter(|s| !s.is_empty()) {
+        if crate::plugin_host::plugin_data_dir(app, pid).is_ok() {
+            query.push_str("&pluginId=");
+            query.push_str(pid);
+        }
+    }
+    let url = WebviewUrl::App(format!("overlay.html?{query}").into());
     let win = WebviewWindowBuilder::new(app, &label, url)
         .title("截图")
         .position(m.x as f64, m.y as f64)
@@ -1697,12 +1814,12 @@ fn build_overlay_window(app: &tauri::AppHandle, m: &MonitorRect) -> Result<(), S
 
 /// 热键动作入口：抓屏 + 开遮罩。**同步**（供 global-shortcut 回调调用），
 /// 内部把窗口创建丢到异步运行时，绝不阻塞事件循环。
-pub fn start_overlay_from_shortcut(app: &tauri::AppHandle) {
+pub fn start_overlay_from_shortcut(app: &tauri::AppHandle, owner_plugin_id: Option<String>) {
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
-        // 收窗口的事在 screenshot_open_overlay 里统一做（插件前台也走那条命令，
+        // 收窗口的事在 open_overlay_inner 里统一做（插件前台也走那条命令，
         // 两条路径必须一致）；这里只管失败后的兜底。
-        if let Err(e) = screenshot_open_overlay(handle.clone()).await {
+        if let Err(e) = open_overlay_inner(&handle, owner_plugin_id.as_deref()).await {
             eprintln!("打开截图遮罩失败: {e}");
             // 失败也要让用户知道，否则「按了没反应」：把刚收起的搜索窗放回来
             if let Some(win) = handle.get_webview_window("main") {

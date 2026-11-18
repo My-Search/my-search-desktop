@@ -25,7 +25,12 @@ import {
   type PluginSyncState,
 } from "../../lib/plugins/host.ts";
 import { permissionBaseId } from "../../lib/plugins/permissions.ts";
-import { syncRecordGateway, syncShortcutActions } from "../../lib/plugins/gateway.ts";
+import {
+  onRegistryChanged,
+  syncRecordGateway,
+  syncRegistryGateway,
+  syncShortcutActions,
+} from "../../lib/plugins/gateway.ts";
 import { envGrantsOf, envPermissionOf } from "../../lib/plugins/env-store.ts";
 import type { EnvPickResult } from "../../composables/useEnvPicker.ts";
 import {
@@ -35,42 +40,6 @@ import {
   readPluginText,
   readPluginBinary,
   restartPluginBackend,
-  screenshotCloseOverlay,
-  screenshotCopyImage,
-  screenshotCrop,
-  screenshotDeleteShot,
-  screenshotListShots,
-  screenshotNotifySaved,
-  screenshotOpenOverlay,
-  screenshotOverlayImage,
-  screenshotPickRegion,
-  screenshotPruneShots,
-  screenshotReadShot,
-  screenshotSaveShot,
-  screenshotSaveShotAs,
-  screenshotShotsDir,
-  screenshotGetShortcut,
-  screenshotSetShortcut,
-  screenshotCapture,
-  clipboardHistoryList,
-  clipboardHistoryPage,
-  clipboardHistoryReadImage,
-  clipboardHistoryDelete,
-  clipboardHistoryClear,
-  clipboardHistoryCopy,
-  clipboardHistorySetFavorite,
-  clipboardHistorySetCategory,
-  clipboardHistoryUpdate,
-  clipboardHistoryGetShortcut,
-  clipboardHistorySetShortcut,
-  gestureBindingsList,
-  gestureBindingsSync,
-  gestureGetEnabled,
-  gestureSetEnabled,
-  gestureListProcesses,
-  gestureRecordStart,
-  gestureRecordCancel,
-  type GestureBindingIpc,
   stopPluginBackend,
   watchPluginDir,
 } from "../../lib/plugins/ipc.ts";
@@ -247,7 +216,7 @@ export function usePluginHost(opts: PluginHostRuntimeOptions) {
     return iconCache.get(`${pluginId}/${ref}`);
   }
 
-  /** 从 localStorage 读注册表并同步网关（幂等；内容未变则跳过） */
+  /** 从 localStorage 读注册表并原子同步网关（幂等；内容未变则跳过） */
   async function reload(force = false): Promise<void> {
     const fp = registryFingerprint();
     if (!force && fp === syncedFingerprint && loaded.value) return;
@@ -255,28 +224,28 @@ export function usePluginHost(opts: PluginHostRuntimeOptions) {
     syncedFingerprint = fp;
     loaded.value = true;
     refreshSyncConsumers();
-    // 网关同步：Rust 侧按「已授予权限」做第二道拦截，必须先把权限镜像过去
-    for (const rec of registry.plugins) {
-      if (rec.source.kind === "legacy") continue;
-      try {
-        await syncRecordGateway(rec);
-      } catch (e) {
-        console.warn(`[插件] 网关同步失败（${rec.id}）:`, e);
-      }
-      // 预读图标（相对路径形态）——必须在合成插件项之前完成
-      if (rec.enabled) await preloadIcons(rec);
-      // 目录挂载的插件：登记源目录监听（幂等；由 Rust 侧广播变化事件）
-      if (rec.source.dev && rec.source.ref) {
-        try {
-          await watchPluginDir(rec.id, rec.source.ref, true);
-        } catch (e) {
-          console.warn(`[插件] 登记目录监听失败（${rec.id}）:`, e);
-        }
-      }
+    // 网关批量同步：一次 IPC 完成全部插件权限镜像、残留剔除、一次快照落盘与按需钩子调和
+    try {
+      await syncRegistryGateway(registry);
+    } catch (e) {
+      console.warn("[插件] 批量网关同步失败:", e);
     }
+    // 并行预读启用插件的图标与登记开发目录监听
+    await Promise.all(
+      registry.plugins
+        .filter((rec) => rec.source.kind !== "legacy")
+        .map(async (rec) => {
+          if (rec.enabled) await preloadIcons(rec);
+          if (rec.source.dev && rec.source.ref) {
+            try {
+              await watchPluginDir(rec.id, rec.source.ref, true);
+            } catch (e) {
+              console.warn(`[插件] 登记目录监听失败（${rec.id}）:`, e);
+            }
+          }
+        })
+    );
     opts.onItemsChanged?.();
-    // 快捷键作用类型同步：搜索窗口也可能先于设置窗口感知注册表变化（如启动、
-    // 呼出时的 reload）。同上，内部按动作集合去重，无变化不重复发 IPC。
     try {
       await syncShortcutActions(registry);
     } catch (e) {
@@ -432,15 +401,17 @@ export function usePluginHost(opts: PluginHostRuntimeOptions) {
 
   /** 事件监听取消函数（应用退出时调用） */
   let unlistenDevChanged: (() => void) | null = null;
+  let unlistenRegistryChanged: (() => void) | null = null;
 
   /**
-   * 开始监听「开发插件变化」事件（应用启动时调用一次）。
-   *
-   * 事件是 Rust 侧的文件监听线程广播的，**携带路径与防抖结果**；
-   * 这里只做「新鲜度过滤 + 串行消费」——同一插件的多次事件必须按序应用，
-   * 否则并发读清单会互相覆盖（后读到的旧内容可能盖掉新内容）。
+   * 开始监听「开发插件变化」与「跨窗口注册表变更」事件（应用启动时调用一次）。
    */
   async function startDevWatcher(): Promise<void> {
+    if (!unlistenRegistryChanged) {
+      unlistenRegistryChanged = onRegistryChanged(() => {
+        void reload();
+      });
+    }
     if (unlistenDevChanged) return;
     // 串行队列：一个插件的重载没做完之前，后续事件排队（而不是并发跑）
     let chain: Promise<void> = Promise.resolve();
@@ -461,6 +432,8 @@ export function usePluginHost(opts: PluginHostRuntimeOptions) {
   function stopDevWatcher(): void {
     unlistenDevChanged?.();
     unlistenDevChanged = null;
+    unlistenRegistryChanged?.();
+    unlistenRegistryChanged = null;
   }
   /** 插件贡献的搜索项（每次调用重新合成，保证装/卸/禁用即时生效） */
   function pluginItems(): SearchItem[] {
@@ -615,49 +588,8 @@ export function usePluginHost(opts: PluginHostRuntimeOptions) {
         const fn = level === "error" ? console.error : level === "warn" ? console.warn : console.log;
         fn(`[插件 ${id}] ${text}`);
       },
-      // ===== 截图能力：直接转发到 ipc 的 screenshot_* 命令（Rust 侧再校验一次）=====
-      screenshotCapture: () => screenshotCapture(),
-      screenshotOpenOverlay: () => screenshotOpenOverlay(),
-      screenshotCloseOverlay: () => screenshotCloseOverlay(),
-      screenshotOverlayImage: (monitorIndex) => screenshotOverlayImage(monitorIndex),
-      screenshotCrop: (monitorIndex, x, y, width, height) =>
-        screenshotCrop(monitorIndex, x, y, width, height),
-      screenshotPickRegion: () => screenshotPickRegion(),
-      screenshotCopyImage: (dataUrl) => screenshotCopyImage(dataUrl),
-      screenshotSaveShot: (pluginId, dataUrl) => screenshotSaveShot(pluginId, dataUrl),
-      screenshotSaveShotAs: (pluginId, dataUrl, parentDir) =>
-        screenshotSaveShotAs(pluginId, dataUrl, parentDir),
-      screenshotShotsDir: (pluginId) => screenshotShotsDir(pluginId),
-      screenshotNotifySaved: (pluginId, relPath) => screenshotNotifySaved(pluginId, relPath),
-      screenshotListShots: (pluginId) => screenshotListShots(pluginId),
-      screenshotReadShot: (pluginId, relPath) => screenshotReadShot(pluginId, relPath),
-      screenshotDeleteShot: (pluginId, relPath) => screenshotDeleteShot(pluginId, relPath),
-      screenshotPruneShots: (pluginId, days) => screenshotPruneShots(pluginId, days),
-      screenshotGetShortcut: () => screenshotGetShortcut(),
-      screenshotSetShortcut: (shortcut) => screenshotSetShortcut(shortcut),
-      // ===== 剪贴板历史：转发到宿主原生能力（监听在 Rust 侧，这里只做数据通道）=====
-      clipboardHistoryList: (query) => clipboardHistoryList(query),
-      clipboardHistoryPage: (opts) => clipboardHistoryPage(opts),
-      clipboardHistoryReadImage: (relPath) => clipboardHistoryReadImage(relPath),
-      clipboardHistoryDelete: (id) => clipboardHistoryDelete(id),
-      clipboardHistoryClear: (keepFavorites) => clipboardHistoryClear(keepFavorites),
-      clipboardHistoryCopy: (id) => clipboardHistoryCopy(id),
-      clipboardHistorySetFavorite: (id, favorite) => clipboardHistorySetFavorite(id, favorite),
-      clipboardHistorySetCategory: (id, category) => clipboardHistorySetCategory(id, category),
-      clipboardHistoryUpdate: (id, text) => clipboardHistoryUpdate(id, text),
-      clipboardHistoryGetShortcut: () => clipboardHistoryGetShortcut(),
-      clipboardHistorySetShortcut: (shortcut) => clipboardHistorySetShortcut(shortcut),
-      // ===== 鼠标手势：转发到宿主原生能力（钩子在 Rust 侧，这里只做配置通道）=====
-      gestureGetEnabled: () => gestureGetEnabled(),
-      gestureSetEnabled: (enabled) => gestureSetEnabled(enabled),
-      gestureBindingsList: () => gestureBindingsList(),
-      gestureBindingsSync: (bindings) =>
-        gestureBindingsSync(bindings as GestureBindingIpc[]),
-      gestureListProcesses: () => gestureListProcesses(),
-      // ===== 画手势录制：面板点「◎ 画手势录制」→ Rust 置录制模式（只识别不执行） =====
-      gestureRecordStart: () => gestureRecordStart(),
-      gestureRecordCancel: () => gestureRecordCancel(),
-      // ===== 数据同步：转发到 App.vue 注入的桥（那边负责引擎生命周期）=====
+      // 原生能力（screenshot / clipboard / gesture / shortcuts / store.readJson 等）
+      // 已在 `lib/plugins/host/native-api.ts` 表驱动直连 IPC，此处不再保留透传样板。
       syncNow: opts.syncNow,
       syncStatus: opts.syncStatus,
     };

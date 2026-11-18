@@ -125,7 +125,7 @@ check("老版截图插件包仍提供动作（迁移桥）", legacyPkg, [
 check(
   "新插件包声明优先于迁移桥",
   availableShortcutActions(
-    reg(rec("com.mysearch.clipboard", { action: "clipboard", title: "自定义标题", defaultShortcut: "ctrl+alt+b" }))
+    reg(rec("com.mysearch.clipboard", { action: "clipboard", title: "自定义标题", defaultShortcut: "ctrl+alt+v" }))
   )[0].title,
   "自定义标题"
 );

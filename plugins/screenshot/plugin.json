@@ -1,12 +1,13 @@
 {
   "id": "com.zhuangjie.screenshot",
   "name": "截图",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "apiVersion": 1,
   "minAppVersion": "7.9.15",
+  "autoUpdate": true,
   "author": "zhuangjie",
   "description": "全局快捷键截图：框选区域、标注后复制到剪贴板，并可把剪贴板图片贴在屏幕上，前台查看最近 7 天的截图",
-  "changelog": "新增「贴图」：把剪贴板里的图片钉在屏幕上（默认 Ctrl+Alt+V，可贴多张）；双击贴图关闭，右键贴图可显示编辑工具 / 关闭 / 复制。",
+  "changelog": "贴图默认快捷键调整为 Ctrl+Alt+P（释放 Ctrl+Alt+V 给剪贴板历史）；支持默认自动更新。",
   "homepage": "https://github.com/zhuangjie/screenshot",
   "repository": "https://github.com/My-Search/my-search-desktop/tree/master/plugins/screenshot",
   "icon": "icon.svg",
@@ -48,7 +49,7 @@
       {
         "action": "pin",
         "title": "贴图（钉住剪贴板图片）",
-        "defaultShortcut": "ctrl+alt+v"
+        "defaultShortcut": "ctrl+alt+p"
       }
     ]
   },
