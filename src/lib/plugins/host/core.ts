@@ -106,6 +106,18 @@ export interface PluginHostContext {
   requestPermission?: (pluginId: string, permission: string) => Promise<boolean>;
   /** 当前附加在搜索框里的文件/文件夹 */
   getAttachments?: () => readonly AttachedEntry[];
+  /**
+   * 把**用户刚在系统对话框里挑中的**文件夹并入搜索框附件（`ms.input.pickFolders` 用）。
+   *
+   * 为什么不是任意 `attach(paths)`：附件集合就是 `file.read` 的信任边界
+   * （Rust 侧只放行附加集合内的路径）。把「加附件」开放给插件等于把
+   * `file.read` 升级成全盘读——因此这里只接受「选择文件夹对话框」的产物，
+   * 由 App.vue 注入实现（走与粘贴/拖入完全相同的 attachByPaths 管线）。
+   * 返回实际并入的条目（描述失败 / 已存在的会被过滤或去重）。
+   */
+  attachPaths?: (paths: string[]) => Promise<AttachedEntry[]>;
+  /** 按路径从搜索框附件里移除一项（`ms.input.detach` 用；只减不加，无扩权风险） */
+  detachPath?: (path: string) => Promise<boolean>;
   /** 请求宿主重新求解并应用一次插件主题 */
   refreshPluginTheme?: () => void;
   /** 发起一次云端数据同步 */

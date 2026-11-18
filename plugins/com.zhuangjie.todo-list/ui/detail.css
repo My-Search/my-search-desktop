@@ -359,8 +359,17 @@
 }
 .todo-item-done .todo-text { text-decoration: line-through; color: var(--text-secondary, #6b7a90); }
 
-/* 行内编辑态：整行换成输入框 + 保存/取消 */
+/* 行内编辑态：整行换成「等级下拉 + 输入框」 + 保存/取消 */
 .todo-edit-row { display: flex; gap: 6px; align-items: center; }
+/* 编辑行的等级下拉：复用 .todo-level 的配色，但压到与输入框同高同字号
+   （新增区那个是 34px 高的「主操作」，编辑行里它只是行内小控件） */
+.todo-edit-level {
+  flex: none;
+  min-height: 0;
+  padding: 4px 6px;
+  font-size: 13px;
+  border-radius: 6px;
+}
 .todo-edit-input {
   flex: 1;
   min-width: 0;

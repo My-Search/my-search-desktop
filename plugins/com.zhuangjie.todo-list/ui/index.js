@@ -458,9 +458,14 @@
     var bodyHtml;
     if (state.editingId === t.id) {
       // 行内编辑：输入框内容原样（未解析）回填，保存时再解析；
+      // 紧急等级由前面的下拉直接承载（所见即所选，见 levelOptionsHtml）；
       // 详情单独一个 textarea（Enter 换行，Ctrl+Enter 保存）
       bodyHtml =
         '<div class="todo-edit-row">' +
+          '<select class="todo-level todo-edit-level" data-edit-level="' + escapeHtml(t.id) + '" ' +
+                  'title="紧急等级（点开直接改，保存时生效）" aria-label="紧急等级">' +
+            levelOptionsHtml(t.priority) +
+          "</select>" +
           '<input class="todo-edit-input" type="text" data-edit-input="' + escapeHtml(t.id) + '" ' +
                  'value="' + escapeHtml(serializeEdit(t)) + '">' +
         "</div>" +
@@ -497,11 +502,32 @@
     "</li>";
   }
 
-  /** 编辑态回填：把已解析的元信息还原成可直接再解析的文本 */
+  /**
+   * 编辑态的紧急等级下拉选项。「未设置」给两类场景：老的没有等级的条目
+   * （priority 为 null）保持原状，以及主动把一条待办的等级清掉。
+   * 选中值 = 当前等级；改完点「保存」才落库（与标题 / 标签一致的手感）。
+   */
+  function levelOptionsHtml(selected) {
+    var html = '<option value=""' + (selected ? "" : " selected") + ">未设置</option>";
+    var keys = ["high", "mid", "low"];
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i];
+      html += '<option value="' + k + '"' + (selected === k ? " selected" : "") + ">" +
+        URGENCIES[k].label + "</option>";
+    }
+    return html;
+  }
+
+  /**
+   * 编辑态回填：把已解析的元信息还原成可直接再解析的文本。
+   *
+   * 紧急等级**不在文本里回填**——它由编辑行里的等级下拉直接承载（选择即所见），
+   * 再写回 `!普通` 会让保存时「文本优先」压过用户在下拉里的修改。
+   * 文本里手写 `!紧急` 等仍然有效且优先（保存时文本优先，与新增区同一条规则）。
+   */
   function serializeEdit(t) {
     var s = t.text;
     for (var i = 0; i < t.tags.length; i++) s += " #" + t.tags[i];
-    if (t.priority && URGENCIES[t.priority]) s += " !" + URGENCIES[t.priority].label;
     if (t.due) s += " " + t.due;
     return s;
   }
@@ -759,11 +785,12 @@
     var t = findTodo(id);
     if (!t) { state.editingId = null; render(); return; }
     var noteEl = dom["todo-list"].querySelector('[data-edit-note="' + id + '"]');
+    var levelEl = dom["todo-list"].querySelector('[data-edit-level="' + id + '"]');
     t.text = parsed.text;
     t.note = noteEl ? String(noteEl.value || "").trim().slice(0, MAX_NOTE) : (t.note || "");
-    // 行内编辑没有新增区那个等级选择器可兜底：文本里没写 `!紧急/!普通/!低`
-    // 时保持原等级不动（否则每次编辑都会把没写等级的条目重置掉）
-    t.priority = parsed.priority || t.priority;
+    // 紧急等级来源优先级：文本里写了 `!紧急/!普通/!低` 就听文本（与新增区同规则），
+    // 否则用编辑行下拉的值（空串 = 主动清掉等级 → null）。
+    t.priority = parsed.priority || (levelEl ? (URGENCIES[levelEl.value] ? levelEl.value : null) : t.priority);
     t.tags = parsed.tags;
     t.due = parsed.due;
     t.updatedAt = Date.now();
@@ -903,7 +930,14 @@
           }
           return;
         }
-        if (!t.getAttribute("data-edit-input")) return;
+        if (!t.getAttribute("data-edit-input")) {
+          // 编辑行的等级下拉：Esc 取消编辑（Enter / 方向键交给下拉自己）
+          if (t.getAttribute("data-edit-level") && e.key === "Escape") {
+            e.preventDefault();
+            cancelEdit();
+          }
+          return;
+        }
         var id = t.getAttribute("data-edit-input");
         if (e.key === "Enter" && !e.isComposing) {
           e.preventDefault();

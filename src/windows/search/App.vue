@@ -504,8 +504,13 @@ function clearAttachments(): void {
   void attachmentsSync([]).catch(() => {});
 }
 
-/** 拖放落地：路径 → 名称/类型描述 → 并入附件 */
-async function attachByPaths(paths: string[]): Promise<void> {
+/**
+ * 拖放落地：路径 → 名称/类型描述 → 并入附件。
+ *
+ * 返回实际描述成功的条目（与附件同构），供「插件选择文件夹」（ms.input.pickFolders）
+ * 把结果回传给插件；解析失败（路径不存在等）返回 `[]`，已由 warn 记录。
+ */
+async function attachByPaths(paths: string[]): Promise<AttachedEntry[]> {
   try {
     const described = await describePaths(paths);
     onAttachEntries(
@@ -515,9 +520,36 @@ async function attachByPaths(paths: string[]): Promise<void> {
         path: d.path,
       }))
     );
+    return described.map((d) => ({
+      kind: d.isDir ? ("folder" as const) : ("file" as const),
+      name: d.name,
+      path: d.path,
+    }));
   } catch (e) {
     warn("[附件] 解析拖入路径失败:", e);
+    return [];
   }
+}
+
+/**
+ * 按路径从附件里移除一项（插件的 `ms.input.detach` 用；找不到返回 false）。
+ *
+ * 路径比较与 Rust 侧 norm_path 同口径：统一正斜杠、去尾部斜杠、Windows 下
+ * 忽略大小写——插件回传的 path 原样来自 chips（describePaths 的产物），但
+ * 归一化兜底能让「大小写/分隔符写法不同」的调用也命中同一条附件。
+ */
+function detachAttachmentByPath(path: string): boolean {
+  const norm = (p: string) =>
+    String(p ?? "")
+      .replace(/\\/g, "/")
+      .replace(/\/+$/, "")
+      .toLowerCase();
+  const target = norm(path);
+  if (!target) return false;
+  const index = attachments.value.findIndex((a) => norm(a.path) === target);
+  if (index < 0) return false;
+  onDetachEntry(index);
+  return true;
 }
 
 /** 结果列表是否显示（在非详情视图且有结果时展示） */
@@ -551,6 +583,12 @@ const syncBridge = useSyncBridge();
 const pluginHost = usePluginHost({
   getSearchData: () => engine.searchData,
   getAttachments: () => attachments.value,
+  // 插件 ms.input.pickFolders：把用户在系统「选择文件夹」对话框里挑中的
+  // 文件夹并入附件——走与粘贴/拖入完全相同的 attachByPaths 管线
+  //（describePaths → chips → Rust 登记 → 广播 ms-attachments-changed）。
+  attachPaths: async (paths) => await attachByPaths(paths),
+  // 插件 ms.input.detach：按路径从附件里移除（chips 上的 ×）
+  detachPath: async (path) => detachAttachmentByPath(path),
   triggerSearch: (kw) => {
     inputValue.value = kw;
     void search.doSearch(kw);

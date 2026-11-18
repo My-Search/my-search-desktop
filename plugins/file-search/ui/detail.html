@@ -8,7 +8,12 @@
       <h2>文件搜索</h2>
       <p class="fs-status" id="fs-status" hidden></p>
     </div>
-    <button id="fs-rescan" class="fs-btn" type="button">重新扫描</button>
+    <div class="fs-actions">
+      <!-- 选择文件夹：弹系统对话框挑选要搜索的文件夹（宿主并入搜索框附件）。
+           旧宿主没有 ms.input.pickFolders 时保持 hidden（能力降级）。 -->
+      <button id="fs-pick" class="fs-btn" type="button" hidden>选择文件夹</button>
+      <button id="fs-rescan" class="fs-btn" type="button">重新扫描</button>
+    </div>
   </div>
   <div class="fs-folders" id="fs-folders" hidden></div>
   <div class="fs-meta" id="fs-meta" hidden></div>

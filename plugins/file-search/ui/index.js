@@ -16,7 +16,12 @@
  *      再按关键词（空格分词、AND 语义）与类型页签（图片/音频/视频/Office及常见
  *      文档/压缩包/文件夹/其它文件）双重过滤；点击条目用系统默认程序打开；
  *      行右侧「文件夹图标」始终显示，点击用资源管理器定位（打开所在目录并选中）；
- *   4. 视图开着时再粘贴/移除文件夹：宿主广播 ms-attachments-changed，
+ *   4. 不想粘贴/拖入时：点右上角「选择文件夹」弹系统对话框挑文件夹，宿主把它
+ *      并进搜索框附件（ms.input.pickFolders；可多选）。文件夹 chips 尾部的 ×
+ *      把它从搜索范围里移除（ms.input.detach）。两个入口最终都汇进附件集合，
+ *      随后的 ms-attachments-changed 会自动触发重扫，不用手点「重新扫描」。
+ *      旧宿主没有这两个 API 时按钮不出现 / × 不渲染（能力降级，行为不变）；
+ *   5. 视图开着时再粘贴/移除文件夹：宿主广播 ms-attachments-changed，
  *      本插件自动重扫，不用手点「重新扫描」。
  *
  * 旧宿主兼容：没有 ms.input.listFolderStream 时退回 ms.input.listFolder
@@ -39,7 +44,7 @@
 
   // ===== DOM =====
   var dom = {};
-  ["fs-status", "fs-meta", "fs-cats", "fs-list", "fs-folders", "fs-foot", "fs-rescan"].forEach(function (id) {
+  ["fs-status", "fs-meta", "fs-cats", "fs-list", "fs-folders", "fs-foot", "fs-rescan", "fs-pick"].forEach(function (id) {
     dom[id] = document.getElementById(id);
   });
   /** 本实例的根节点（会话被卸载后脱离文档；老实例靠它判活，不打扰新实例） */
@@ -87,6 +92,18 @@
   var canFileIcons = !!(ms.input && typeof ms.input.fileIcons === "function");
   /** 宿主是否支持「流式列举」（ms.input.listFolderStream；旧宿主没有则退回一次性列举） */
   var canStream = !!(ms.input && typeof ms.input.listFolderStream === "function");
+  /**
+   * 宿主是否支持「插件内选择文件夹」（ms.input.pickFolders）。
+   *
+   * 点「选择文件夹」→ 宿主弹系统对话框 → 用户挑中的文件夹被并入搜索框附件
+   * （与粘贴/拖入同一条管线），随后的 ms-attachments-changed 自动触发重扫。
+   * 旧宿主没有该 API 时按钮保持 hidden，交互完全退回原样（能力降级）。
+   */
+  var canPickFolders = !!(ms.input && typeof ms.input.pickFolders === "function");
+  /** 宿主是否支持「从插件里移除附件」（ms.input.detach；没有则 chips 不出 ×） */
+  var canDetach = !!(ms.input && typeof ms.input.detach === "function");
+  /** 「选择文件夹」对话框进行中（防抖：模态对话框期间忽略再次点击） */
+  var picking = false;
   /** 路径 → 系统图标 data URL（资源管理器同款；异步到达后补渲染） */
   var iconMap = {};
   /** 正在请求中的路径（避免每次 render 重复发 IPC） */
@@ -355,6 +372,11 @@
         '<span class="fs-chip-icon">📁</span>' +
         '<span class="fs-chip-name">' + esc(baseName(f.path)) + "</span>" +
         (fail ? '<span class="fs-chip-mark">⚠</span>' : "") +
+        // × = 从搜索范围里移除该文件夹（旧宿主没有 ms.input.detach 时不渲染）
+        (canDetach
+          ? '<button type="button" class="fs-chip-x" data-detach="' + esc(f.path) +
+            '" title="移除该文件夹（不再搜索它）" aria-label="移除该文件夹">×</button>'
+          : "") +
         "</span>";
     }
     el.innerHTML = html;
@@ -743,7 +765,12 @@
       entries = [];
       scanned = false;
       render();
-      setStatus("请先在搜索框粘贴或拖入文件夹（可多个）", "warn");
+      setStatus(
+        canPickFolders
+          ? "点右上角「选择文件夹」添加要搜索的文件夹（也可在搜索框粘贴 / 拖入）"
+          : "请先在搜索框粘贴或拖入文件夹（可多个）",
+        "warn"
+      );
       return;
     }
 
@@ -862,6 +889,51 @@
     dom["fs-rescan"].addEventListener("click", function () {
       if (scanning) stopScan();
       else refresh();
+    });
+  }
+
+  // 「选择文件夹」：弹系统对话框挑选文件夹，宿主把它并入搜索框附件
+  //（ms.input.pickFolders；走与粘贴/拖入相同的管线：Rust 登记 + 广播）。
+  // 广播到达后 ms-attachments-changed 会自动 refresh——这里的兜底 refresh
+  // 只覆盖「选的全是已附加文件夹（附件没变化）」与「宿主没广播」两种情形。
+  if (dom["fs-pick"]) {
+    if (canPickFolders) dom["fs-pick"].hidden = false;
+    dom["fs-pick"].addEventListener("click", function () {
+      if (picking) return;
+      picking = true;
+      dom["fs-pick"].disabled = true;
+      var reset = function () {
+        picking = false;
+        if (dom["fs-pick"]) dom["fs-pick"].disabled = false;
+      };
+      Promise.resolve()
+        .then(function () {
+          return ms.input.pickFolders({ title: "选择要搜索的文件夹" });
+        })
+        .then(function (picked) {
+          if (!Array.isArray(picked) || picked.length === 0) return; // 用户取消：静默
+          if (scanning) return; // 在扫：广播/本轮收尾会带上新文件夹，不并发起两轮
+          refresh();
+        })
+        .catch(function (err) {
+          setStatus("选择文件夹失败：" + explainError(err), "err");
+        })
+        .then(reset, reset);
+    });
+  }
+
+  // 文件夹 chips 上的 ×：把该文件夹从搜索范围里移除（ms.input.detach）。
+  // 宿主移除后会广播 ms-attachments-changed → 自动重扫；移除失败才在此提示。
+  if (dom["fs-folders"]) {
+    dom["fs-folders"].addEventListener("click", function (e) {
+      var btn = e.target && e.target.closest ? e.target.closest(".fs-chip-x") : null;
+      if (!btn || !canDetach) return;
+      e.stopPropagation();
+      var p = btn.getAttribute("data-detach");
+      if (!p) return;
+      Promise.resolve(ms.input.detach(p)).catch(function (err) {
+        setStatus("移除文件夹失败：" + explainError(err), "err");
+      });
     });
   }
 

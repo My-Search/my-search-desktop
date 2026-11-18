@@ -117,6 +117,14 @@ export interface PluginHostRuntimeOptions {
   /** 当前附加在搜索框里的文件/文件夹（由 App.vue 注入，ms.input.attachments 用） */
   getAttachments?: () => readonly AttachedEntry[];
   /**
+   * 把用户刚在系统「选择文件夹」对话框里挑中的文件夹并入搜索框附件
+   * （由 App.vue 注入 attachByPaths；ms.input.pickFolders 用）。
+   * 不注入时插件调用会得到明确报错（不支持添加附件的窗口，如独立插件窗口）。
+   */
+  attachPaths?: (paths: string[]) => Promise<AttachedEntry[]>;
+  /** 按路径从搜索框附件里移除一项（由 App.vue 注入；ms.input.detach 用） */
+  detachPath?: (path: string) => Promise<boolean>;
+  /**
    * 开发插件（目录挂载）在磁盘上发生变化、且注册表已被更新后回调。
    *
    * 由 App.vue 注入：视图重挂要走视图宿主（本模块不该知道 DetailView 的
@@ -525,6 +533,10 @@ export function usePluginHost(opts: PluginHostRuntimeOptions) {
       confirm: (text) => opts.confirm(text),
       getSelectedText: (hint) => opts.getSelectedText(hint),
       getAttachments: () => opts.getAttachments?.() ?? [],
+      // 插件 ms.input.pickFolders：把用户在系统对话框里挑中的文件夹并入附件
+      attachPaths: opts.attachPaths,
+      // 插件 ms.input.detach：按路径从附件里移除（只减不加）
+      detachPath: opts.detachPath,
       // 插件界面内改主题（ms.ui.applyTheme）→ 视图宿主重算呼出窗口主题
       refreshPluginTheme: () => opts.refreshPluginTheme?.(),
       // 市场安装/更新的用户确认闸门（ms.market.install）：弹宿主安装确认框

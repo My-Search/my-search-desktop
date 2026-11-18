@@ -1,7 +1,7 @@
 {
   "id": "com.zhuangjie.todo-list",
   "name": "待办清单",
-  "version": "1.2.3",
+  "version": "1.3.0",
   "apiVersion": 1,
   "minAppVersion": "7.9.15",
   "autoUpdate": true,
@@ -10,7 +10,7 @@
   "homepage": "https://github.com/zhuangjie/todo-list",
   "repository": "https://github.com/My-Search/my-search-desktop/tree/master/plugins/com.zhuangjie.todo-list",
   "icon": "icon.svg",
-  "changelog": "行操作改为「编辑」按钮（✎）：单条待办可随时重新编辑标题 / 标签 / 紧急等级 / 截止日期 / 详情，不再提供「!」紧急状态循环切换按钮；编辑时未写等级则保持原等级不变。",
+  "changelog": "新增：行内编辑时可直接改紧急等级——编辑行最前面新增「未设置 / 紧急 / 普通 / 低」下拉，选中即保存到该条待办，不必再靠标题里手写「!紧急」。文本里写了等级仍以文本为准。",
   "permissions": [
     "ui.inlay",
     "store"

@@ -25,12 +25,20 @@
   display: none !important;
 }
 
-/* ---------- 头部：标题 + 状态（异常时才出现） + 重新扫描 ---------- */
+/* ---------- 头部：标题 + 状态（异常时才出现） + 选择文件夹/重新扫描 ---------- */
 .fs-header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+}
+
+/* 头部右侧按钮组：选择文件夹 + 重新扫描（并排，与标题顶对齐） */
+.fs-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .fs-heading {
@@ -135,6 +143,39 @@
 .fs-chip-mark {
   flex: 0 0 auto;
   font-size: 10px;
+}
+
+/* chips 尾部的 ×：把该文件夹从搜索范围里移除（宿主 ms.input.detach）。
+   无边框小圆钮，默认弱化不抢注意力；悬停反白提示「这是个危险动作」。 */
+.fs-chip-x {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  margin-right: -3px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.5;
+  transition: opacity 0.12s ease, background-color 0.12s ease, color 0.12s ease;
+}
+
+.fs-chip-x:hover {
+  opacity: 1;
+  background: var(--err, #d32f2f);
+  color: #fff;
+}
+
+.fs-chip-x:focus-visible {
+  outline: 1px solid var(--brand, #5b5bd6);
+  outline-offset: 1px;
 }
 
 /* ---------- 类型页签：全部文件/图片/…/其它文件（数字 = 当前关键词命中数） ---------- */

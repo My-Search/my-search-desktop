@@ -355,6 +355,78 @@ export function createUiDataApis(
       permission: "file.read",
       handler: () => (ctx.getAttachments?.() ?? []).map((a) => ({ ...a })),
     },
+    /**
+     * 弹系统「选择文件夹」对话框，并把用户挑中的文件夹**并入搜索框附件**
+     * （`multiple` 缺省 true，可一次选多个）。返回实际附加的条目
+     * （与 `attachments()` 同构：{ kind, name, path }）；用户取消返回 `[]`。
+     *
+     * 安全语义：这是插件能「扩」附件集合的唯一入口，且路径只能来自
+     * 系统对话框——用户的显式挑选就是授权，插件无法凭空附加任意路径
+     * （见 PluginHostContext.attachPaths 的注释）。并入走宿主既有的
+     * attachByPaths 管线（describePaths → chips → Rust 登记 → 广播
+     * ms-attachments-changed），因此打开着的插件视图会自动重扫。
+     */
+    pickFolders: {
+      permission: "file.read",
+      detail: () => "选择文件夹对话框",
+      handler: async (
+        { pluginId: pid },
+        opts: { title?: string; multiple?: boolean; defaultPath?: string } = {}
+      ) => {
+        if (!ctx.attachPaths) {
+          throw new Error("当前窗口不支持添加搜索附件（请在主窗口的插件界面里使用）");
+        }
+        const { isTauri } = await import("../../tauri-bridge.ts");
+        if (!isTauri) return []; // 浏览器调试环境没有系统对话框：等同取消
+        let picked: unknown;
+        try {
+          const pkg: any = await import("@tauri-apps/plugin-dialog");
+          picked = await pkg.open({
+            directory: true,
+            multiple: opts?.multiple !== false,
+            title: String(opts?.title ?? "选择要搜索的文件夹"),
+            defaultPath:
+              typeof opts?.defaultPath === "string" && opts.defaultPath.trim() !== ""
+                ? opts.defaultPath
+                : undefined,
+          });
+        } catch (e) {
+          console.warn(`[插件 ${pid}] 打开文件夹选择对话框失败:`, e);
+          throw new Error("文件夹选择对话框不可用");
+        }
+        const paths = (
+          Array.isArray(picked)
+            ? picked
+            : typeof picked === "string"
+              ? [picked]
+              : picked && typeof picked === "object" && typeof (picked as any).path === "string"
+                ? [(picked as any).path]
+                : []
+        )
+          .map((p) => String(p ?? "").trim())
+          .filter(Boolean);
+        if (paths.length === 0) return []; // 用户取消
+        const attached = await ctx.attachPaths(paths);
+        return (attached ?? []).map((a) => ({ ...a }));
+      },
+    },
+    /**
+     * 按路径把一个文件/文件夹从搜索框附件里移除（插件给附件 chips 配 × 用）。
+     * 只做「减法」：移除只会**收紧**插件的可见访问范围，不存在扩权风险。
+     * 路径不存在时返回 `false`（幂等，不报错）。
+     */
+    detach: {
+      permission: "file.read",
+      detail: (path: string) => String(path ?? "").slice(0, 300),
+      handler: async (_env, path: string) => {
+        const p = String(path ?? "").trim();
+        if (!p) throw new Error("缺少路径");
+        if (!ctx.detachPath) {
+          throw new Error("当前窗口不支持移除搜索附件（请在主窗口的插件界面里使用）");
+        }
+        return await ctx.detachPath(p);
+      },
+    },
     readFile: {
       permission: "file.read",
       detail: (path: string) => String(path ?? "").slice(0, 300),
