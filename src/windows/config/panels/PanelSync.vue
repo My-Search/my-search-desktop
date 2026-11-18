@@ -27,6 +27,7 @@ import {
 } from "../../../lib/sync/bridge.ts";
 import { collectState, restoreState } from "../../../lib/sync/snapshot.ts";
 import { setOnStorageChange, storageGet } from "../../../lib/util.ts";
+import { notifySyncConfigChanged } from "../../../lib/tauri-bridge.ts";
 import { createSyncEngine, type SyncEngine, type SyncRunState } from "../../../lib/sync/engine.ts";
 
 interface SyncPanelProps {
@@ -58,8 +59,22 @@ async function saveConfig(): Promise<void> {
     config.value = await syncSetConfig(config.value, passwordInput.value || undefined);
     passwordInput.value = "";
     props.notify("同步配置已保存", "ok");
+    void notifySyncConfigChanged();
     void refreshRemoteMeta();
   } catch (e) { props.notify((e as Error)?.message ?? "保存配置失败", "error"); }
+}
+
+/** 开关切换即落盘并广播：不等用户点「保存」。关闭尤其要立刻生效——
+ *  搜索窗口还有一份引擎，收到广播就停定时器；就算广播丢了，内核的
+ *  enabled 守卫也会拦住任何已排程的轮次。 */
+async function onToggleEnabled(): Promise<void> {
+  if (loadingConfig.value) return;
+  try {
+    config.value = await syncSetConfig(config.value, passwordInput.value || undefined);
+    passwordInput.value = "";
+    void notifySyncConfigChanged();
+    if (config.value.enabled) void refreshRemoteMeta();
+  } catch (e) { props.notify((e as Error)?.message ?? "保存开关状态失败", "error"); }
 }
 
 // ===================== 导出 =====================
@@ -129,6 +144,7 @@ async function doTest(): Promise<void> {
     config.value = cfg;
     const r = await syncTest();
     props.notify(r.message, "ok");
+    void notifySyncConfigChanged();
     void refreshRemoteMeta();
   } catch (e) { props.notify((e as Error)?.message ?? String(e), "error"); }
   finally { testing.value = false; }
@@ -267,7 +283,7 @@ function fmtSize(bytes: number): string {
     <!-- 开关 -->
     <div class="sync-toggle-row">
       <label class="switch" :class="{ on: config.enabled, disabled: loadingConfig }">
-        <input type="checkbox" v-model="config.enabled" :disabled="loadingConfig" />
+        <input type="checkbox" v-model="config.enabled" :disabled="loadingConfig" @change="onToggleEnabled" />
         <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
       </label>
       <div class="sync-toggle-meta">

@@ -11,6 +11,7 @@ import {
   serializeBindings,
   type ShortcutBinding,
 } from "./shortcut-bindings.ts";
+import { snapToScaleGrid } from "./window-snap.ts";
 import type {
   HttpRequestOptions,
   ProxyInfo,
@@ -698,7 +699,9 @@ export function flushWindowHeight(): void {
     heightFlushTimer = null;
   }
   if (pendingHeight == null) return;
-  const h = pendingHeight;
+  // 高度向上吸附缩放网格（ceil）：小数高度会把下边框逐边取整吃薄（与右边框
+  // 同一机制），ceil 宁可多 1 逻辑像素也不裁内容。宽高吸附口径见 window-snap.ts。
+  const h = snapHeightToScaleGrid(pendingHeight);
   pendingHeight = null;
   // 插件视图拖拽出的自定义宽度优先：`set_window_height` 会在 Rust 侧按屏幕
   // 分档重算宽度，若继续走它会把用户拖出来的宽度冲掉（见 setWindowWidthOverride）。
@@ -748,16 +751,64 @@ let widthOverride: number | null = null;
 /**
  * 设置/清除插件视图的自定义窗口宽度覆盖（逻辑像素）。传 null 清除。
  *
+ * 入口处即吸附缩放网格：这个值随后会被 flushWindowHeight 原样转给
+ * applyWindowSize 下发，拖拽跟手的逐帧路径也在用它——不在此吸附则每个调用点
+ * 都要记得吸附，漏一处右边框就被吃薄。吸附偏差（≤k/2 逻辑像素）远小于拖拽
+ * 步长，对跟手无感。
+ *
  * 清除后不会立即改变窗口——下一次 `setWindowHeight`/`flushWindowHeight` 或
  * 显式 `applyWindowSize` 才生效；调用方通常紧随其后主动下发一次屏幕分档宽度。
  */
 export function setWindowWidthOverride(width: number | null): void {
-  widthOverride = width;
+  if (width == null) {
+    widthOverride = null;
+    return;
+  }
+  widthOverride = snapWidthToPhysicalPixels(width);
 }
 
 /** 当前是否处于插件视图自定义宽度下（调试/测试用） */
 export function getWindowWidthOverride(): number | null {
   return widthOverride;
+}
+
+/**
+ * 把逻辑宽度吸附到**缩放网格**（k 的整数倍，k=使 k×scale 为整数的最小整数：
+ * 1.5→2、1.25→4），与 Rust 侧 `lib.rs::snap_to_scale_grid` 同口径。
+ *
+ * 为什么不能只吸附「整数物理像素」（旧实现）：150% 下 1498 物理是整数，但
+ * 1498÷1.5=998.667 CSS 是小数——CSS 布局里边框边缘本身就是小数，Chromium
+ * 光栅化 `#my_search_box` 边框矩形时逐边取整：左/上向外取整变厚、贴右/下缘的
+ * 向内取整变薄，表现为「右边框比上下边框细」。网格吸附同时保证 CSS 整数与
+ * 物理整数（无头 Edge 150% 矩阵实测：998/1000/886 四边全 3 设备像素等厚，
+ * 999/887 右边框 2、其余 3）。判据与推导见 `window-snap.ts` 模块注释。
+ *
+ * Rust 侧 `target_window_width()`（屏幕分档定宽路径）已在原生侧吸附；本函数
+ * 覆盖**前端直发的尺寸路径**：插件视图自定义尺寸（applyWindowSize）、尺寸动画
+ * （animate_window_size 的目标值）、呼出前登记（set_main_window_view_size）。
+ *
+ * @param width 逻辑宽度；非法值（NaN/∞/非正）原样返回，不改变调用方守卫语义
+ * @param scale 缩放系数；缺省取当前 WebView 的 devicePixelRatio
+ */
+export function snapWidthToPhysicalPixels(width: number, scale?: number): number {
+  return snapToScaleGrid(
+    width,
+    scale ?? (typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1),
+    "round"
+  );
+}
+
+/**
+ * 把逻辑高度向上吸附到缩放网格（ceil）：小数高度（如 301.333）会把**下边框**
+ * 逐边取整吃薄（与右边框同一机制，见 `window-snap.ts`），ceil 宁可多 1 逻辑
+ * 像素也不能裁掉内容或下边框。
+ *
+ * @param height 逻辑高度；非法值（NaN/∞/非正）原样返回，不改变调用方守卫语义
+ */
+export function snapHeightToScaleGrid(height: number): number {
+  if (!Number.isFinite(height) || height <= 0) return height;
+  const scale = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
+  return snapToScaleGrid(height, scale, "ceil");
 }
 
 /**
@@ -771,7 +822,11 @@ export async function applyWindowSize(width: number, height: number): Promise<vo
   if (!isTauri) return;
   try {
     const { getCurrentWindow, LogicalSize } = await import("@tauri-apps/api/window");
-    await getCurrentWindow().setSize(new LogicalSize(width, height));
+    // 宽度吸附缩放网格：避免右边框被逐边取整吃薄（见 snapWidthToPhysicalPixels）。
+    // 高度向上吸附（ceil）：宁可多 1 逻辑像素，也不能让小数高度把下边框裁细。
+    await getCurrentWindow().setSize(
+      new LogicalSize(snapWidthToPhysicalPixels(width), snapHeightToScaleGrid(height))
+    );
   } catch (e) {
     console.warn("调整窗口尺寸失败:", e);
   }
@@ -822,8 +877,10 @@ export async function animateWindowSize(
     await invoke("animate_window_size", {
       fromWidth: window.innerWidth,
       fromHeight: window.innerHeight,
-      toWidth: width,
-      toHeight: height,
+      // 目标宽/高吸附缩放网格：动画终点即窗口定格值，不吸附则右边框/下边框
+      // 被逐边取整吃薄（且 Rust 动画线程对中间帧不做吸附，终点值必须由这里保证）
+      toWidth: snapWidthToPhysicalPixels(width),
+      toHeight: snapHeightToScaleGrid(height),
       durationMs,
     });
   } catch (e) {
@@ -875,8 +932,16 @@ export async function setMainWindowViewSize(
   size: { width: number; height: number } | null
 ): Promise<void> {
   if (!isTauri) return;
-  const width = size && Number.isFinite(size.width) && size.width > 0 ? size.width : null;
-  const height = size && Number.isFinite(size.height) && size.height > 0 ? size.height : null;
+  // 宽/高吸附缩放网格：这个值会被 Rust 侧 show_main_window 原样建窗，不吸附则
+  // 呼出瞬间右边框/下边框就被逐边取整吃薄（见 snapWidthToPhysicalPixels 注释）
+  const width =
+    size && Number.isFinite(size.width) && size.width > 0
+      ? snapWidthToPhysicalPixels(size.width)
+      : null;
+  const height =
+    size && Number.isFinite(size.height) && size.height > 0
+      ? snapHeightToScaleGrid(size.height)
+      : null;
   try {
     await invoke("set_main_window_view_size", { width, height });
   } catch (e) {
@@ -1156,6 +1221,35 @@ export async function onAutoDownloadChanged(handler: () => void): Promise<Unlist
     return await listen("my-search://auto-download-update-changed", () => handler());
   } catch (e) {
     console.warn("监听自动下载更新设置变更失败:", e);
+    return null;
+  }
+}
+
+/**
+ * 广播「数据同步配置已变更」（设置窗口的同步面板写入配置后调用）。
+ *
+ * 搜索窗口持有一份独立同步引擎（useSyncBridge，供插件 ms.sync.* 用），
+ * 两窗口各持一份配置副本、互不感知写入；尤其「关闭同步」若不广播，
+ * 那边的兜底定时器会照旧轮询。收到广播的一方重读配置并按需启停引擎。
+ */
+export async function notifySyncConfigChanged(): Promise<void> {
+  if (!isTauri) return;
+  try {
+    const { emit } = await import("@tauri-apps/api/event");
+    await emit("my-search://sync-config-changed");
+  } catch (e) {
+    console.warn("广播同步配置变更失败:", e);
+  }
+}
+
+/** 监听「数据同步配置已变更」（搜索窗口 useSyncBridge 注册）。 */
+export async function onSyncConfigChanged(handler: () => void): Promise<UnlistenFn | null> {
+  if (!isTauri) return null;
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    return await listen("my-search://sync-config-changed", () => handler());
+  } catch (e) {
+    console.warn("监听同步配置变更失败:", e);
     return null;
   }
 }

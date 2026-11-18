@@ -94,7 +94,11 @@ export function diffCatalog(
       newOnes.push(entry);
       continue;
     }
-    if (isUpdateableSource(rec.source.kind) && isNewerVersion(entry, rec)) {
+    if (
+      (isUpdateableSource(rec.source.kind) ||
+        (rec.source.kind === "file" && rec.autoUpdate === true)) &&
+      isNewerVersion(entry, rec)
+    ) {
       updates.push({ rec, entry });
     }
   }

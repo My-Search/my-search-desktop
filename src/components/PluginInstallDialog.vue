@@ -21,9 +21,9 @@ const props = defineProps<{
   installedVersion?: string | null;
   /** 该插件当前是否在后台运行（升级时据此提示「将先停止再安装」） */
   running?: boolean;
-  /** 是否在弹窗中展示「自动更新该插件」开关（市场源安装/升级时展示，本地文件安装隐藏） */
+  /** 是否在弹窗中展示「自动更新此插件」开关（默认展示；仅特殊无需自动更新场景传 false 隐藏） */
   showAutoUpdate?: boolean;
-  /** 「自动更新该插件」开关当前状态 */
+  /** 「自动更新此插件」开关当前状态 */
   autoUpdate?: boolean;
 }>();
 
@@ -193,8 +193,8 @@ const showForceStopNotice = computed(
         </div>
       </div>
 
-      <!-- 插件级自动更新开关（仅市场安装/升级时展示） -->
-      <div v-if="showAutoUpdate" class="plugin-install-autoupdate">
+      <!-- 插件级自动更新开关（安装/升级时展示：插件声明 autoUpdate: true 时默认开启，用户可关闭） -->
+      <div v-if="showAutoUpdate !== false" class="plugin-install-autoupdate">
         <div class="autoupdate-text">
           <div class="autoupdate-title">
             <span>自动更新此插件</span>

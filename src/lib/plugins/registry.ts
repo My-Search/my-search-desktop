@@ -265,12 +265,50 @@ export function resolveAutoUpdateOnUpgrade(input: {
 }
 
 /**
+ * 计算安装/升级确认弹窗（`PluginInstallDialog`）打开时「自动更新此插件」开关的初始状态：
+ *   - 全新安装、显式 `install` 或同版本重新安装：直接跟随插件清单声明（`manifest.autoUpdate === true`
+ *     即默认开启，未声明或 `false` 即默认关闭，用户在弹窗中可随时切换）；
+ *   - 跨版本升级（`action === "update"` 且目标版本高于已装版本）：经 `resolveAutoUpdateOnUpgrade`
+ *     计算——旧版未声明而新版声明 `true` 时自动开启；仅当用户曾把已声明 `true` 的插件主动关闭时保留关闭。
+ */
+export function resolveInstallDialogAutoUpdate(input: {
+  action?: "install" | "update";
+  existing?: PluginRecord | null;
+  nextManifest: PluginManifest | null | undefined;
+}): boolean {
+  const prev = input.existing;
+  if (
+    input.action !== "update" ||
+    !prev ||
+    !input.nextManifest ||
+    compareVersion(input.nextManifest.version, prev.version) <= 0
+  ) {
+    return manifestAutoUpdateOf(input.nextManifest);
+  }
+  return resolveAutoUpdateOnUpgrade({
+    current:
+      typeof prev.autoUpdate === "boolean"
+        ? prev.autoUpdate
+        : manifestAutoUpdateOf(prev.manifest),
+    prevManifest: prev.manifest,
+    nextManifest: input.nextManifest,
+  });
+}
+
+/**
  * 判定一条已安装插件记录是否处于「允许后台从市场自动更新」状态：
- * 必须来自可更新源（`market` 或 `builtin`），且记录的有效 `autoUpdate` 为 `true`。
+ * 支持 `market`、`builtin` 以及用户开启了自动更新的 `.mspp`（`file`）安装包；
+ * 本地源码目录挂载（`folder`）与 `legacy` 条目永不参与市场覆盖。
  */
 export function isPluginAutoUpdateEnabled(rec: PluginRecord | null | undefined): boolean {
   if (!rec) return DEFAULT_PLUGIN_AUTO_UPDATE;
-  if (rec.source.kind !== "market" && rec.source.kind !== "builtin") return false;
+  if (
+    rec.source.kind !== "market" &&
+    rec.source.kind !== "builtin" &&
+    rec.source.kind !== "file"
+  ) {
+    return false;
+  }
   return typeof rec.autoUpdate === "boolean"
     ? rec.autoUpdate
     : manifestAutoUpdateOf(rec.manifest);
@@ -467,7 +505,7 @@ export function findPlugin(reg: PluginRegistryFile, id: string): PluginRecord | 
 export function upsertPlugin(
   reg: PluginRegistryFile,
   incoming: PluginRecord,
-  opts: { preserveUserChoices?: boolean } = {}
+  opts: { preserveUserChoices?: boolean; explicitAutoUpdate?: boolean } = {}
 ): PluginRecord {
   const idx = reg.plugins.findIndex((p) => p.id === incoming.id);
   if (idx < 0) {
@@ -505,18 +543,20 @@ export function upsertPlugin(
         ? incoming.themePreference
         : prev.themePreference ?? incoming.themePreference,
     autoUpdate:
-      opts.preserveUserChoices === false
-        ? typeof incoming.autoUpdate === "boolean"
-          ? incoming.autoUpdate
-          : manifestAutoUpdateOf(incoming.manifest)
-        : resolveAutoUpdateOnUpgrade({
-            current:
-              typeof prev.autoUpdate === "boolean"
-                ? prev.autoUpdate
-                : manifestAutoUpdateOf(prev.manifest),
-            prevManifest: prev.manifest,
-            nextManifest: incoming.manifest,
-          }),
+      typeof opts.explicitAutoUpdate === "boolean"
+        ? opts.explicitAutoUpdate
+        : opts.preserveUserChoices === false
+          ? typeof incoming.autoUpdate === "boolean"
+            ? incoming.autoUpdate
+            : manifestAutoUpdateOf(incoming.manifest)
+          : resolveAutoUpdateOnUpgrade({
+              current:
+                typeof prev.autoUpdate === "boolean"
+                  ? prev.autoUpdate
+                  : manifestAutoUpdateOf(prev.manifest),
+              prevManifest: prev.manifest,
+              nextManifest: incoming.manifest,
+            }),
     grants: mergeGrants(prev.grants, incoming.grants),
     denied: prev.denied,
     pendingPermission: prev.pendingPermission ?? null,

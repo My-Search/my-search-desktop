@@ -30,7 +30,13 @@
 
 import type { PluginChangedPayload } from "../plugins/ipc.ts";
 import { DEFAULT_PLUGIN_AUTOSTART, parsePluginManifest, type PluginManifest } from "./manifest.ts";
-import { grantPermission, resolveAutoStartOnUpgrade, shouldKeepFrontendOnClose, type PluginRecord } from "./registry.ts";
+import {
+  grantPermission,
+  resolveAutoStartOnUpgrade,
+  resolveAutoUpdateOnUpgrade,
+  shouldKeepFrontendOnClose,
+  type PluginRecord,
+} from "./registry.ts";
 import { isKnownPermission, permissionCovers } from "./permissions.ts";
 
 /** 一次重载要做的事情（由调用方执行；纯数据，便于断言） */
@@ -174,6 +180,11 @@ export function planReload(rec: PluginRecord, manifestText: string): ReloadPlan 
     // 新清单的建议（与 upsertPlugin 共用 resolveAutoStartOnUpgrade，避免口径分叉）。
     autoStart: resolveAutoStartOnUpgrade({
       current: rec.autoStart,
+      prevManifest: rec.manifest,
+      nextManifest: next,
+    }),
+    autoUpdate: resolveAutoUpdateOnUpgrade({
+      current: rec.autoUpdate,
       prevManifest: rec.manifest,
       nextManifest: next,
     }),

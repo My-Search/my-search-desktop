@@ -50,6 +50,7 @@ const {
   isPluginAutoUpdateEnabled,
   loadRegistry,
   resolveAutoUpdateOnUpgrade,
+  resolveInstallDialogAutoUpdate,
   saveRegistry,
   upsertPlugin,
 } = await import("../src/lib/plugins/registry.ts");
@@ -167,14 +168,103 @@ function pass(label) {
     true
   );
 
-  const localRec = createPluginRecord({
+  // 安装确认弹窗开关初始状态规则（resolveInstallDialogAutoUpdate）：
+  // 1) 新装声明 autoUpdate: true 的插件 → 开关默认开启（true），用户可手动关闭
+  assert.equal(
+    resolveInstallDialogAutoUpdate({
+      action: "install",
+      existing: null,
+      nextManifest: parse({ autoUpdate: true }),
+    }),
+    true,
+    "新装声明 autoUpdate: true 的插件时，安装弹窗开关必须默认开启"
+  );
+  // 2) 新装未声明 autoUpdate 的插件 → 开关默认关闭（false），用户可手动开启
+  assert.equal(
+    resolveInstallDialogAutoUpdate({
+      action: "install",
+      existing: null,
+      nextManifest: parse({}),
+    }),
+    false,
+    "新装未声明 autoUpdate 的插件时，安装弹窗开关必须默认关闭"
+  );
+  // 3) 从未声明 autoUpdate 的旧版本升级到声明 autoUpdate: true 的新版本 → 开关默认开启（true）
+  const preAutoUpdateRec = createPluginRecord({
+    manifest: parse({ version: "1.0.0" }),
+    dir: "plugins/com.example.demo",
+    source: { kind: "market" },
+  });
+  assert.equal(preAutoUpdateRec.autoUpdate, false);
+  assert.equal(
+    resolveInstallDialogAutoUpdate({
+      action: "update",
+      existing: preAutoUpdateRec,
+      nextManifest: parse({ version: "1.1.0", autoUpdate: true }),
+    }),
+    true,
+    "从旧版（未声明 autoUpdate）升级到声明 autoUpdate: true 的新版时，安装弹窗开关必须默认开启"
+  );
+  // 4) 重新安装同版本（或显式 install）声明 autoUpdate: true 的插件 → 开关回到插件声明的开启状态
+  assert.equal(
+    resolveInstallDialogAutoUpdate({
+      action: "install",
+      existing: userTurnedOff,
+      nextManifest: parse({ version: "1.0.0", autoUpdate: true }),
+    }),
+    true,
+    "重新安装声明 autoUpdate: true 的插件时，开关应按插件声明默认开启"
+  );
+  // 5) 已声明 autoUpdate: true 但用户曾主动关闭后手动点跨版本 update → 保留用户关闭选择
+  assert.equal(
+    resolveInstallDialogAutoUpdate({
+      action: "update",
+      existing: userTurnedOff,
+      nextManifest: parse({ version: "1.2.0", autoUpdate: true }),
+    }),
+    false,
+    "用户主动关掉已声明开启的插件后手动升级新版本时保留关闭选择"
+  );
+
+  // upsertPlugin explicitAutoUpdate：保留其它用户偏好同时精确写入弹窗开关结果
+  userTurnedOff.enabled = false;
+  const upgradedViaDialog = upsertPlugin(
+    { version: 1, plugins: [structuredClone(userTurnedOff)] },
+    createPluginRecord({
+      manifest: parse({ version: "1.2.0", autoUpdate: true }),
+      dir: "plugins/com.example.demo",
+      source: { kind: "file", ref: "D:/demo.mspp" },
+      autoUpdate: true,
+    }),
+    { preserveUserChoices: true, explicitAutoUpdate: true }
+  );
+  assert.equal(upgradedViaDialog.enabled, false, "保留用户原本禁用态");
+  assert.equal(upgradedViaDialog.autoUpdate, true, "explicitAutoUpdate 应按弹窗最终开关状态落盘");
+
+  const localOnRec = createPluginRecord({
     manifest: parse({ autoUpdate: true }),
     dir: "plugins/com.example.demo",
     source: { kind: "file", ref: "D:/demo.mspp" },
     autoUpdate: true,
   });
-  assert.equal(isPluginAutoUpdateEnabled(localRec), false);
-  pass("注册表创建、安装时覆盖、升级保留用户选择与来源隔离规则全部正确");
+  assert.equal(isPluginAutoUpdateEnabled(localOnRec), true, ".mspp 安装开启自动更新后允许参与自动更新");
+
+  const localOffRec = createPluginRecord({
+    manifest: parse({ autoUpdate: true }),
+    dir: "plugins/com.example.demo",
+    source: { kind: "file", ref: "D:/demo.mspp" },
+    autoUpdate: false,
+  });
+  assert.equal(isPluginAutoUpdateEnabled(localOffRec), false, ".mspp 安装在弹窗中关闭后不自动更新");
+
+  const folderRec = createPluginRecord({
+    manifest: parse({ autoUpdate: true }),
+    dir: "plugins/com.example.demo",
+    source: { kind: "folder", ref: "D:/src/demo", dev: true },
+    autoUpdate: true,
+  });
+  assert.equal(isPluginAutoUpdateEnabled(folderRec), false, "开发目录挂载插件永不参与市场覆盖");
+  pass("注册表创建、安装弹窗初始状态、升级保留用户选择与来源隔离规则全部正确");
 }
 
 /* ============ 4. runPluginAutoUpdate 全静默升级编排测试 ============ */
@@ -445,6 +535,7 @@ function pass(label) {
     "utf8"
   );
   const searchApp = readFileSync(path.join(root, "src/windows/search/App.vue"), "utf8");
+  const marketApi = readFileSync(path.join(root, "src/lib/plugins/host/market-api.ts"), "utf8");
 
   assert.ok(
     !panelGeneral.includes("auto-update-plugins") && !panelGeneral.includes("自动更新插件"),
@@ -452,10 +543,15 @@ function pass(label) {
   );
   assert.match(installDialog, /data-act="install-auto-update"/);
   assert.match(installDialog, /自动更新此插件/);
+  assert.match(marketApi, /resolveInstallDialogAutoUpdate\(/);
+  assert.match(panelPlugins, /resolveInstallDialogAutoUpdate\(/);
+  assert.match(panelPlugins, /autoUpdate:\s*chosenAutoUpdate/);
   assert.match(panelPlugins, /function setAutoUpdate/);
   assert.match(panelPlugins, /rec\.autoUpdate = s\.autoUpdate/);
+  assert.match(searchApp, /resolveInstallDialogAutoUpdate\(/);
+  assert.match(searchApp, /autoUpdate:\s*chosenAutoUpdate/);
   assert.match(searchApp, /:show-auto-update="installDialogShowAutoUpdate"/);
-  pass("基础配置不含全局开关，安装弹窗、插件详情面板与搜索窗三处接线完整");
+  pass("基础配置不含全局开关，市场安装、面板 .mspp 安装与搜索窗 .mspp 安装三处均默认同步插件声明状态");
 }
 
 console.log(`\n全部通过：${passed} 项插件级自动更新测试`);

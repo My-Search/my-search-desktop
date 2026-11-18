@@ -236,6 +236,8 @@ export function usePluginRuntime() {
     signed?: boolean;
     /** 升级时由调用方处理新增权限确认后再传入 */
     grants: string[];
+    /** 安装确认框中用户选定的「自动更新此插件」开关值 */
+    autoUpdate?: boolean;
     /** 保持用户既有选择（升级场景） */
     preserveUserChoices?: boolean;
   }): Promise<PluginRecord> {
@@ -261,10 +263,12 @@ export function usePluginRuntime() {
         dir: input.dir,
         source: input.source,
         grants: input.grants,
+        autoUpdate: input.autoUpdate,
         integrity: { sha256: input.sha256, signed: input.signed ?? false },
       });
       const merged = upsertPlugin(registry, record, {
         preserveUserChoices: input.preserveUserChoices !== false,
+        explicitAutoUpdate: input.autoUpdate,
       });
       persist();
       // 覆盖安装（升级 / 重装）成功：保活中的前端会话仍跑着旧界面旧脚本，

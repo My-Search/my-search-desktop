@@ -156,6 +156,14 @@ export async function runSyncRound(
   try {
     const config = await opts.getConfig();
 
+    // 开关已关闭 → 本轮直接作废（不联网、不动状态）。设置窗口关掉开关后，
+    // 各窗口引擎里已排程的定时器/节流可能还没停，这道闸保证「关闭」
+    // 在任何触发路径（定时兜底 / 数据变化 / 手动 / 插件）下立即生效。
+    if (!config.enabled) {
+      update({ status: "idle", lastError: "" });
+      return { ...state };
+    }
+
     // 1) 检查远端
     update({ status: "downloading" });
     let remote: RemoteMeta;

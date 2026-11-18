@@ -32,7 +32,7 @@ import PluginInstallDialog from "../../../components/PluginInstallDialog.vue";
 import { useEnvPicker } from "../../../composables/useEnvPicker";
 import type { PluginManifest, PluginThemePreference } from "../../../lib/plugins/manifest";
 import { compareVersion, detailViewThemeOf } from "../../../lib/plugins/manifest";
-import { findPlugin, loadRegistry } from "../../../lib/plugins/registry";
+import { findPlugin, loadRegistry, resolveInstallDialogAutoUpdate } from "../../../lib/plugins/registry";
 import { checkAndApplyMarketUpdates } from "../../../lib/plugins/market";
 import { updatePluginFromMarket } from "../../../lib/plugins/host";
 
@@ -331,9 +331,13 @@ function pluginThemeModified(rec: any): boolean {
 function autoUpdateModified(rec: any): boolean {
   return Boolean(rec.autoUpdate) !== suggestionOf(rec).autoUpdate;
 }
-/** 仅市场安装或内置插件支持从插件市场自动更新（本地文件/目录挂载不展示该行） */
+/** 市场安装、内置或 .mspp 文件安装的插件均支持从插件市场自动更新（仅源码目录挂载不展示该行） */
 function showsAutoUpdateRow(rec: any): boolean {
-  return rec.source?.kind === "market" || rec.source?.kind === "builtin";
+  return (
+    rec.source?.kind === "market" ||
+    rec.source?.kind === "builtin" ||
+    rec.source?.kind === "file"
+  );
 }
 function setAutoUpdate(rec: any, enabled: boolean): void {
   rec.autoUpdate = Boolean(enabled);
@@ -686,11 +690,17 @@ async function installFromPath(path: string): Promise<void> {
     installDialogPerms.value = groupPermissions(allPerms);
     installDialogWarnings.value = prepared.warnings;
     // 直读注册表取已安装版本（另一窗口可能刚装过，比 rt 内存态更新）
-    installDialogInstalledVersion.value = findPlugin(loadRegistry(), mf.id)?.version ?? null;
+    const prevRec = findPlugin(loadRegistry(), mf.id);
+    installDialogInstalledVersion.value = prevRec?.version ?? null;
     // 后台是否在跑：覆盖安装时弹窗提示「会先停止再安装」
     const st = rt.runtimeOf(mf.id).status;
     installDialogRunning.value = st === "running" || st === "starting";
-    installDialogShowAutoUpdate.value = false;
+    installDialogShowAutoUpdate.value = true;
+    installDialogAutoUpdate.value = resolveInstallDialogAutoUpdate({
+      action: prevRec && compareVersion(mf.version, prevRec.version) > 0 ? "update" : "install",
+      existing: prevRec,
+      nextManifest: mf,
+    });
     installDialogAutoUpdateCb = null;
     installDialogVisible.value = true;
   } catch (e) {
@@ -709,6 +719,7 @@ async function onInstallConfirm(): Promise<void> {
     resolve(true);
     return;
   }
+  const chosenAutoUpdate = installDialogAutoUpdate.value;
   installDialogVisible.value = false;
   if (!pendingPrepared) return;
   const prepared = pendingPrepared;
@@ -724,6 +735,7 @@ async function onInstallConfirm(): Promise<void> {
       source: { kind: "file", ref: pendingInstallPath },
       sha256: prepared.sha256,
       grants: allPerms,
+      autoUpdate: chosenAutoUpdate,
     });
     const cmp = prevRec ? compareVersion(mf.version, prevRec.version) : null;
     const verb = cmp === null ? "已安装" : cmp === 0 ? "已重新安装" : "已升级";
@@ -737,10 +749,7 @@ async function onInstallConfirm(): Promise<void> {
   } finally {
     pendingPrepared = null;
     pendingInstallPath = "";
-    installDialogManifest.value = null;
-    installDialogIcon.value = null;
-    installDialogInstalledVersion.value = null;
-    installDialogRunning.value = false;
+    closeInstallDialogState();
   }
 }
 
@@ -754,13 +763,9 @@ function onInstallCancel(): void {
     resolve(false);
     return;
   }
-  installDialogVisible.value = false;
   pendingPrepared = null;
   pendingInstallPath = "";
-  installDialogManifest.value = null;
-  installDialogIcon.value = null;
-  installDialogInstalledVersion.value = null;
-  installDialogRunning.value = false;
+  closeInstallDialogState();
 }
 
 /** 复位安装确认弹窗的展示态（市场更新与文件安装共用，避免四处重复） */

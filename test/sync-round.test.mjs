@@ -223,5 +223,20 @@ const cfg = (over = {}) => ({
   ok(final.lastError === "", "无错误");
 }
 
+/* ============ 9. 开关关闭 → 本轮作废（关闭同步在任何触发路径下立即生效） ====
+ * 背景：设置窗口关掉开关后，各窗口引擎里已排程的定时器/节流可能还没停，
+ * 内核这道闸保证关闭不会又被定时器「绕过去」接着联网轮询。 */
+{
+  reset();
+  const final = await runSyncRound(
+    { getConfig: () => cfg({ enabled: false }), onAskConflict: async () => "local" },
+    "background"
+  );
+  ok(calls.remoteMeta === 0, "没有联网查远端");
+  ok(calls.upload === 0 && calls.download === 0, "没有上传/下载");
+  ok(final.status === "idle", "以 idle 收尾（不是 error）", final.status);
+  ok(final.lastError === "", "无错误");
+}
+
 console.log(`\n结果: ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

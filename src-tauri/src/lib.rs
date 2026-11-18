@@ -2252,6 +2252,67 @@ fn box_width_ratio(screen_w: f64) -> f64 {
     }
 }
 
+/// 把逻辑尺寸吸附到**缩放网格**（k 的整数倍，k = 使 k×scale 为整数的最小整数）。
+///
+/// 为什么不能只吸附「整数物理像素」（旧实现）：150% 下 1498 物理是整数，但
+/// 1498÷1.5=998.667 CSS 是小数——CSS 布局里 `#my_search_box` 边框矩形的边缘
+/// 本身就是小数，Chromium 光栅化时对四条边**逐边取整**：贴 x=0/y=0 的左、上边
+/// 向外取整变厚，贴视口右/下缘的右、下边向内取整变薄——表现为「右边框比上下
+/// 边框细」。无头 Edge 150% 矩阵实测：CSS 整数宽（998/1000/886，即 k=2 的倍数）
+/// 四边全 3 设备像素等厚；CSS 小数宽（999/887）右边框 2、其余 3。
+///
+/// 网格吸附同时保证 **CSS 整数**与**物理整数**：k×n×scale 为整数（k 由缩放的
+/// 最简分数分母给出：1.5→2、1.25→4、1.75→4、整数缩放→1）。前端 TS 侧同口径
+/// 实现（`src/lib/window-snap.ts`），两侧保证同一数值。
+///
+/// `mode = Round` 取最近格点（宽度用，偏差对称）；`Ceil` 向上取格点（高度用，
+/// 宁可多 1 逻辑像素也不能把内容或下边框裁薄）。
+#[derive(Clone, Copy, PartialEq)]
+enum SnapMode {
+    Round,
+    Ceil,
+}
+
+fn snap_to_scale_grid(logical: f64, scale: f64, mode: SnapMode) -> f64 {
+    if !logical.is_finite() {
+        return logical;
+    }
+    // 网格步长 k：使 k×scale 为整数的最小整数（常见缩放直接查表）
+    let k: f64 = scale_grid_step(scale);
+    let cells = logical / k;
+    let snapped = match mode {
+        SnapMode::Round => cells.round(),
+        SnapMode::Ceil => cells.ceil(),
+    };
+    snapped * k
+}
+
+/// 缩放网格步长：使 k×scale 为整数的最小整数 k（1.5→2、1.25/1.75→2.25→4、整数缩放→1）。
+/// 自定义缩放试 1..=8 的小步长，试不出退化为 1（普通取整，尽力对齐）。
+fn scale_grid_step(scale: f64) -> f64 {
+    match scale {
+        s if (s - 1.0).abs() < 1e-9 || (s - 2.0).abs() < 1e-9 || (s - 3.0).abs() < 1e-9 => 1.0,
+        s if (s - 1.5).abs() < 1e-9 || (s - 2.5).abs() < 1e-9 => 2.0,
+        s if (s - 1.25).abs() < 1e-9 || (s - 1.75).abs() < 1e-9 || (s - 2.25).abs() < 1e-9 => 4.0,
+        s => {
+            let mut found = 1.0;
+            for i in 1..=8 {
+                let kf = i as f64;
+                if (kf * s - (kf * s).round()).abs() < 1e-9 {
+                    found = kf;
+                    break;
+                }
+            }
+            found
+        }
+    }
+}
+
+/// 宽度吸附（round 模式）：保持旧名兼容调用点。
+fn snap_to_physical_pixels(logical: f64, scale: f64) -> f64 {
+    snap_to_scale_grid(logical, scale, SnapMode::Round)
+}
+
 /// 计算主窗口目标宽度（逻辑像素）：按原脚本分档取屏幕占比，
 /// 并限制在 [320px, 屏幕宽度 90%] 内。
 ///
@@ -2259,12 +2320,14 @@ fn box_width_ratio(screen_w: f64) -> f64 {
 /// 避免多显示器下「按 A 屏定宽、却按 B 屏居中」。
 /// 注意 `monitor.size()` 是物理像素，而窗口用 `LogicalSize` 设置，
 /// 高 DPI（如 150% 缩放）下必须换算成逻辑宽度，否则分档与 90% 限制都会失真。
+/// 最终结果吸附到缩放网格（见 [`snap_to_scale_grid`]：右边框等厚）。
 fn target_window_width(monitor: &tauri::Monitor) -> f64 {
     let scale = monitor.scale_factor();
     let screen_w = monitor.size().width as f64 / if scale > 0.0 { scale } else { 1.0 };
     let target = screen_w * box_width_ratio(screen_w);
     let max = (screen_w * MAX_SCREEN_WIDTH_RATIO).max(MIN_WINDOW_WIDTH);
-    target.clamp(MIN_WINDOW_WIDTH, max)
+    // 先 clamp 再吸附：吸附后的值可能越过 max 边界，顺序不能反
+    snap_to_physical_pixels(target.clamp(MIN_WINDOW_WIDTH, max), scale)
 }
 
 /// 按窗口当前所在屏幕计算目标宽度（不重新定位时使用）
@@ -2281,6 +2344,10 @@ fn window_width_for(window: &tauri::WebviewWindow) -> f64 {
 fn set_window_height(app: tauri::AppHandle, height: f64) {
     if let Some(window) = app.get_webview_window("main") {
         let width = window_width_for(&window);
+        // 高度向上吸附缩放网格（ceil）：小数高度会把下边框逐边取整吃薄
+        // （与右边框同一机制，见 snap_to_scale_grid），ceil 宁多 1 逻辑像素不裁内容
+        let scale = window.scale_factor().unwrap_or(1.0);
+        let height = snap_to_scale_grid(height, scale, SnapMode::Ceil);
         let _ = window.set_size(tauri::LogicalSize::new(width, height));
     }
 }
@@ -2304,9 +2371,22 @@ fn get_default_window_width(app: tauri::AppHandle) -> f64 {
 ///
 /// 两个参数都可为 null：任一为空/非法即视为「退出插件自定义尺寸」，整体清除。
 #[tauri::command]
-fn set_main_window_view_size(width: Option<f64>, height: Option<f64>) {
+fn set_main_window_view_size(app: tauri::AppHandle, width: Option<f64>, height: Option<f64>) {
+    // 登记/清除都吸附到缩放网格：show_main_window 会按这里的值原样建窗，
+    // 不吸附则呼出瞬间右边框/下边框就被逐边取整吃薄（见 snap_to_scale_grid）。
+    // 宽 round、高 ceil（与前端 setMainWindowViewSize 同口径）。
     let size = match (width, height) {
-        (Some(w), Some(h)) => Some((w, h)),
+        (Some(w), Some(h)) if w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0 => {
+            let scale = app
+                .get_webview_window("main")
+                .and_then(|w| w.scale_factor().ok())
+                .filter(|s| *s > 0.0)
+                .unwrap_or(1.0);
+            Some((
+                snap_to_scale_grid(w, scale, SnapMode::Round),
+                snap_to_scale_grid(h, scale, SnapMode::Ceil),
+            ))
+        }
         _ => None,
     };
     set_pending_plugin_view_size(size);
@@ -2350,10 +2430,20 @@ fn animate_window_size(
     to_height: f64,
     duration_ms: f64,
 ) {
-    // 目标非法直接忽略（与前端守卫一致）
+    // 目标非法直接忽略（与前端守卫一致）。目标值由前端吸附后下发（tauri-bridge
+    // 的 animateWindowSize），这里再兜底吸附一次：前端可能缺吸附逻辑（旧版本页面），
+    // 中间帧不做吸附（逐帧小步本来就在半像素上游走），但**终点帧必须落在网格上**，
+    // 否则动画结束瞬间右边框/下边框被逐边取整吃薄。
     if !to_width.is_finite() || !to_height.is_finite() || to_width <= 0.0 || to_height <= 0.0 {
         return;
     }
+    let scale = app
+        .get_webview_window("main")
+        .and_then(|w| w.scale_factor().ok())
+        .filter(|s| *s > 0.0)
+        .unwrap_or(1.0);
+    let to_width = snap_to_scale_grid(to_width, scale, SnapMode::Round);
+    let to_height = snap_to_scale_grid(to_height, scale, SnapMode::Ceil);
     // 领取新令牌：旧动画线程会在下一帧发现令牌不匹配而自行退出
     let token = WINDOW_ANIM_TOKEN.fetch_add(1, Ordering::SeqCst) + 1;
     let start_w = if from_width.is_finite() && from_width > 0.0 {
@@ -2396,6 +2486,7 @@ fn animate_window_size(
 /// 把主窗口收回到搜索框高度（隐藏时调用，避免下次呼出残留上次的高窗口）
 fn collapse_main_window(window: &tauri::WebviewWindow) {
     let width = window_width_for(window);
+    // 48 为整数逻辑像素，任何缩放下 k×48×scale 都是整数设备像素，无需吸附
     let _ = window.set_size(tauri::LogicalSize::new(width, COLLAPSED_WINDOW_HEIGHT));
 }
 
@@ -5129,6 +5220,58 @@ mod tests {
         // 800 命中 max-width:800 → 80%
         assert_eq!(box_width_ratio(800.0), 0.80);
         assert_eq!(box_width_ratio(640.0), 0.80);
+    }
+
+    #[test]
+    fn snap_to_scale_grid_yields_integral_css_and_device_pixels() {
+        // 判据：吸附后逻辑值必须是整数（CSS 整数），且 ×缩放也是整数（物理整数）。
+        // 两者缺一不可：只有物理整数时 CSS 仍可能是小数（如 1498÷1.5=998.667），
+        // 边框矩形边缘落在小数 CSS 像素上，逐边取整后右边框/下边框变细。
+        use super::{snap_to_scale_grid, SnapMode};
+        let cases: &[(f64, f64)] = &[
+            // (逻辑宽度, 缩放)
+            (998.4, 1.0),  // 1920×0.52，100% 缩放（也非整数逻辑像素）
+            (887.47, 1.5), // 2560/1.5×0.52，150% 缩放
+            (653.7, 2.0),  // 200% 缩放
+            (520.3, 1.25), // 125% 缩放
+            (320.0, 1.5),  // MIN_WINDOW_WIDTH 下界
+            (998.0, 1.0),  // 已是整数，保持不变
+            (999.0, 1.5),  // 150% 下的奇数宽：吸附到 1000（旧实现原样放行 → 右边框细）
+        ];
+        for &(logical, scale) in cases {
+            let snapped = snap_to_scale_grid(logical, scale, SnapMode::Round);
+            let css = snapped;
+            let phys = snapped * scale;
+            assert!(
+                (css - css.round()).abs() < 1e-6,
+                "逻辑宽 {logical} @ {scale}x 吸附后 CSS 宽 {css} 不是整数"
+            );
+            assert!(
+                (phys - phys.round()).abs() < 1e-6,
+                "逻辑宽 {logical} @ {scale}x 吸附后物理宽 {phys} 不是整数"
+            );
+            // 吸附偏差不超过半步网格：逻辑上最坏 k/2，物理上最坏 k×scale/2
+            // （如 150% k=2 → 物理最坏 1.5 设备像素；宽 887.47→888 @1.5x 偏差 0.795）
+            let k = super::scale_grid_step(scale);
+            assert!(
+                (phys - logical * scale).abs() <= k * scale / 2.0 + 1e-9,
+                "逻辑宽 {logical} @ {scale}x 吸附偏差超过半步网格"
+            );
+        }
+        // 具体值：1920×0.52=998.4 → 100% 下 k=1 → 998.0
+        assert_eq!(snap_to_scale_grid(998.4, 1.0, SnapMode::Round), 998.0);
+        // 150% k=2：999（奇数）→ 1000；998 保持；887.47 → 888（×1.5=1332 整数）
+        assert_eq!(snap_to_scale_grid(999.0, 1.5, SnapMode::Round), 1000.0);
+        assert_eq!(snap_to_scale_grid(998.0, 1.5, SnapMode::Round), 998.0);
+        assert_eq!(snap_to_scale_grid(887.47, 1.5, SnapMode::Round), 888.0);
+        // 125% k=4：998.4 → 1000（×1.25=1250 整数）
+        assert_eq!(snap_to_scale_grid(998.4, 1.25, SnapMode::Round), 1000.0);
+        // 高度 ceil：301.333 @1.5 → 302（向上取格点，宁高勿裁）
+        assert_eq!(snap_to_scale_grid(301.333, 1.5, SnapMode::Ceil), 302.0);
+        // 非法缩放兜底：退化为逻辑取整
+        assert_eq!(snap_to_scale_grid(998.4, 0.0, SnapMode::Round), 998.0);
+        // NaN 原样返回（调用方守卫语义不变）
+        assert!(snap_to_scale_grid(f64::NAN, 1.5, SnapMode::Round).is_nan());
     }
 
     fn jsdelivr(url: &str) -> Option<String> {

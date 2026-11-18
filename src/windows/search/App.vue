@@ -63,6 +63,7 @@ import {
   animateWindowSize,
   cancelWindowResizeAnimation,
   getDefaultWindowWidth,
+  snapHeightToScaleGrid,
   setWindowPosition,
   resetMainWindowPosition,
   getMainMonitorRect,
@@ -114,7 +115,7 @@ import {
 import { useSharedPluginRuntime } from "../config/usePluginRuntime.ts";
 import type { PluginManifest } from "../../lib/plugins/manifest.ts";
 import { compareVersion } from "../../lib/plugins/manifest.ts";
-import { findPlugin, loadRegistry } from "../../lib/plugins/registry.ts";
+import { findPlugin, loadRegistry, resolveInstallDialogAutoUpdate } from "../../lib/plugins/registry.ts";
 import type { SearchItem } from "../../types/index";
 
 const search = useSearchState();
@@ -180,7 +181,7 @@ const INSTALL_DIALOG_HEIGHT = 440;
 /** 打开安装确认弹窗（文件安装）：把窗口撑到弹窗高度，否则弹窗会被折叠窗口裁掉 */
 function openFileInstallDialog(): void {
   installDialogMode = "file";
-  installDialogShowAutoUpdate.value = false;
+  installDialogShowAutoUpdate.value = true;
   installDialogAutoUpdateCb = null;
   installDialogVisible.value = true;
   void setWindowHeight(INSTALL_DIALOG_HEIGHT);
@@ -405,7 +406,13 @@ async function openInstallDialogForPath(path: string, attachIndex: number): Prom
   installDialogPerms.value = groupPermissions(allPerms);
   installDialogWarnings.value = prepared.warnings;
   // 直读注册表取已安装版本（另一窗口可能刚装过，比共享运行时的内存态更新）
-  installDialogInstalledVersion.value = findPlugin(loadRegistry(), mf.id)?.version ?? null;
+  const prevRec = findPlugin(loadRegistry(), mf.id);
+  installDialogInstalledVersion.value = prevRec?.version ?? null;
+  installDialogAutoUpdate.value = resolveInstallDialogAutoUpdate({
+    action: prevRec && compareVersion(mf.version, prevRec.version) > 0 ? "update" : "install",
+    existing: prevRec,
+    nextManifest: mf,
+  });
   // 覆盖安装且后台在跑：弹窗提示「会先停止再安装」（真停由 Rust 侧 plugin_install 做）
   installDialogRunning.value = false;
   if (installDialogInstalledVersion.value) {
@@ -434,6 +441,7 @@ async function onInstallConfirm(): Promise<void> {
     return;
   }
   const prepared = pendingPrepared;
+  const chosenAutoUpdate = installDialogAutoUpdate.value;
   // 先关弹窗并恢复内容高度：落盘要走 IPC，期间不该继续占着弹窗高度
   closeFileInstallDialog();
   if (!prepared) return;
@@ -453,6 +461,7 @@ async function onInstallConfirm(): Promise<void> {
       source: { kind: "file", ref: sourcePath },
       sha256: prepared.sha256,
       grants: allPerms,
+      autoUpdate: chosenAutoUpdate,
     });
 
     // 安装成功：从附件中移除该 .mspp（-1 = 该文件不在附件里，无需摘除）
@@ -1050,7 +1059,12 @@ async function applyPluginWindowSize(size: ViewSize, reposition: boolean, animat
  */
 function pinPluginBoxHeight(height: number): void {
   if (!Number.isFinite(height) || height <= 0) return;
-  document.getElementById("my_search_box")?.style.setProperty("--plugin-view-height", `${Math.round(height)}px`);
+  // ceil 吸附缩放网格而非简单取整：小数高度会把下边框逐边取整吃薄（见
+  // window-snap.ts）；与下发的窗口高度（setMainWindowViewSize/applyWindowSize
+  // 的 ceil 口径）一致，盒子与窗口同帧对齐。
+  document
+    .getElementById("my_search_box")
+    ?.style.setProperty("--plugin-view-height", `${snapHeightToScaleGrid(height)}px`);
 }
 
 /** 解除主动预钉（清空变量，退回 `height:100%` 逐帧跟随视口；过渡动画用） */
@@ -1073,7 +1087,10 @@ function syncPluginBoxHeight(): void {
     return;
   }
   const h = window.innerHeight;
-  if (h > 0) box.style.setProperty("--plugin-view-height", `${h}px`);
+  // 正常路径下 innerHeight 已是吸附后的整数 CSS 像素；这里再吸附一次是防御：
+  // OS 直接拉伸 / DPI 切换瞬间 innerHeight 可能是小数，小数高度会把 #my_search_box
+  // 的下边框逐边取整吃薄（与右边框同一机制，见 lib/window-snap.ts 注释）。
+  if (h > 0) box.style.setProperty("--plugin-view-height", `${snapHeightToScaleGrid(h)}px`);
 }
 
 /** 拖拽中：更新尺寸并实时下发（不 reposition，left/top 固定，纯跟手不跳） */

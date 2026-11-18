@@ -55,6 +55,7 @@ export function manifestChanged(prev: PluginRecord, next: PluginRecord): boolean
     s: prev.autoStart,
     c: prev.closeBehavior,
     t: prev.themePreference,
+    u: prev.autoUpdate,
   });
   const b = JSON.stringify({
     v: next.version,
@@ -65,6 +66,7 @@ export function manifestChanged(prev: PluginRecord, next: PluginRecord): boolean
     s: next.autoStart,
     c: next.closeBehavior,
     t: next.themePreference,
+    u: next.autoUpdate,
   });
   return a !== b;
 }

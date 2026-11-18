@@ -4,11 +4,12 @@
 
 import { groupPermissions, isKnownPermission } from "../permissions.ts";
 import { iconDataUrl, isInlineIconRef } from "../icon.ts";
-import { manifestAutoUpdateOf, type PluginManifest } from "../manifest.ts";
+import type { PluginManifest } from "../manifest.ts";
 import {
   createPluginRecord,
   findPlugin,
   loadRegistry,
+  resolveInstallDialogAutoUpdate,
   saveRegistry,
   upsertPlugin,
 } from "../registry.ts";
@@ -63,10 +64,13 @@ export async function updatePluginFromMarket(
   const mf = prepared.manifest;
   const existingRec = findPlugin(loadRegistry(), mf.id);
   const installedVersion = existingRec?.version ?? null;
-  let chosenAutoUpdate =
-    existingRec && typeof existingRec.autoUpdate === "boolean"
-      ? existingRec.autoUpdate
-      : manifestAutoUpdateOf(mf);
+  // 安装/重装时直接按插件清单声明初始化开关（声明 autoUpdate: true 即默认开启，用户可手动关掉）；
+  // 升级时经 resolveInstallDialogAutoUpdate 计算（旧版未声明而新版声明 true 时同样默认开启）。
+  let chosenAutoUpdate = resolveInstallDialogAutoUpdate({
+    action,
+    existing: existingRec,
+    nextManifest: mf,
+  });
   let running = false;
   if (installedVersion) {
     try {
@@ -104,7 +108,10 @@ export async function updatePluginFromMarket(
     autoUpdate: chosenAutoUpdate,
     integrity: { sha256: prepared.sha256, signed: false },
   });
-  upsertPlugin(reg, record, { preserveUserChoices: false });
+  upsertPlugin(reg, record, {
+    preserveUserChoices: action === "update",
+    explicitAutoUpdate: chosenAutoUpdate,
+  });
   clearUpdateAvailable(reg, id);
   saveRegistry(reg);
 

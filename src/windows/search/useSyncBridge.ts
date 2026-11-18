@@ -22,6 +22,7 @@
 
 import { createSyncEngine, type SyncEngine, type SyncRunState } from "../../lib/sync/engine.ts";
 import { syncGetConfig, type SyncConfig } from "../../lib/sync/bridge.ts";
+import { onSyncConfigChanged, type UnlistenFn } from "../../lib/tauri-bridge.ts";
 import { storageGet } from "../../lib/util.ts";
 import { debug } from "../../lib/logger.ts";
 import type { PluginSyncState } from "../../lib/plugins/host.ts";
@@ -40,6 +41,14 @@ export function useSyncBridge(): SyncBridge {
   let config: SyncConfig | null = null;
   let booting: Promise<void> | null = null;
   let last: SyncRunState | null = null;
+  let unlisten: UnlistenFn | null = null;
+  /** 是否仍有插件申请 sync 权限（ensure 的判定结果，重建引擎时要用） */
+  let needed = false;
+
+  // 设置窗口改了同步配置（关开关、改地址密码）→ 立即重读并按需启停引擎。
+  // 若不监听，关掉开关后这边的兜底定时器会拿着旧配置继续轮询。
+  void onSyncConfigChanged(() => { void refreshConfig(); })
+    .then((fn) => { unlisten = fn; });
 
   function snapshot(): PluginSyncState {
     return {
@@ -79,8 +88,9 @@ export function useSyncBridge(): SyncBridge {
     debug(`[同步] 搜索窗口已挂载同步引擎（enabled=${cfg.enabled}）`);
   }
 
-  async function ensure(needed: boolean): Promise<void> {
-    if (!needed) {
+  async function ensure(neededFlag: boolean): Promise<void> {
+    needed = neededFlag;
+    if (!neededFlag) {
       if (engine) {
         engine.stop();
         engine = null;
@@ -106,12 +116,30 @@ export function useSyncBridge(): SyncBridge {
     await booting;
   }
 
-  /** 触发前重读配置：跨窗口改配置后不必重启应用 */
+  /** 触发前/收到配置变更广播时重读配置：跨窗口改配置后不必重启应用。
+   *  关键：用户在设置窗口关掉同步后，要把本窗口的兜底定时器停掉——
+   *  只改 config 不停引擎，定时器会拿着旧配置继续轮询；
+   *  反过来重新开启时（引擎已被拆）也要重建，且只在仍有插件申请权限时。 */
   async function refreshConfig(): Promise<void> {
     try {
       const cfg = await syncGetConfig();
       config = cfg;
-      engine?.reconfigure(cfg);
+      if (!cfg.enabled) {
+        // 先 reconfigure 再拆：reconfigure 会把引擎闭包里的配置对象也改成
+        // enabled=false，已在排程/在途的轮次会被内核守卫拦住；直接拆的话
+        // 在途轮次还握着旧配置，可能再发最后一次上传。
+        engine?.reconfigure(cfg);
+        engine?.stop();
+        engine = null;
+        debug("[同步] 配置已关闭，停止搜索窗口同步引擎");
+        return;
+      }
+      if (!engine) {
+        if (!needed) return;
+        boot(cfg);
+        return;
+      }
+      engine.reconfigure(cfg);
     } catch (e) {
       /* 读不到就沿用旧配置（触发时仍会再失败一次，错误会回给插件） */
     }
@@ -134,6 +162,8 @@ export function useSyncBridge(): SyncBridge {
     now,
     ensure,
     dispose: () => {
+      unlisten?.();
+      unlisten = null;
       engine?.stop();
       engine = null;
       config = null;
