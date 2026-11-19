@@ -596,6 +596,9 @@ const pluginHost = usePluginHost({
   setInput: (text) => {
     inputValue.value = text;
   },
+  // 插件 ms.search.focusInput：聚焦搜索框、光标到末尾（呼出类插件动作的
+  // 配套能力，如文件搜索 Alt+S 呼出后预填「文件搜索 : 」让用户直接输入）
+  focusSearchInput: () => searchBoxRef.value?.focusEnd(),
   hideDetail: () => hideTextView(),
   toast: (text, type) => toast.showToast(text, type ?? "ok"),
   confirm: (text) => message.showMessage(text, { title: "插件请求" }),

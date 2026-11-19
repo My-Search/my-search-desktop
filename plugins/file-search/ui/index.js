@@ -7,7 +7,9 @@
  *   1. 用户在搜索框粘贴/拖入**文件夹**（可多个，多批粘贴会合并去重）→
  *      结果只剩声明了 folders 能力的插件（本插件 + 其它同能力插件）；
  *   2. 输入「文件搜索 : 关键词」回车 → 宿主打开本视图并把关键词经
- *      onSubKeyword 推过来（挂载时也会自动推一次）；
+ *      onSubKeyword 推过来（挂载时也会自动推一次）；**没有关键词时不扫描**——
+ *      选好文件夹后停在待命态（chips 可见 + 提示输入关键词），关键词到达且
+ *      未扫过时才发起扫描；
  *   3. 本插件用 ms.input.attachments() 取全部附加文件夹、ms.input.listFolderStream()
  *      逐根**流式**递归列举（按轮带 gen：单根失败不拖垮其余根；每收到一批就
  *      增量渲染，用户能看到「边扫边出现」）。**不设条数上限——一直扫**，直到
@@ -23,6 +25,8 @@
  *      旧宿主没有这两个 API 时按钮不出现 / × 不渲染（能力降级，行为不变）；
  *   5. 视图开着时再粘贴/移除文件夹：宿主广播 ms-attachments-changed，
  *      本插件自动重扫，不用手点「重新扫描」。
+ *   6. 全局快捷键 Alt+S（清单 contributes.shortcut 声明，安装即用）呼出本
+ *      插件：宿主开窗开视图后把动作转发给 onAction 处理器，预填并聚焦搜索框。
  *
  * 旧宿主兼容：没有 ms.input.listFolderStream 时退回 ms.input.listFolder
  * （一次性返回、无流式；仍不设前端上限，受宿主自身保护）。
@@ -774,6 +778,18 @@
       return;
     }
 
+    // 无关键词不扫描（待命态）：扫描本身不看关键词——列举全部再由前端按
+    // 关键词过滤，没关键词时扫出来的只会是整个文件夹的全量噪音。选好文件夹
+    // 后停在这里（chips 已更新、统计行空），等搜索框给出关键词（onSubKeyword
+    // 推入 / 挂载参数带来）再由 refresh() 发起真正的扫描。
+    if (splitQuery(query).length === 0) {
+      entries = [];
+      scanned = false;
+      render();
+      setStatus("已附加 " + folders.length + " 个文件夹；在搜索框输入关键词后开始搜索", "warn");
+      return;
+    }
+
     if (liveRenderTimer) {
       clearTimeout(liveRenderTimer);
       liveRenderTimer = null;
@@ -855,7 +871,14 @@
   if (typeof onSubKeyword === "function") {
     onSubKeyword(function (msg) {
       query = String(msg == null ? "" : msg);
-      render();
+      // 从「无关键词待命」进入有关键词、且还没扫出过数据：此刻才发起扫描
+      //（见 refresh() 的待命分支）。已有扫描结果时关键词只做前端过滤，
+      // 不重扫——扫描本来就不看关键词，条目集合是全量。
+      if (splitQuery(query).length && !scanned && !scanning && folders.length) {
+        refresh();
+      } else {
+        render();
+      }
       return true;
     });
   }
@@ -1007,6 +1030,38 @@
     }
     refresh();
   });
+
+  // ===== 全局快捷键动作（宿主转发） =====
+  //
+  // 清单 contributes.shortcut 里声明了本地动作名 `open-file-search`、默认键
+  // Alt+S；宿主在插件安装后自动注册全局热键（`plugin:<id>:open-file-search`，
+  // 默认键未被占用且未被用户解绑时），按下后呼出主窗口、打开本视图并把动作名
+  // 派发到这里。行为：待命态（无关键词）时把搜索框预填成「文件搜索 : 」并
+  // 聚焦——用户直接输入关键词回车即可开始搜索（子关键词经 onSubKeyword 推回，
+  // 见上方注册；已在搜时只聚焦不改写，改键 / 解绑在 设置 → 快捷键）。
+  //
+  // 能力降级：预填/聚焦依赖 ms.search.setInput 与 focusInput（后者 7.9.38 才
+  // 有）——没有时相应步骤跳过，Alt+S 仍会打开本视图；两步都可能因权限未授予
+  // 而失败，静默跳过即可（不该因装饰能力报错打断呼出）。
+  if (ms && ms.shortcuts && typeof ms.shortcuts.onAction === "function") {
+    ms.shortcuts.onAction("open-file-search", function () {
+      if (!rootEl || !rootEl.isConnected) return; // 会话已销毁：不碰任何 API
+      var needPrefill = splitQuery(query).length === 0;
+      Promise.resolve()
+        .then(function () {
+          if (needPrefill && ms.search && typeof ms.search.setInput === "function") {
+            return ms.search.setInput("文件搜索 : ");
+          }
+        })
+        .catch(function () { /* 权限未授予：跳过预填 */ })
+        .then(function () {
+          if (ms.search && typeof ms.search.focusInput === "function") {
+            return ms.search.focusInput();
+          }
+        })
+        .catch(function () { /* 旧宿主没有 focusInput：跳过聚焦 */ });
+    });
+  }
 
   // ===== 初始化 =====
   // 输入框里已有的「父 : 子」直接当首屏查询（挂载后宿主还会再推一次，幂等）

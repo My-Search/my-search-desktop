@@ -199,6 +199,22 @@ export function createUiDataApis(
         return true;
       },
     },
+    /**
+     * 聚焦宿主搜索框并把光标移到末尾。与 `setInput` / `trigger` 同权限
+     * （search.write，都是「写搜索框」语义），典型用法是呼出类插件动作里
+     * 两者连用：先 `setInput("文件搜索 : ")` 预填前缀，再聚焦——用户直接
+     * 输入关键词回车即可。没有宿主搜索框的窗口（独立插件窗口）报错。
+     */
+    focusInput: {
+      permission: "search.write",
+      handler: () => {
+        if (!ctx.focusSearchInput) {
+          throw new Error("当前窗口不支持聚焦搜索框（请在主窗口的插件界面里使用）");
+        }
+        ctx.focusSearchInput();
+        return true;
+      },
+    },
     closeView: {
       permission: "search.write",
       handler: () => {

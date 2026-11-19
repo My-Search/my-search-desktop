@@ -81,6 +81,11 @@ export interface PluginHostRuntimeOptions {
   triggerSearch: (keyword: string) => void;
   /** 改写输入框（插件 search.setInput 用） */
   setInput: (text: string) => void;
+  /**
+   * 聚焦宿主搜索框（插件 search.focusInput 用；App.vue 注入）。
+   * 不注入（如独立插件窗口）时插件调用会得到明确报错。
+   */
+  focusSearchInput?: () => void;
   /** 收起详情视图 */
   hideDetail: () => void;
   /** 应用内提示 */
@@ -528,6 +533,8 @@ export function usePluginHost(opts: PluginHostRuntimeOptions) {
       searchData: () => opts.getSearchData(),
       triggerSearch: (kw) => opts.triggerSearch(kw),
       setInput: (text) => opts.setInput(text),
+      // 插件 ms.search.focusInput：聚焦宿主搜索框（呼出类插件动作的配套能力）
+      focusSearchInput: opts.focusSearchInput,
       hideDetail: () => opts.hideDetail(),
       toast: (text, type) => opts.toast(text, type),
       confirm: (text) => opts.confirm(text),

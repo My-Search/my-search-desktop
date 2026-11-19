@@ -85,6 +85,15 @@ export interface PluginHostContext {
   triggerSearch: (keyword: string) => void;
   /** 改写搜索框内容（不触发搜索） */
   setInput: (text: string) => void;
+  /**
+   * 聚焦宿主搜索框并把光标移到末尾（`ms.search.focusInput` 用）。
+   *
+   * 供「呼出类」插件动作（`contributes.shortcut` → `ms.shortcuts.onAction`）用：
+   * 快捷键打开插件视图后，把输入焦点交还给搜索框，让用户直接输入子关键词
+   * 回车（如「文件搜索 : 报告」）。只在主搜索窗口有实现；独立插件窗口等
+   * 没有宿主搜索框的场合不注入，调用会得到明确报错。
+   */
+  focusSearchInput?: () => void;
   /** 收起详情视图回到结果列表 */
   hideDetail: () => void;
   /** 应用内提示 */
