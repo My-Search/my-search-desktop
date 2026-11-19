@@ -7,9 +7,10 @@
  *   1. 用户在搜索框粘贴/拖入**文件夹**（可多个，多批粘贴会合并去重）→
  *      结果只剩声明了 folders 能力的插件（本插件 + 其它同能力插件）；
  *   2. 输入「文件搜索 : 关键词」回车 → 宿主打开本视图并把关键词经
- *      onSubKeyword 推过来（挂载时也会自动推一次）；**没有关键词时不扫描**——
- *      选好文件夹后停在待命态（chips 可见 + 提示输入关键词），关键词到达且
- *      未扫过时才发起扫描；
+ *      onSubKeyword 推过来（挂载时也会自动推一次）；**也可以直接在插件界面
+ *      顶部的关键词输入框里输入**（300ms 防抖即搜、回车立即搜、Esc 清空），
+ *      两条入口写同一个 query。没有关键词时不扫描——选好文件夹后停在待命态
+ *      （焦点自动落在输入框），关键词到达且未扫过时才发起扫描；
  *   3. 本插件用 ms.input.attachments() 取全部附加文件夹、ms.input.listFolderStream()
  *      逐根**流式**递归列举（按轮带 gen：单根失败不拖垮其余根；每收到一批就
  *      增量渲染，用户能看到「边扫边出现」）。**不设条数上限——一直扫**，直到
@@ -48,7 +49,7 @@
 
   // ===== DOM =====
   var dom = {};
-  ["fs-status", "fs-meta", "fs-cats", "fs-list", "fs-folders", "fs-foot", "fs-rescan", "fs-pick"].forEach(function (id) {
+  ["fs-status", "fs-meta", "fs-cats", "fs-list", "fs-folders", "fs-foot", "fs-rescan", "fs-pick", "fs-query", "fs-clear", "fs-search-row"].forEach(function (id) {
     dom[id] = document.getElementById(id);
   });
   /** 本实例的根节点（会话被卸载后脱离文档；老实例靠它判活，不打扰新实例） */
@@ -425,9 +426,7 @@
     // 扫描中把「停止」的说明放进脚注，让用户知道大目录能随时收手
     return scanning
       ? "正在扫描…点右上角红字「停止」可随时中断，已扫到的条目会保留；" + tip
-      : splitQuery(query).length
-      ? tip
-      : "在搜索框输入「文件搜索 : 关键词」回车可筛选；" + tip;
+      : tip;
   }
 
   /**
@@ -780,13 +779,14 @@
 
     // 无关键词不扫描（待命态）：扫描本身不看关键词——列举全部再由前端按
     // 关键词过滤，没关键词时扫出来的只会是整个文件夹的全量噪音。选好文件夹
-    // 后停在这里（chips 已更新、统计行空），等搜索框给出关键词（onSubKeyword
-    // 推入 / 挂载参数带来）再由 refresh() 发起真正的扫描。
+    // 后停在这里（chips 已更新、统计行空），等输入框 / 搜索框给出关键词再由
+    // refresh() 发起真正的扫描。
     if (splitQuery(query).length === 0) {
       entries = [];
       scanned = false;
       render();
-      setStatus("已附加 " + folders.length + " 个文件夹；在搜索框输入关键词后开始搜索", "warn");
+      setStatus("已附加 " + folders.length + " 个文件夹；在下方输入关键词开始搜索", "warn");
+      if (dom["fs-query"] && !dom["fs-query"].value) dom["fs-query"].focus();
       return;
     }
 
@@ -871,6 +871,8 @@
   if (typeof onSubKeyword === "function") {
     onSubKeyword(function (msg) {
       query = String(msg == null ? "" : msg);
+      if (dom["fs-query"]) dom["fs-query"].value = query; // 与插件内输入框互为镜像
+      if (dom["fs-clear"]) dom["fs-clear"].hidden = query === "";
       // 从「无关键词待命」进入有关键词、且还没扫出过数据：此刻才发起扫描
       //（见 refresh() 的待命分支）。已有扫描结果时关键词只做前端过滤，
       // 不重扫——扫描本来就不看关键词，条目集合是全量。
@@ -881,6 +883,57 @@
       }
       return true;
     });
+  }
+
+  // ===== 插件内关键词输入（前端即搜） =====
+  //
+  // 详情视图顶部的输入框：不必经搜索框「文件搜索 : xx」子搜索模式，在这里
+  // 直接输入关键词即可筛选。300ms 防抖即搜（与宿主搜索框同手感）、回车立即
+  // 搜、Esc 清空回待命态。与子关键词（onSubKeyword）写同一个 query——两条
+  // 入口汇到一处，谁后到谁生效。
+  //
+  // 与待命态联动：从无关键词到有关键词时若还没扫过，立即发起扫描（同
+  // onSubKeyword 的逻辑）；清空关键词不清结果（已扫数据保留，只是不筛）。
+  if (dom["fs-query"]) {
+    var inputTimer = null;
+    var applyQuery = function (raw) {
+      query = String(raw == null ? "" : raw);
+      if (dom["fs-clear"]) dom["fs-clear"].hidden = query === "";
+      if (splitQuery(query).length && !scanned && !scanning && folders.length) {
+        refresh(); // 待命 → 首个关键词：发起扫描
+      } else {
+        render();
+      }
+    };
+    dom["fs-query"].addEventListener("input", function () {
+      if (inputTimer) clearTimeout(inputTimer);
+      inputTimer = setTimeout(function () {
+        inputTimer = null;
+        applyQuery(dom["fs-query"].value);
+      }, 300);
+    });
+    dom["fs-query"].addEventListener("keydown", function (e) {
+      if (e.isComposing) return; // 输入法组合中不抢键
+      if (e.key === "Enter") {
+        e.preventDefault();
+        if (inputTimer) { clearTimeout(inputTimer); inputTimer = null; }
+        applyQuery(dom["fs-query"].value);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        dom["fs-query"].value = "";
+        if (inputTimer) { clearTimeout(inputTimer); inputTimer = null; }
+        applyQuery("");
+      }
+    });
+    if (dom["fs-clear"]) {
+      dom["fs-clear"].addEventListener("click", function () {
+        dom["fs-query"].value = "";
+        applyQuery("");
+        dom["fs-query"].focus();
+      });
+    }
+    // 有已扫数据时把 query 回显进输入框（子关键词入口进来时同步可见）
+    if (query) dom["fs-query"].value = query;
   }
 
   // 列表点击：文件夹定位按钮 → 资源管理器中定位；行其余区域 → 系统默认程序打开
@@ -937,6 +990,8 @@
           if (!Array.isArray(picked) || picked.length === 0) return; // 用户取消：静默
           if (scanning) return; // 在扫：广播/本轮收尾会带上新文件夹，不并发起两轮
           refresh();
+          // 选好文件夹后把焦点交给关键词输入框：下一个动作自然就是输入关键词
+          if (dom["fs-query"]) dom["fs-query"].focus();
         })
         .catch(function (err) {
           setStatus("选择文件夹失败：" + explainError(err), "err");

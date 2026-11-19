@@ -103,6 +103,35 @@
   color: #fff;
 }
 
+/* ---------- 关键词输入行：插件内直接输入即搜 ---------- */
+.fs-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.fs-query {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--fs-line, #e6e8ec);
+  background: var(--fs-card, #fff);
+  color: var(--text, #1f2329);
+  border-radius: 8px;
+  font-size: 13px;
+  font-family: inherit;
+  padding: 6px 10px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.fs-query:focus {
+  border-color: var(--brand, #5b5bd6);
+}
+
+.fs-query::placeholder {
+  color: var(--muted, #7a828e);
+}
+
 /* ---------- 搜索范围：附加的文件夹 chips ---------- */
 .fs-folders {
   display: flex;

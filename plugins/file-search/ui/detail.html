@@ -16,6 +16,13 @@
     </div>
   </div>
   <div class="fs-folders" id="fs-folders" hidden></div>
+  <!-- 关键词输入行：插件内直接输入即搜（不必经搜索框「文件搜索 : xx」子搜索模式）。
+       回车立即搜；Esc 清空关键词并回到待命态。 -->
+  <div class="fs-search" id="fs-search-row">
+    <input id="fs-query" class="fs-query" type="text" placeholder="输入关键词筛选文件名（回车立即搜索）"
+           autocomplete="off" spellcheck="false" />
+    <button id="fs-clear" class="fs-btn" type="button" hidden title="清空关键词">清空</button>
+  </div>
   <div class="fs-meta" id="fs-meta" hidden></div>
   <div class="fs-cats" id="fs-cats" hidden></div>
   <div class="fs-list" id="fs-list" hidden></div>
