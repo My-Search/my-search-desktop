@@ -17,6 +17,7 @@ import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, shallo
 import {
   getDefaultSubscribeText,
   getShortcutBindings,
+  isTauri,
   openExternal,
   onOpenPluginPackage,
   takePendingPluginOpen,
@@ -101,6 +102,34 @@ const shortcutCapturing = ref(false);
 const pendingPluginPath = ref<string | null>(null);
 /** 「双击 .mspp 插件包」事件监听器（Rust 端 my-search://open-plugin-package） */
 let unlistenPluginOpen: (() => void) | null = null;
+
+/** 数据同步/导入还原完成广播（`sync://applied`） */
+let unlistenSyncApplied: (() => void) | null = null;
+
+/**
+ * 云端还原 / 本地导入完成后的设置窗口协调器。
+ *
+ * 还原会替换插件安装目录、合并插件数据、覆盖用户配置：本窗口缓存的
+ * 「已安装列表 / 标签统计 / 订阅原文」都可能过期。面板自身若提供
+ * `refreshAfterRestore()` 也顺手调用一次（例如同步面板要重读配置）。
+ * 真正的同步执行者是主窗口 SyncHost，本窗口只做展示刷新。
+ *
+ * `scope=config` 时插件注册表没变，跳过已安装列表重读——否则用户只是导入了
+ * 一份订阅配置，插件面板也会闪一下。
+ */
+function onSyncApplied(payload?: { scope?: string }): void {
+  const scope = payload?.scope ?? "all";
+  // 标签统计与关注勾选属于用户配置，配置/全量还原都会变
+  tags.setSignature(tags.computeSignature());
+  tags.load();
+  if (scope !== "config") installed.reload();
+  const current = paneRef.value as { refreshAfterRestore?: () => void } | null;
+  try {
+    current?.refreshAfterRestore?.();
+  } catch (e) {
+    console.warn("[同步] 还原后刷新当前面板失败:", e);
+  }
+}
 
 /**
  * 处理「从外部打开插件包」：双击 .mspp / 命令行传入路径时由 Rust 叫醒。
@@ -273,6 +302,18 @@ onMounted(async () => {
     void handleExternalPluginOpen();
   });
   void handleExternalPluginOpen();
+
+  // 数据同步还原完成：刷新本窗口的已安装列表 / 标签 / 订阅展示。
+  if (isTauri) {
+    try {
+      const { listen } = await import("@tauri-apps/api/event");
+      unlistenSyncApplied = await listen<{ scope?: string }>("sync://applied", (e) => {
+        onSyncApplied(e.payload);
+      });
+    } catch (e) {
+      console.warn("[同步] 注册还原广播监听失败:", e);
+    }
+  }
 });
 
 type SubscribesArray = Array<{ url: string; title?: string; describe?: string }>;
@@ -282,6 +323,8 @@ onBeforeUnmount(() => {
   document.removeEventListener("visibilitychange", onVisibilityChange);
   window.removeEventListener("focus", onFocusRefresh);
   unlistenPluginOpen?.();
+  unlistenSyncApplied?.();
+  unlistenSyncApplied = null;
   toast.disposeToast();
 });
 

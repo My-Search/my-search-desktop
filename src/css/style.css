@@ -4620,6 +4620,28 @@ html.theme-dark #ms-config-view .page.sync .cfg-select option {
   padding: 8px 0 2px;
 }
 
+/* ---- 首次连接 / 冲突选择 ---- */
+#ms-config-view .page.sync .sync-choice {
+  margin: 2px 0 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--brand);
+  border-radius: 8px;
+  background: var(--field);
+}
+#ms-config-view .page.sync .sync-choice-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 4px;
+}
+#ms-config-view .page.sync .sync-choice-desc {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--muted);
+  margin-bottom: 10px;
+}
+
 /* ---- 状态色 ---- */
 #ms-config-view .page.sync .cfg-hint.ok {
   color: var(--ok);

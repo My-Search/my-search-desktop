@@ -166,6 +166,10 @@ pub fn sync_set_config(
         save_credentials(&app, &creds)?;
     }
     save_config(&app, &cfg)?;
+    // 远端目标变了（换地址 / 换用户名 / 换文件名）→ 同步基线必须清零，
+    // 否则会把新远端当成「同一远端的旧版本」而错误跳过首次下载或强行覆盖。
+    let target = crate::sync_state::target_signature(&cfg.webdav_url, &cfg.webdav_user, &cfg.remote_file);
+    crate::sync_state::bind_target(&app, &target)?;
     Ok(sync_get_config(app))
 }
 
@@ -186,9 +190,25 @@ fn is_safe_remote_path(p: &str) -> bool {
 #[serde(rename_all = "camelCase")]
 pub struct RemoteMeta {
     pub exists: bool,
+    /// 稳定的远端版本令牌：有 ETag 时取 ETag 去引号，否则用 `size-modified` 兜底
     pub rev: String,
+    /// 原始 ETag（**含引号**）：上传时原样放进 `If-Match`，下载时放进 `If-None-Match`
+    pub etag: String,
     pub modified: i64,
     pub size: u64,
+}
+
+/// 下载结果（含版本信息，供同步状态落盘）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadResult {
+    pub path: String,
+    pub size: u64,
+    pub rev: String,
+    pub etag: String,
+    pub modified: i64,
+    /// `true` = 远端版本与调用方持有的一致（HTTP 304），没有写任何文件
+    pub not_modified: bool,
 }
 
 fn build_client(timeout_secs: u64) -> Result<reqwest::Client, String> {
@@ -272,12 +292,18 @@ async fn webdav_meta(cfg: &SyncConfig, creds: &Credentials) -> Result<RemoteMeta
         )));
     }
     let headers = resp.headers();
-    let rev = headers
+    // 原样保留（含引号 / `W/` 前缀）：`If-Match` 必须发服务器给什么就回什么。
+    let etag = headers
         .get("etag")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
-        .trim_matches('"')
+        .trim()
         .to_string();
+    let rev = if etag.is_empty() {
+        String::new()
+    } else {
+        etag.trim_matches('"').to_string()
+    };
     let modified = headers
         .get("last-modified")
         .and_then(|v| v.to_str().ok())
@@ -293,49 +319,120 @@ async fn webdav_meta(cfg: &SyncConfig, creds: &Credentials) -> Result<RemoteMeta
     } else {
         rev
     };
-    Ok(RemoteMeta { exists: true, rev, modified, size })
+    Ok(RemoteMeta { exists: true, rev, etag, modified, size })
 }
 
-/// 上传
-async fn webdav_upload(cfg: &SyncConfig, creds: &Credentials, bytes: Vec<u8>) -> Result<RemoteMeta, String> {
+/// 上传。
+///
+/// `if_match` 语义（与 WebDAV 条件请求对齐）：
+/// - `Some(etag)` 且非空 → `If-Match: etag`：远端被别的设备改过时服务器返回 412；
+/// - `Some("")` → `If-None-Match: *`：只在远端**不存在**时创建，防止覆盖他人备份；
+/// - `None` → 无条件 PUT（只用于用户明确选择「本机覆盖远端」的场景）。
+///
+/// 412 / 409 统一返回 `SYNC_CONFLICT:` 前缀，前端据此重新决策而不是把
+/// 冲突当成普通网络错误。
+async fn webdav_upload(
+    cfg: &SyncConfig,
+    creds: &Credentials,
+    bytes: Vec<u8>,
+    if_match: Option<String>,
+) -> Result<RemoteMeta, String> {
     let client = build_client(120)?;
     ensure_webdav_dirs(&client, cfg, creds).await?;
     let url = webdav_url(cfg)?;
     let size = bytes.len() as u64;
-    let resp = webdav_auth(client.put(&url).header("Content-Type", ARCHIVE_MIME).body(bytes), cfg, creds)
-        .send()
-        .await
-        .map_err(|e| err(format!("上传失败: {e}")))?;
+    let mut req = webdav_auth(
+        client.put(&url).header("Content-Type", ARCHIVE_MIME).body(bytes),
+        cfg,
+        creds,
+    );
+    if let Some(expected) = if_match {
+        if expected.is_empty() {
+            req = req.header("If-None-Match", "*");
+        } else {
+            req = req.header("If-Match", expected);
+        }
+    }
+    let resp = req.send().await.map_err(|e| err(format!("上传失败: {e}")))?;
     let status = resp.status();
+    if status.as_u16() == 412 || status.as_u16() == 409 {
+        return Err(err("SYNC_CONFLICT: 远端备份已被其他设备修改"));
+    }
     if !status.is_success() {
         return Err(err(format!("上传失败: HTTP {}", status.as_u16())));
     }
-    let rev = resp
+    let etag = resp
         .headers()
         .get("etag")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
-        .trim_matches('"')
+        .trim()
         .to_string();
-    if rev.is_empty() {
+    if etag.is_empty() {
+        // 部分 WebDAV 服务器 PUT 响应不带 ETag：补一次 HEAD 拿到权威版本。
         return webdav_meta(cfg, creds).await;
     }
-    Ok(RemoteMeta { exists: true, rev, modified: now_ms(), size })
+    Ok(RemoteMeta {
+        exists: true,
+        rev: etag.trim_matches('"').to_string(),
+        etag,
+        modified: now_ms(),
+        size,
+    })
 }
 
-/// 下载
-async fn webdav_download(cfg: &SyncConfig, creds: &Credentials) -> Result<Vec<u8>, String> {
+/// 下载。
+///
+/// `known_etag` 非空时带 `If-None-Match`：服务器返回 304 说明远端没变，
+/// 直接回报 `not_modified`，不落盘、不还原——这是「兜底轮询不产生无谓下载」
+/// 的关键。否则读取响应头里的版本信息一并返回。
+async fn webdav_download(
+    cfg: &SyncConfig,
+    creds: &Credentials,
+    known_etag: Option<String>,
+) -> Result<(Vec<u8>, RemoteMeta, bool), String> {
     let client = build_client(120)?;
     let url = webdav_url(cfg)?;
-    let resp = webdav_auth(client.get(&url), cfg, creds)
-        .send()
-        .await
-        .map_err(|e| err(format!("下载失败: {e}")))?;
+    let mut req = webdav_auth(client.get(&url), cfg, creds);
+    if let Some(etag) = known_etag.filter(|v| !v.trim().is_empty()) {
+        req = req.header("If-None-Match", etag);
+    }
+    let resp = req.send().await.map_err(|e| err(format!("下载失败: {e}")))?;
     let status = resp.status();
+    if status.as_u16() == 304 {
+        return Ok((Vec::new(), RemoteMeta::default(), true));
+    }
     if !status.is_success() {
         return Err(err(format!("下载失败: HTTP {}", status.as_u16())));
     }
-    Ok(resp.bytes().await.map_err(|e| err(format!("读取响应失败: {e}")))?.to_vec())
+    let headers = resp.headers().clone();
+    let etag = headers
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let modified = headers
+        .get("last-modified")
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_http_date)
+        .unwrap_or_else(now_ms);
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| err(format!("读取响应失败: {e}")))?
+        .to_vec();
+    let size = bytes.len() as u64;
+    let rev = if etag.is_empty() {
+        format!("{size}-{modified}")
+    } else {
+        etag.trim_matches('"').to_string()
+    };
+    Ok((
+        bytes,
+        RemoteMeta { exists: true, rev, etag, modified, size },
+        false,
+    ))
 }
 
 // ===================== 统一入口 =====================
@@ -343,48 +440,90 @@ async fn webdav_download(cfg: &SyncConfig, creds: &Credentials) -> Result<Vec<u8
 /// 检查远端文件是否存在
 #[tauri::command]
 pub async fn sync_remote_meta(app: AppHandle) -> Result<RemoteMeta, String> {
-    let cfg = load_config(&app);
-    let creds = load_credentials(&app);
-    webdav_meta(&cfg, &creds).await
+    crate::sync_service::with_sync_gate(async move {
+        let cfg = load_config(&app);
+        let creds = load_credentials(&app);
+        webdav_meta(&cfg, &creds).await
+    })
+    .await
 }
 
 /// 测试连接
 #[tauri::command]
 pub async fn sync_test(app: AppHandle) -> Result<serde_json::Value, String> {
-    let cfg = load_config(&app);
-    if cfg.webdav_url.trim().is_empty() {
-        return Err(err("请先填写 WebDAV 地址"));
-    }
-    let meta = sync_remote_meta(app.clone()).await?;
-    let message = if meta.exists {
-        format!("连接成功，远端已有备份（{} 字节）", meta.size)
-    } else {
-        "连接成功，远端还没有备份".into()
-    };
-    Ok(json!({ "ok": true, "message": message }))
+    crate::sync_service::with_sync_gate(async move {
+        let cfg = load_config(&app);
+        if cfg.webdav_url.trim().is_empty() {
+            return Err(err("请先填写 WebDAV 地址"));
+        }
+        let creds = load_credentials(&app);
+        let meta = webdav_meta(&cfg, &creds).await?;
+        let message = if meta.exists {
+            format!("连接成功，远端已有备份（{} 字节）", meta.size)
+        } else {
+            "连接成功，远端还没有备份".into()
+        };
+        Ok(json!({ "ok": true, "message": message }))
+    })
+    .await
 }
 
-/// 上传备份到 WebDAV
+/// 上传备份到 WebDAV。
+///
+/// `if_match`：见 `webdav_upload` 的三种语义；不传 = 无条件覆盖（仅供用户明确
+/// 选择「本机覆盖远端」时使用，普通同步轮次必须传，否则可能覆盖别的设备的新数据）。
 #[tauri::command]
-pub async fn sync_upload(app: AppHandle, path: String) -> Result<RemoteMeta, String> {
-    let cfg = load_config(&app);
+pub async fn sync_upload(
+    app: AppHandle,
+    path: String,
+    if_match: Option<String>,
+) -> Result<RemoteMeta, String> {
     let bytes = crate::backup::read_backup_file(&app, &path)?;
     if bytes.is_empty() {
         return Err(err("归档文件为空"));
     }
-    let creds = load_credentials(&app);
-    webdav_upload(&cfg, &creds, bytes).await
+    crate::sync_service::with_sync_gate(async move {
+        let cfg = load_config(&app);
+        let creds = load_credentials(&app);
+        webdav_upload(&cfg, &creds, bytes, if_match).await
+    })
+    .await
 }
 
-/// 从 WebDAV 下载备份到本机备份目录，返回路径
+/// 从 WebDAV 下载备份到本机备份目录。
+///
+/// `known_etag` 非空时走条件请求：304 直接返回 `notModified: true`。
 #[tauri::command]
-pub async fn sync_download(app: AppHandle) -> Result<serde_json::Value, String> {
-    let cfg = load_config(&app);
-    let creds = load_credentials(&app);
-    let bytes = webdav_download(&cfg, &creds).await?;
+pub async fn sync_download(
+    app: AppHandle,
+    known_etag: Option<String>,
+) -> Result<DownloadResult, String> {
     let name = format!("remote-{}.msbackup", crate::backup::file_stamp_public());
-    let path = crate::backup::write_archive_file(&app, &name, &bytes)?;
-    Ok(json!({ "path": path, "size": bytes.len() }))
+    crate::sync_service::with_sync_gate(async move {
+        let cfg = load_config(&app);
+        let creds = load_credentials(&app);
+        let (bytes, meta, not_modified) = webdav_download(&cfg, &creds, known_etag).await?;
+        if not_modified {
+            return Ok(DownloadResult {
+                path: String::new(),
+                size: 0,
+                rev: meta.rev,
+                etag: meta.etag,
+                modified: 0,
+                not_modified: true,
+            });
+        }
+        let path = crate::backup::write_archive_file(&app, &name, &bytes)?;
+        Ok(DownloadResult {
+            path,
+            size: bytes.len() as u64,
+            rev: meta.rev,
+            etag: meta.etag,
+            modified: meta.modified,
+            not_modified: false,
+        })
+    })
+    .await
 }
 
 // ===================== 时间解析（仅保留 WebDAV 用的） =====================

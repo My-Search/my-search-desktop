@@ -79,6 +79,11 @@ const EVENT_BACKEND_CHANGED: &str = "plugin://backend-changed";
 const EVENT_BACKEND_NOTIFICATION: &str = "plugin://notification";
 /// 插件注册表/网关变更广播事件（跨窗口即时同步，消除 localStorage 指纹轮询）
 pub(crate) const EVENT_REGISTRY_CHANGED: &str = "plugin://registry-changed";
+/// 插件文件存储变更广播（`plugin-data/` 下的结构化存储被写/删时触发）。
+///
+/// 与 localStorage 的 `PLUGIN_DATA:*` 一并纳入云同步：没有这个事件，插件
+/// 写文件存储不会触发自动同步，云端的插件数据会长期滞后。
+pub(crate) const EVENT_PLUGIN_DATA_CHANGED: &str = "plugin-data://changed";
 /// 插件独立子窗口 label 前缀（capabilities/plugin-window.json 按 `plugin-win-*` 授权）
 pub const PLUGIN_WINDOW_PREFIX: &str = "plugin-win-";
 /// 单个插件同时允许打开的独立窗口上限
@@ -1330,6 +1335,10 @@ pub fn plugin_storage_write(
             .map_err(|_| err(format!("落盘插件存储失败: {e}")))?;
         let _ = std::fs::remove_file(&tmp);
     }
+    let _ = app.emit(
+        EVENT_PLUGIN_DATA_CHANGED,
+        json!({ "pluginId": plugin_id, "key": key, "removed": false }),
+    );
     Ok(())
 }
 
@@ -1346,6 +1355,10 @@ pub fn plugin_storage_delete(
         return Ok(false);
     }
     std::fs::remove_file(&path).map_err(|e| err(format!("删除插件存储失败: {e}")))?;
+    let _ = app.emit(
+        EVENT_PLUGIN_DATA_CHANGED,
+        json!({ "pluginId": plugin_id, "key": key, "removed": true }),
+    );
     Ok(true)
 }
 

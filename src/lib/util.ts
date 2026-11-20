@@ -196,20 +196,29 @@ const STORAGE_PREFIX = "my-search-desktop:";
 
 /** 无 localStorage 环境（如 Node 测试）时的内存兜底实现 */
 const memoryStore = new Map<string, unknown>();
-const hasLocalStorage = (() => {
+
+/**
+ * 当前环境是否真的有 localStorage。
+ *
+ * **必须运行时判定，不能缓存成模块常量**：模块加载时机与「存储可用时机」
+ * 不一定一致（测试在 import 之后才注入 `globalThis.localStorage`；某些启动
+ * 路径也可能晚于模块求值）。缓存成常量会让读写静默退到内存兜底 store——
+ * 写入看似成功、读回却是空，表现为「注册表 / 插件数据莫名其妙丢了」。
+ */
+function hasLocalStorage(): boolean {
   try {
     return typeof localStorage !== "undefined" && localStorage !== null;
   } catch (e) {
     return false;
   }
-})();
+}
 
 export function storageGet<T>(key: string, defaultValue: T): T;
 export function storageGet<T = unknown>(key: string, defaultValue?: null): T | null;
 export function storageGet<T = unknown>(key: string, defaultValue: T | null = null): T | null {
   const fullKey = STORAGE_PREFIX + key;
   try {
-    if (!hasLocalStorage) {
+    if (!hasLocalStorage()) {
       return memoryStore.has(fullKey) ? (memoryStore.get(fullKey) as T) : defaultValue;
     }
     const raw = localStorage.getItem(fullKey);
@@ -224,23 +233,38 @@ export function storageGet<T = unknown>(key: string, defaultValue: T | null = nu
 /** 有 localStorage 写入时触发的回调（供同步引擎监听数据变更） */
 let onChangeCallback: ((key: string, value: unknown) => void) | null = null;
 
-/** 注册存储变更回调（只有同步引擎会调一次，close 时清空） */
+/** 注册存储变更回调（只有同步宿主会调一次，close 时清空） */
 export function setOnStorageChange(cb: ((key: string, value: unknown) => void) | null): void {
   onChangeCallback = cb;
 }
 
-export function storageSet(key: string, value: unknown): void {
+/** 写存储的选项 */
+export interface StorageSetOptions {
+  /**
+   * 静默写入：不触发同步钩子。
+   *
+   * 还原备份时必须用它：写回本身就会让 `storageSet` 触发「5 秒后上传」，
+   * 刚下载的数据会立刻被当成本机改动再传回远端（同步回声）。
+   */
+  silent?: boolean;
+}
+
+export function storageSet(key: string, value: unknown, options?: StorageSetOptions): void {
   const fullKey = STORAGE_PREFIX + key;
+  let written = false;
   try {
-    if (!hasLocalStorage) {
+    if (!hasLocalStorage()) {
       memoryStore.set(fullKey, value);
-      return;
+      written = true;
+    } else {
+      localStorage.setItem(fullKey, JSON.stringify(value));
+      written = true;
     }
-    localStorage.setItem(fullKey, JSON.stringify(value));
   } catch (e) {
     console.warn("[我的搜索] 写入缓存失败:", key, e);
   }
   // 通知同步引擎（放在 try-catch 外面：存储已写完，回调失败不影响主流程）
+  if (!written || options?.silent) return;
   try {
     onChangeCallback?.(key, value);
   } catch (e) {
@@ -248,14 +272,22 @@ export function storageSet(key: string, value: unknown): void {
   }
 }
 
-export function storageRemove(key: string): void {
+export function storageRemove(key: string, options?: StorageSetOptions): void {
   const fullKey = STORAGE_PREFIX + key;
+  let removed = false;
   try {
-    if (!hasLocalStorage) {
-      memoryStore.delete(fullKey);
-      return;
+    if (!hasLocalStorage()) {
+      removed = memoryStore.delete(fullKey);
+    } else if (localStorage.getItem(fullKey) != null) {
+      localStorage.removeItem(fullKey);
+      removed = true;
     }
-    localStorage.removeItem(fullKey);
+  } catch (e) {
+    /* ignore */
+  }
+  if (!removed || options?.silent) return;
+  try {
+    onChangeCallback?.(key, undefined);
   } catch (e) {
     /* ignore */
   }

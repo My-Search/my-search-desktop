@@ -209,6 +209,12 @@ fn save_index(app: &AppHandle, plugin_id: &str, index: &ClipIndex) -> Result<(),
     let text = serde_json::to_string(index).map_err(|e| format!("序列化剪贴板索引失败: {e}"))?;
     std::fs::write(&tmp, text).map_err(|e| format!("写入剪贴板索引失败: {e}"))?;
     std::fs::rename(&tmp, &path).map_err(|e| format!("替换剪贴板索引失败: {e}"))?;
+    // 索引属于「可同步数据」（备份归档里的 plugin-data/<id>/clipboard/）：
+    // 广播出去，常驻主窗口据此安排一轮云同步（5 秒节流合并连续复制）。
+    let _ = app.emit(
+        plugin_host::EVENT_PLUGIN_DATA_CHANGED,
+        serde_json::json!({ "pluginId": plugin_id, "key": "clipboard/index", "removed": false }),
+    );
     Ok(())
 }
 

@@ -43,6 +43,114 @@ export async function syncClearCredentials(): Promise<SyncConfig> {
   return await invoke<SyncConfig>("sync_clear_credentials");
 }
 
+/** 同步的持久化状态（Rust 侧 `sync-state.json` 的只读镜像） */
+export interface SyncPersistedState {
+  deviceId: string;
+  target: string;
+  initialized: boolean;
+  remoteRev: string;
+  /**
+   * 上次见到的远端原始 ETag（含引号）。
+   * 上传时作为 `If-Match`，下载时作为 `If-None-Match`；无 ETag 时为空串。
+   */
+  remoteEtag: string;
+  /** 上次成功同步时本机快照摘要 */
+  lastLocalDigest: string;
+  lastSyncAt: number;
+  /** 最近一次已应用的远端版本 */
+  appliedRev: string;
+  /** 还原代次（每次应用还原后自增） */
+  epoch: number;
+}
+
+function fallbackState(): SyncPersistedState {
+  return {
+    deviceId: "",
+    target: "",
+    initialized: false,
+    remoteRev: "",
+    remoteEtag: "",
+    lastLocalDigest: "",
+    lastSyncAt: 0,
+    appliedRev: "",
+    epoch: 1,
+  };
+}
+
+/** 读同步持久化状态 */
+export async function syncStateGet(): Promise<SyncPersistedState> {
+  if (!isTauri) return fallbackState();
+  return await invoke<SyncPersistedState>("sync_state_get");
+}
+
+/** 局部更新同步持久化状态（只允许白名单字段） */
+export async function syncStatePatch(
+  patch: Partial<
+    Pick<
+      SyncPersistedState,
+      "initialized" | "remoteRev" | "remoteEtag" | "lastLocalDigest" | "lastSyncAt" | "appliedRev"
+    >
+  >
+): Promise<SyncPersistedState> {
+  if (!isTauri) return fallbackState();
+  return await invoke<SyncPersistedState>("sync_state_patch", { patch });
+}
+
+/** 重置远端同步基线（保留设备 id） */
+export async function syncStateReset(): Promise<SyncPersistedState> {
+  if (!isTauri) return fallbackState();
+  return await invoke<SyncPersistedState>("sync_state_reset");
+}
+
+/**
+ * 本机「可同步落盘数据」的指纹（插件安装文件 / 插件私有数据 / 内部状态）。
+ *
+ * 与 localStorage + Rust 设置的摘要一起参与「本机变没变」的判定：插件私有数据
+ * （剪贴板索引、待办、AI 会话…）与插件文件不在 localStorage 里，只靠前端摘要会
+ * 出现「插件数据变了却判定本机没变 → 跳过上传」。
+ */
+export async function syncDataDigest(): Promise<string> {
+  if (!isTauri) return "";
+  return await invoke<string>("sync_data_digest");
+}
+
+/**
+ * 请求常驻主窗口执行一轮同步（设置窗口不自己跑引擎）。
+ * 执行结果通过 `sync://status` 广播回来。
+ */
+export async function syncRequest(trigger = "manual"): Promise<void> {
+  if (!isTauri) return;
+  await invoke("sync_request", { trigger });
+}
+
+/** 用户对首次连接/冲突的选择：本机覆盖远端 / 远端覆盖本机 */
+export async function syncResolveChoice(choice: "local" | "remote"): Promise<void> {
+  if (!isTauri) return;
+  await invoke("sync_resolve_choice", { choice });
+}
+
+/**
+ * 一次还原影响到的资源范围（`sync://applied` 的 `scope`）。
+ *
+ * - `all`：插件文件/数据 + 用户配置都变了 → 插件必须重载
+ * - `plugins`：只有插件相关数据变了
+ * - `config`：只有用户配置/Rust 设置变了 → 不打断插件，只需重应用主题
+ */
+export type SyncAppliedScope = "all" | "plugins" | "config";
+
+/**
+ * 提交一次「还原已应用」：Rust 递增 epoch 并广播 `sync://applied`，
+ * 所有窗口据此按 `scope` 决定重载插件 / 重应用主题 / 刷新界面。
+ */
+export async function syncCommitApplied(
+  source = "import",
+  scope: SyncAppliedScope = "all"
+): Promise<number> {
+  if (!isTauri) return 0;
+  const r = await invoke<{ epoch: number }>("sync_commit_applied", { source, scope });
+  return r?.epoch ?? 0;
+}
+
 function fallbackConfig(): SyncConfig {
   return {
     enabled: false,
@@ -60,9 +168,22 @@ function fallbackConfig(): SyncConfig {
 
 export interface RemoteMeta {
   exists: boolean;
+  /** 稳定版本令牌（无 ETag 时是 `size-modified` 兜底） */
   rev: string;
+  /** 原始 ETag（含引号），用于条件请求 */
+  etag: string;
   modified: number;
   size: number;
+}
+
+export interface DownloadResult {
+  path: string;
+  size: number;
+  rev: string;
+  etag: string;
+  modified: number;
+  /** 远端版本与 `knownEtag` 一致（HTTP 304），没有落盘 */
+  notModified: boolean;
 }
 
 export async function syncRemoteMeta(): Promise<RemoteMeta> {
@@ -75,14 +196,29 @@ export async function syncTest(): Promise<{ ok: boolean; message: string }> {
   return await invoke<{ ok: boolean; message: string }>("sync_test");
 }
 
-export async function syncUpload(path: string): Promise<RemoteMeta> {
+/**
+ * 上传备份。
+ *
+ * `ifMatch` 三种语义：
+ * - `""`：只在远端不存在时创建（`If-None-Match: *`）
+ * - 非空：条件更新（`If-Match`），远端变了返回 412 → 抛 `SYNC_CONFLICT:`
+ * - `null` / 不传：无条件覆盖（只在用户明确选择「本机覆盖远端」时用）
+ */
+export async function syncUpload(
+  path: string,
+  ifMatch?: string | null
+): Promise<RemoteMeta> {
   if (!isTauri) throw new Error("仅在桌面端可用");
-  return await invoke<RemoteMeta>("sync_upload", { path });
+  return await invoke<RemoteMeta>("sync_upload", { path, ifMatch: ifMatch ?? null });
 }
 
-export async function syncDownload(): Promise<{ path: string; size: number }> {
+/**
+ * 下载远端备份到本机备份目录。
+ * `knownEtag` 非空时走条件请求，远端没变返回 `notModified: true`。
+ */
+export async function syncDownload(knownEtag?: string | null): Promise<DownloadResult> {
   if (!isTauri) throw new Error("仅在桌面端可用");
-  return await invoke<{ path: string; size: number }>("sync_download");
+  return await invoke<DownloadResult>("sync_download", { knownEtag: knownEtag ?? null });
 }
 
 // ===================== 导出 / 导入 / 还原 =====================
@@ -144,18 +280,22 @@ export interface RestoreReport {
   plugins: number;
   pluginData: number;
   settings: boolean;
+  /** Rust 按实际分类判定的广播作用域 */
+  scope: SyncAppliedScope;
   localStorage: Record<string, unknown>;
   manifest: Record<string, unknown>;
 }
 
 export async function backupRestore(
   path: string,
-  categories?: string[]
+  categories?: string[],
+  localStorage?: Record<string, unknown>
 ): Promise<RestoreReport> {
   if (!isTauri) throw new Error("仅在桌面端可用");
   return await invoke<RestoreReport>("backup_restore", {
     path,
     categories: categories ?? null,
+    localStorage: localStorage ?? null,
   });
 }
 

@@ -33,6 +33,7 @@ import {
   parsePluginManifest,
 } from "./manifest.ts";
 import { hasPermission, permissionBaseId, permissionCovers } from "./permissions.ts";
+import { storageRemove, storageSet } from "../util.ts";
 
 /** 注册表持久化键（与既有缓存键命名风格一致：大写下划线 + _CACHE_KEY） */
 export const PLUGIN_REGISTRY_KEY = "PLUGIN_REGISTRY_CACHE_KEY";
@@ -483,7 +484,8 @@ export function loadRegistry(): PluginRegistryFile {
 /** 写入注册表并广播同窗口变更事件 */
 export function saveRegistry(reg: PluginRegistryFile): void {
   try {
-    localStorage.setItem("my-search-desktop:" + PLUGIN_REGISTRY_KEY, JSON.stringify(reg));
+    // 走 storageSet：同时触发同步宿主的变更钩子（注册表也是要同步的数据）。
+    storageSet(PLUGIN_REGISTRY_KEY, reg);
     if (
       typeof window !== "undefined" &&
       typeof window.dispatchEvent === "function" &&
@@ -720,10 +722,8 @@ export function pluginDataGet<T>(pluginId: string, key: string, fallback: T): T 
 
 export function pluginDataSet(pluginId: string, key: string, value: unknown): void {
   try {
-    localStorage.setItem(
-      "my-search-desktop:" + PLUGIN_DATA_PREFIX + pluginId + ":" + key,
-      JSON.stringify(value)
-    );
+    // 与宿主其它数据走同一个写入口：插件数据变化同样要触发云同步。
+    storageSet(`${PLUGIN_DATA_PREFIX}${pluginId}:${key}`, value);
   } catch (e) {
     console.warn("插件数据写入失败:", e);
   }
@@ -731,7 +731,7 @@ export function pluginDataSet(pluginId: string, key: string, value: unknown): vo
 
 export function pluginDataRemove(pluginId: string, key: string): void {
   try {
-    localStorage.removeItem("my-search-desktop:" + PLUGIN_DATA_PREFIX + pluginId + ":" + key);
+    storageRemove(`${PLUGIN_DATA_PREFIX}${pluginId}:${key}`);
   } catch (e) {
     /* ignore */
   }
@@ -739,13 +739,16 @@ export function pluginDataRemove(pluginId: string, key: string): void {
 
 /** 清空某插件的全部私有数据（卸载时调用） */
 export function pluginDataClear(pluginId: string): number {
+  if (typeof localStorage === "undefined") return 0;
   const prefix = "my-search-desktop:" + PLUGIN_DATA_PREFIX + pluginId + ":";
   const keys: string[] = [];
   for (let i = 0; i < localStorage.length; i++) {
     const k = localStorage.key(i);
     if (k && k.startsWith(prefix)) keys.push(k);
   }
-  for (const k of keys) localStorage.removeItem(k);
+  for (const k of keys) {
+    storageRemove(k.slice("my-search-desktop:".length));
+  }
   return keys.length;
 }
 

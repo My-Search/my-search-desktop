@@ -408,6 +408,10 @@ export async function pluginStorageWrite(
   const content = JSON.stringify(value ?? null);
   if (!isTauri) {
     devKvStore.set(`${pluginId}:${k}`, content);
+    // 无 Tauri 环境（浏览器调试）也广播文件存储变更：宿主据此触发云同步
+    try {
+      window.dispatchEvent(new CustomEvent("plugin-data://changed-dev", { detail: { pluginId, key: k } }));
+    } catch { /* ignore */ }
     return;
   }
   await invoke("plugin_storage_write", { pluginId, key: k, content });
@@ -417,6 +421,9 @@ export async function pluginStorageDelete(pluginId: string, key: string): Promis
   const k = String(key ?? "").trim();
   if (!isTauri) {
     devKvStore.delete(`${pluginId}:${k}`);
+    try {
+      window.dispatchEvent(new CustomEvent("plugin-data://changed-dev", { detail: { pluginId, key: k } }));
+    } catch { /* ignore */ }
     return;
   }
   await invoke("plugin_storage_delete", { pluginId, key: k });

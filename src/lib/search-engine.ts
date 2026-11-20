@@ -186,10 +186,18 @@ export function scoreSelect(item: SearchItem | null | undefined): void {
   storageSet(WEIGHT_KEY, data);
 }
 
-/** 稳定排序：先按层内权重降序，保持同权重原顺序 */
-function sortByWeight(items: SearchItem[]): SearchItem[] {
-  // 一次读取权重表，避免每条数据都读一遍 localStorage
-  const data = storageGet<Record<string, number>>(WEIGHT_KEY, {}) || {};
+/** 读取权重表（一次同步读盘 + 反序列化；供一轮搜索内复用） */
+function readWeights(): Record<string, number> {
+  return storageGet<Record<string, number>>(WEIGHT_KEY, {}) || {};
+}
+
+/**
+ * 稳定排序：先按层内权重降序，保持同权重原顺序。
+ *
+ * `data` 由调用方传入：一轮搜索要对 level0/1/2 各排一次，以前每次都重新读盘 +
+ * `JSON.parse` 整张权重表（3 次/击键，且表随时间无上限增长），现在整轮只读一次。
+ */
+function sortByWeight(items: SearchItem[], data: Record<string, number>): SearchItem[] {
   return items
     .map((item, i) => {
       const key = itemIdentity(item);
@@ -333,6 +341,15 @@ interface LoadJob {
 export class SearchEngine {
   /** 全部数据项 */
   searchData: SearchItem[];
+  /**
+   * 上一次是否挂载过插件搜索项。
+   *
+   * 为什么需要：`_attachExtraItems` 在**每次窗口呼出**时都会被调用一次，而摘除
+   * 旧插件项的动作以前是「`some()` 全量扫描 + 有则 `filter()` 再来一遍」。
+   * 绝大多数用户没装带搜索项的插件，这两遍全量遍历纯属浪费；用标记跳过，
+   * 语义不变（没挂过就必然没有可摘的项）。
+   */
+  private _extraItemsAttached = false;
   /** 订阅列表 */
   subscribes: SubscribeItem[];
   /** 数据源中自定义的 fetchFun */
@@ -866,9 +883,11 @@ export class SearchEngine {
    */
   _attachExtraItems(): number {
     const provider = this.extraItemsProvider;
-    // 先摘除上一轮的插件项（重新合成后对象是新的，必须整体替换）
-    if (this.searchData.some((it) => pluginIdOf(it) != null)) {
+    // 先摘除上一轮的插件项（重新合成后对象是新的，必须整体替换）。
+    // 用标记避免「没挂过也要全量扫两遍」——每次窗口呼出都会走到这里。
+    if (this._extraItemsAttached) {
       this.searchData = this.searchData.filter((it) => pluginIdOf(it) == null);
+      this._extraItemsAttached = false;
     }
     if (!provider) return 0;
     let items: SearchItem[] = [];
@@ -885,6 +904,7 @@ export class SearchEngine {
       this._indexItem(item, tagsMap);
       this.searchData.push(item);
     }
+    this._extraItemsAttached = true;
     return items.length;
   }
 
@@ -898,9 +918,16 @@ export class SearchEngine {
   /**
    * 单轮精确搜索
    */
-  _searchUnit(beforeData: SearchItem[], keywordRaw: string): SearchResult[] {
+  _searchUnit(
+    beforeData: SearchItem[],
+    keywordRaw: string,
+    weightData?: Record<string, number>
+  ): SearchResult[] {
     let keyword = keywordRaw.trim().toUpperCase();
     if (keyword === "" || beforeData.length === 0) return [];
+
+    // 权重表整轮只读一次（多关键词递归时沿用同一份）
+    const weights = weightData ?? readWeights();
 
     // 多关键词：取最后一个关键词做本轮匹配，其余递归
     const searchUnits = keyword.split(/\s+/);
@@ -943,18 +970,18 @@ export class SearchEngine {
     }
 
     const ordered: SearchResult[] = [
-      ...sortByWeight(level0).map((item) => ({ item, level: LEVEL_TITLE })),
-      ...sortByWeight(level1).map((item) => ({ item, level: LEVEL_DESC })),
-      ...sortByWeight(level2).map((item) => ({ item, level: LEVEL_CONTENT })),
+      ...sortByWeight(level0, weights).map((item) => ({ item, level: LEVEL_TITLE })),
+      ...sortByWeight(level1, weights).map((item) => ({ item, level: LEVEL_DESC })),
+      ...sortByWeight(level2, weights).map((item) => ({ item, level: LEVEL_CONTENT })),
     ];
 
-    // 递归处理剩余关键词
+    // 递归处理剩余关键词（沿用同一份权重表，避免每层再读盘一次）
     if (
       searchUnits.length > 0 &&
       searchUnits[searchUnits.length - 1].trim() !== SEARCH_BOUNDARY.trim()
     ) {
       const nextData = ordered.map((r) => r.item);
-      return this._searchUnit(nextData, searchUnits.join(" "));
+      return this._searchUnit(nextData, searchUnits.join(" "), weights);
     }
     return ordered;
   }

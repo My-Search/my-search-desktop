@@ -59,9 +59,27 @@ export function gatewaySpecOf(rec: PluginRecord): GatewaySpecIpc {
   };
 }
 
-/** 同步单个插件的网关配置 */
+/**
+ * 已成功下发到 Rust 的网关配置指纹（插件 id → spec JSON）。
+ *
+ * 为什么需要：搜索窗口的 `ms.backend.call` 在每次调用前都会「确保 Rust 侧有记录」
+ * 地重放一次 `syncRecordGateway`（见 `usePluginHost.callBackend`）。而一次网关
+ * 同步在 Rust 侧要做三件重活：写 `plugin-gateway.json`、调和原生钩子
+ * （剪贴板/鼠标手势）、向所有窗口广播 `plugin://registry-changed`。后端每 1~2 秒
+ * 轮询一次的插件（如 pi-agent）会把这三件事变成常态开销。
+ *
+ * 内容没变就跳过 IPC —— 语义完全不变（Rust 侧持有的仍是同一份配置），
+ * 只有**成功**下发才记指纹，失败仍允许下次重试。
+ */
+const lastGatewaySpecJson = new Map<string, string>();
+
+/** 同步单个插件的网关配置（内容未变则跳过 IPC） */
 export async function syncRecordGateway(rec: PluginRecord): Promise<void> {
-  await syncGateway(gatewaySpecOf(rec));
+  const spec = gatewaySpecOf(rec);
+  const json = JSON.stringify(spec);
+  if (lastGatewaySpecJson.get(rec.id) === json) return;
+  await syncGateway(spec);
+  lastGatewaySpecJson.set(rec.id, json);
 }
 
 /**
@@ -69,12 +87,20 @@ export async function syncRecordGateway(rec: PluginRecord): Promise<void> {
  *
  * 消除旧实现「每个插件各发一次 `plugin_gateway_sync` 写盘」的 N 次放大，
  * 同时让 Rust 自动剔除已从注册表移除的残留网关条目。
+ *
+ * 批量下发后把每个插件的指纹写进缓存：随后同内容的单条 `syncRecordGateway`
+ * （如 `ms.backend.call` 前的兜底同步）就不必再发一次 IPC。
  */
 export async function syncRegistryGateway(reg: PluginRegistryFile): Promise<void> {
   const specs = reg.plugins
     .filter((p) => p.source.kind !== "legacy")
     .map((p) => gatewaySpecOf(p));
   await syncGatewayBatch(specs);
+  // 批量成功后再重建指纹表：已移除插件的旧条目一并丢弃
+  lastGatewaySpecJson.clear();
+  for (const spec of specs) {
+    lastGatewaySpecJson.set(spec.pluginId, JSON.stringify(spec));
+  }
 }
 
 /**

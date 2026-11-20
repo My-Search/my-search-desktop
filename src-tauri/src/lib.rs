@@ -51,6 +51,8 @@ mod plugin_watch;
 mod pin_image;
 mod proxy_rules;
 mod screenshot;
+mod sync_service;
+mod sync_state;
 mod system_proxy;
 
 /// 存储已下载的安装文件路径，供 open_installer 使用
@@ -3301,6 +3303,8 @@ fn get_autostart_enabled(app: tauri::AppHandle) -> Result<bool, String> {
 fn set_autostart_enabled_cmd(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
     set_autostart_enabled(&app, enabled)?;
     write_autostart_pref(&app, enabled);
+    // 自启动属「可备份设置」：通知常驻主窗口安排一轮同步
+    crate::sync_service::notify_data_changed(&app);
     Ok(())
 }
 
@@ -3316,6 +3320,8 @@ fn get_alt_click_enabled() -> bool {
 fn set_alt_click_enabled_cmd(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
     alt_click::set_enabled(enabled);
     write_alt_click_pref(&app, enabled);
+    // Alt+点击属「可备份设置」：通知常驻主窗口安排一轮同步
+    crate::sync_service::notify_data_changed(&app);
     Ok(())
 }
 
@@ -3377,6 +3383,8 @@ fn set_proxy_settings(
     settings.schema_version = crate::proxy_rules::PROXY_SCHEMA_VERSION;
     crate::proxy_rules::write_settings(&app, &settings);
     crate::proxy_rules::refresh(&app);
+    // 代理配置属「可备份设置」：通知常驻主窗口安排一轮同步
+    crate::sync_service::notify_data_changed(&app);
     Ok(())
 }
 
@@ -3490,6 +3498,8 @@ fn set_shortcut_bindings(
         }
         return Err(e);
     }
+    // 快捷键属「可备份设置」：通知常驻主窗口安排一轮同步
+    crate::sync_service::notify_data_changed(&app);
     Ok(())
 }
 
@@ -3720,7 +3730,7 @@ const BACKUP_SETTINGS_KEYS: &[&str] = &[
 ];
 
 /// 读取可备份的设置项（返回一个 JSON 对象）
-fn read_backup_settings(app: &tauri::AppHandle) -> serde_json::Value {
+pub(crate) fn read_backup_settings(app: &tauri::AppHandle) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     if let Some(store) = settings_store(app) {
         for key in BACKUP_SETTINGS_KEYS {
@@ -3779,13 +3789,9 @@ pub(crate) fn write_backup_settings(
     if values.contains_key(crate::proxy_rules::SETTINGS_KEY_PROXY) {
         crate::proxy_rules::refresh(app);
     }
+    // 设置项属于「可同步数据」：通知常驻主窗口安排一轮同步
+    crate::sync_service::notify_data_changed(app);
     Ok(())
-}
-
-/// 停掉某个插件的后台进程（还原插件目录前释放文件占用）。
-/// 还原会整体替换 `plugins/`，运行中的插件可执行文件在 Windows 上是锁死的。
-pub(crate) fn plugin_host_stop_backend(app: &tauri::AppHandle, plugin_id: &str) {
-    let _ = plugin_host::plugin_backend_stop(app.clone(), plugin_id.to_string());
 }
 
 /// 导出备份：把「前端快照 + Rust 侧设置 + 插件文件」打成 .msbackup 写进备份目录。
@@ -3879,33 +3885,118 @@ fn backup_export_as(
 ) -> Result<serde_json::Value, String> {
     let settings = read_backup_settings(&app);
     let version = app.package_info().version.to_string();
-    let bytes = backup::build_archive(&app, local_storage, settings, &version)?;
-    let size = bytes.len() as u64;
-    std::fs::write(&path, &bytes).map_err(|e| format!("写入失败: {e}"))?;
+    // 流式写盘：归档可能含录屏等大文件，不能再「整块读进内存 → 再写一次」
+    let size = backup::write_archive_to_path(
+        &app,
+        std::path::Path::new(&path),
+        local_storage,
+        settings,
+        &version,
+    )?;
     Ok(serde_json::json!({ "path": path, "size": size }))
+}
+
+/// 还原中止时把先前在跑的后台进程拉回来。
+///
+/// 「停后台 → 替换插件目录 → 广播」是一条链；中间任一步失败时插件文件仍是旧的，
+/// 用户理应还能继续用原来的后台进程。只重启「还原前确实在跑」的（不额外拉起
+/// on-demand 插件）。
+async fn restart_plugin_backends(app: &tauri::AppHandle, ids: &[String]) {
+    for id in ids {
+        if let Err(e) = plugin_host::plugin_backend_start(app.clone(), id.clone()).await {
+            eprintln!("还原中止后恢复插件后台进程失败（{id}）: {e}");
+        }
+    }
 }
 
 /// 还原备份。
 ///
-/// `categories`：要还原的分区（localStorage / settings / plugins / pluginData），
-/// 空数组 = 全部。Rust 负责 settings 与插件部分，localStorage 交回前端写。
-/// 返回里带上「还原前留底路径」，前端据此给用户一条后悔药。
+/// `categories`：还原范围（`all` / `plugins` / `config`；旧的
+/// `localStorage / settings / plugins / pluginData / internal` 仍兼容），
+/// 空数组 = 全量。Rust 负责设置、插件目录与插件数据，localStorage 按范围
+/// 过滤后交回前端写。
+///
+/// 还原涉及插件目录时会先**逐个等待后台进程退出**（Windows 上运行中的 exe
+/// 锁文件），再停掉开发目录监听，最后在线程池里做目录事务交换——全部成功
+/// 才返回；任何一步失败都保持还原前状态（包括恢复被停掉的后台进程）。
 #[tauri::command]
-fn backup_restore(
+async fn backup_restore(
     app: tauri::AppHandle,
     path: String,
     categories: Option<Vec<String>>,
+    local_storage: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
-    let bytes = backup::read_backup_file(&app, &path)?;
-    let version = app.package_info().version.to_string();
     let only = categories.unwrap_or_default();
-    let (report, local_storage, manifest) = backup::restore_archive(&app, &bytes, &only, &version)?;
+    // 还原前在跑的后台进程：失败路径据此恢复，避免「还原失败 + 插件后台也没了」
+    let mut restart_on_failure: Vec<String> = Vec::new();
+
+    if backup::scope_needs_plugin_stop(&only) {
+        restart_on_failure = plugin_host::plugin_backend_list()
+            .into_iter()
+            .filter(|s| s.status != "stopped")
+            .map(|s| s.plugin_id)
+            .collect();
+        let ids = backup::installed_plugin_ids(&app);
+        let mut failed: Vec<String> = Vec::new();
+        for id in ids {
+            if let Err(e) = plugin_host::plugin_backend_stop(app.clone(), id.clone()).await {
+                failed.push(format!("{id}: {e}"));
+            }
+        }
+        // 开发目录监听会继续把源目录的文件写回插件目录，必须停掉；
+        // 前端在 `sync://applied` 后会重新登记。
+        plugin_watch::unwatch_all();
+        if !failed.is_empty() {
+            restart_plugin_backends(&app, &restart_on_failure).await;
+            return Err(format!(
+                "停用插件后台进程失败，已中止还原（请先在「插件」面板手动停用后再试）：{}",
+                failed.join("；")
+            ));
+        }
+    }
+
+    let app2 = app.clone();
+    let version = app.package_info().version.to_string();
+    let current = local_storage.unwrap_or_else(|| serde_json::json!({}));
+    let joined = tauri::async_runtime::spawn_blocking(move || {
+        let bytes = backup::read_backup_file(&app2, &path)?;
+        backup::restore_archive(&app2, &bytes, &only, &version, current)
+    })
+    .await;
+    let restored = match joined {
+        Ok(inner) => inner,
+        Err(e) => Err(format!("还原任务执行失败: {e}")),
+    };
+    let (report, local_storage, manifest) = match restored {
+        Ok(v) => v,
+        Err(e) => {
+            restart_plugin_backends(&app, &restart_on_failure).await;
+            return Err(e);
+        }
+    };
     let mut value = serde_json::to_value(&report).map_err(|e| e.to_string())?;
     if let Some(obj) = value.as_object_mut() {
         obj.insert("localStorage".into(), local_storage);
         obj.insert("manifest".into(), manifest);
     }
+    // 插件文件已被替换：通知所有窗口重新读注册表。真正的重载由前端在
+    // localStorage 写回后调用 `sync_commit_applied` 统一触发。
+    if report.plugins > 0 {
+        let _ = app.emit(
+            plugin_host::EVENT_REGISTRY_CHANGED,
+            serde_json::json!({ "batch": true, "reason": "restore" }),
+        );
+    }
     Ok(value)
+}
+
+/// 本机「可同步数据」的指纹：插件安装文件 + 插件私有数据 + 内部状态。
+///
+/// 云同步用它判断「本机到底变没变」。前端摘要覆盖 localStorage 与 Rust 设置，
+/// 本命令补上**落盘文件**这一块（插件数据不在 localStorage 里）。
+#[tauri::command]
+fn sync_data_digest(app: tauri::AppHandle) -> Result<String, String> {
+    backup::data_digest(&app)
 }
 
 // ===================== 托盘 =====================
@@ -4212,8 +4303,20 @@ pub fn run() {
             cloud::sync_upload,
             cloud::sync_download,
             cloud::sync_clear_credentials,
+            // ---------- 同步持久化状态 / 跨窗口协调 ----------
+            sync_state::sync_state_get,
+            sync_state::sync_state_patch,
+            sync_state::sync_state_reset,
+            sync_service::sync_request,
+            sync_service::sync_resolve_choice,
+            sync_service::sync_commit_applied,
+            // 本机可同步数据（插件文件/插件数据/内部状态）的指纹：同步决策据此判断「本机变没变」
+            sync_data_digest,
         ])
         .setup(|app| {
+            // 上次还原可能因断电/崩溃停在「旧目录已改名、新目录未落地」：
+            // 在任何插件读取之前先回滚/清理，避免用户看到一半插件。
+            backup::recover_restore(app.handle());
             // 冷启动：先把落盘/系统兜底的主题状态记入内存，使后续前端上报时的幂等
             // 校验（偏好 + 解析值均未变即跳过）能正确命中——否则首次上报时 APP_THEME
             // 全为 None，即使主题没变也会走完 apply_theme_to_windows + emit，
@@ -4285,6 +4388,10 @@ pub fn run() {
             // 再启动定时更新线程（间隔到期时自动拉取规则库）。两者都不阻塞启动。
             proxy_rules::refresh(app.handle());
             proxy_rules::start_auto_refresh(app.handle().clone());
+            // 同步心跳：每 60 秒广播一次 `sync://tick`，由常驻主窗口的 SyncHost
+            // 决定是否真的执行（按用户的 intervalMinutes 兜底）。系统睡眠唤醒后
+            // 前端定时器不推进，Rust 心跳是唯一可靠的拍点。
+            sync_service::start_tick(app.handle().clone());
             // 本次启动是否由「双击插件包」触发：把路径放进待处理槽，并延迟打开配置窗口。
             //
             // 为什么要延迟：setup 阶段 WebView 还没加载完，前端监听尚未注册，

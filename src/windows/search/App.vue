@@ -39,6 +39,8 @@ import { decideViewReload } from "../../lib/plugins/dev-reload";
 import { takePluginFrontendRestartMarks } from "../../lib/plugins/restart";
 import { bindPluginHostRuntime, dispatchShortcutAction } from "../../lib/plugins/host";
 import type { PluginInstallConfirmRequest } from "../../lib/plugins/host";
+import { getTheme, resolveTheme } from "../../lib/theme";
+import type { SyncAppliedScope } from "../../lib/sync/bridge";
 import { useMessageDialog } from "../../composables/useMessageDialog";
 import { useToast } from "../../composables/useToast";
 import { useEnvPicker } from "../../composables/useEnvPicker";
@@ -79,6 +81,7 @@ import {
   onWindowFocusChanged,
   isWindowVisible,
   isTauri,
+  applyAppTheme,
 } from "../../lib/tauri-bridge";
 import { SEARCH_BOUNDARY, SPECIAL_KEYWORD, scoreSelect, historySelect } from "../../lib/search-engine";
 import { normalizeQuickFilterHeader, pluginDefinedActionName } from "../../lib/shortcut-bindings";
@@ -93,7 +96,7 @@ import {
   RECENT_ATTACH_KEY,
   type AttachedEntry,
 } from "../../lib/plugins/attachments";
-import { attachmentsSync, describePaths, readLocalFileBase64 } from "../../lib/plugins/ipc";
+import { attachmentsSync, describePaths, readLocalFileBase64, startPluginBackend } from "../../lib/plugins/ipc";
 import { preparePackageFromBase64, InstallPrepError } from "../../lib/plugins/install.ts";
 import {
   isKnownPermission,
@@ -679,6 +682,92 @@ async function remountPluginView(pluginId: string, notice: string | null): Promi
   }
 }
 
+/**
+ * 一次「还原已应用」（云下载完成 / 本地导入完成）后的插件协调器。
+ *
+ * 还原会替换 `plugins/`、覆盖 `plugin-data/`、写回注册表 localStorage：
+ *   1. 所有已打开/保活的前端会话跑的都是**旧代码**，必须无条件释放；
+ *   2. 注册表、网关、开发目录监听、快捷键动作按新数据重建；
+ *   3. 后台进程在还原前被统一停掉，这里按「开机自启」策略恢复；
+ *   4. 如果用户当时正看着某个插件，重挂新会话（否则等下次打开自然加载）。
+ *
+ * `scope` 决定要做多少：只还原了用户配置（`config`）时插件文件与注册表都没动，
+ * 这里只重应用主题，不释放视图、不重载插件、不重启后台——否则用户只是导入了
+ * 一份订阅配置，正在用的插件也会被打断。
+ *
+ * epoch 只用于丢弃更早的事件：两次还原连续到达时，只让最新一次生效。
+ * 注意：这里**不**调用 `syncCommitApplied`——事件本身就是它发出来的；
+ * 本地导入由设置窗口在写回后调用。
+ */
+let syncAppliedEpoch = 0;
+let unlistenSyncApplied: (() => void) | null = null;
+
+async function onSyncApplied(payload?: {
+  epoch?: number;
+  source?: string;
+  scope?: SyncAppliedScope;
+}): Promise<void> {
+  const epoch = Number(payload?.epoch ?? 0);
+  if (epoch && epoch < syncAppliedEpoch) return;
+  if (epoch) syncAppliedEpoch = epoch;
+
+  const scope = payload?.scope ?? "all";
+
+  // 配置/全量还原可能换了主题（localStorage 已写回）：让 Rust 原生层与
+  // 所有窗口（含独立插件窗）立即跟上。只还原插件时不必触碰主题。
+  if (scope !== "plugins") {
+    const theme = getTheme();
+    void applyAppTheme(theme, resolveTheme(theme));
+  }
+
+  // 订阅/关注标签属于用户配置：还原后要重新读一遍并重载数据
+  // （搜索结果缓存本来就不进备份，重建时必须重新拉取）。
+  if (scope !== "plugins") {
+    search.reloadIfSubscribesChanged(true);
+  }
+
+  // 只有用户配置变化：插件代码与数据都没动，到此为止。
+  if (scope === "config") return;
+
+  const activeId = pluginViewHost.activePluginId.value;
+  const detailOpen = detailVisible.value && state.mode === MODE.SHOW_ITEM_DETAIL;
+  const ids = new Set<string>(pluginViewHost.keepAliveIds());
+  if (activeId) ids.add(activeId);
+  for (const id of ids) {
+    pluginViewHost.release(id, "数据同步：插件文件/数据已更新", { stopBackend: false });
+  }
+
+  try {
+    await pluginHost.reload(true);
+  } catch (e) {
+    warn("[同步] 还原后重载插件注册表失败:", e);
+  }
+
+  // 还原前 Rust 侧已停掉所有后台进程；按用户策略恢复常驻进程。
+  // on-demand 插件不自动拉起：它可能只是上次手动开的，静默重启是副作用。
+  for (const rec of pluginHost.activePlugins()) {
+    if (!rec.manifest.backend || rec.autoStart !== "always") continue;
+    try {
+      await startPluginBackend(rec.id);
+    } catch (e) {
+      console.warn(`[同步] 还原后重启插件后台失败（${rec.id}）:`, e);
+    }
+  }
+
+  search.attachPluginItems();
+
+  if (activeId && detailOpen) {
+    const item = pluginHost.itemForPlugin(activeId);
+    if (!item) return;
+    try {
+      await pluginViewHost.open(item);
+      detailRef.value?.onScriptMounted();
+    } catch (e) {
+      warn(`[同步] 还原后重挂插件视图失败（${activeId}）:`, e);
+    }
+  }
+}
+
 /** 插件详情视图宿主（渲染 detailView.entry + 入口脚本） */
 const pluginViewHost = usePluginViewHost({
   getRecord: (id) => pluginHost.get(id),
@@ -721,19 +810,10 @@ const pluginAutoUpdater = createPluginAutoUpdater({
 
 // ============== 数据同步（插件 ms.sync.*） ==============
 /**
- * 有「已启用且已授予 sync」的插件时才建同步引擎。
- *
- * 计数由插件宿主维护（它在注册表每次变化后重算），是一个响应式 ref——
- * 插件被装上、被启用、被授权、被撤销都会让它变化，引擎随之启停。
- * 没有插件申请该权限时**完全不建引擎**：不给用户平白多一个后台定时器。
+ * 同步宿主是用户级功能（设置里开关），与是否有插件申请 `sync` 权限无关；
+ * 插件只是额外的触发入口。真正的启动放在 onMounted 里、还原监听就绪之后：
+ * 启动首轮若下载完成得太快，`sync://applied` 早于监听注册会丢失插件重载。
  */
-watch(
-  () => pluginHost.syncConsumerCount.value,
-  (n) => {
-    void syncBridge.ensure(n > 0);
-  },
-  { immediate: true }
-);
 
 onBeforeUnmount(() => syncBridge.dispose());
 
@@ -2182,6 +2262,29 @@ onMounted(async () => {
 
   await Promise.all([pluginChain, subscribeChain]);
 
+  // 数据同步还原完成 → 重载插件视图/后台进程/独立窗口。
+  // 必须在插件链之后注册：协调器依赖 `pluginHost` 已加载。
+  if (isTauri) {
+    try {
+      const { listen } = await import("@tauri-apps/api/event");
+      unlistenSyncApplied = await listen<{
+        epoch?: number;
+        source?: string;
+        scope?: SyncAppliedScope;
+      }>(
+        "sync://applied",
+        (e) => {
+          void onSyncApplied(e.payload);
+        }
+      );
+    } catch (e) {
+      warn("[同步] 注册还原广播监听失败:", e);
+    }
+  }
+
+  // 监听就绪后再启动同步宿主：首轮下载若很快完成，插件重载不会落空。
+  void syncBridge.start();
+
   try {
     await search.loadAllData();
   } catch (e) {
@@ -2413,6 +2516,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("focus", onWindowFocus);
   document.removeEventListener("visibilitychange", onVisibilityChange);
   unlistenShown?.();
+  unlistenSyncApplied?.();
   unlistenPluginShortcut?.();
   unlistenQuickFilter?.();
   unlistenQuickOpen?.();

@@ -173,8 +173,34 @@ async function boot(): Promise<void> {
     }
   });
 
+  // 云同步/导入还原完成：插件文件、插件数据、注册表都可能已变。
+  // 独立窗口没有「热替换」通道，直接整页重载最可靠（脚本与样式全部按新文件重跑）；
+  // 插件被禁用/卸载则关闭窗口。只还原了用户配置（scope=config）时插件本身没变，
+  // 保持窗口不动，避免无谓闪烁。
+  let stopSyncApplied: (() => void) | null = null;
+  if (isTauri) {
+    void (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        stopSyncApplied = await listen<{ scope?: string }>("sync://applied", (e) => {
+          if (e.payload?.scope === "config") return;
+          registry = loadRegistry();
+          const latest = findPlugin(registry, pluginId);
+          if (!latest || !latest.enabled) {
+            void closeSelf();
+            return;
+          }
+          window.location.reload();
+        });
+      } catch {
+        /* 事件总线不可用：保持旧行为 */
+      }
+    })();
+  }
+
   window.addEventListener("pagehide", () => {
     stopRegWatch();
+    stopSyncApplied?.();
     const cleanup = (root as unknown as { __msPluginCleanup?: () => void }).__msPluginCleanup;
     if (typeof cleanup === "function") {
       try {

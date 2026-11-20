@@ -114,10 +114,13 @@ const check = (name, cond, extra = "") => {
 
 await S("Page.addScriptToEvaluateOnNewDocument", {
   source: `
-    // STUB_TIME 固定为页面加载时刻：首轮（modified > 0）走下载，
-    // 之后（modified 不比 lastSyncAt 新）走上传，两条路径都不再变向。
     const STUB_TIME = Date.now();
-    const STUB_META = { exists: true, rev: 'stub-rev', modified: STUB_TIME, size: 1572864 }; // 1.5 MB
+    const STUB_META = { exists: true, rev: 'stub-rev', etag: '"stub-rev"', modified: STUB_TIME, size: 1572864 }; // 1.5 MB
+    const STUB_STATE = {
+      deviceId: 'stub-device', target: 'stub-target', initialized: true,
+      remoteRev: 'stub-rev', remoteEtag: '"stub-rev"',
+      lastLocalDigest: 'd-stub', lastSyncAt: STUB_TIME, appliedRev: 'stub-rev', epoch: 1,
+    };
     window.__TAURI_INTERNALS__ = {
       invoke(cmd, args) {
         if (cmd === 'sync_get_config') return Promise.resolve({
@@ -131,14 +134,22 @@ await S("Page.addScriptToEvaluateOnNewDocument", {
           autoOnChange: true, intervalMinutes: 30, hasPassword: false,
         });
         if (cmd === 'sync_remote_meta') return Promise.resolve(STUB_META);
-        // 引擎在测试环境里会真的跑同步轮次，把上传/下载/还原全应答，
-        // 否则 UI 状态行会出现 stub 造出的假错误。
-        if (cmd === 'sync_download') return Promise.resolve({ path: 'stub-download.msbackup', size: 1572864 });
+        // 面板已是纯 UI：只发请求、读持久化状态；执行同步的是常驻主窗口。
+        if (cmd === 'sync_state_get') return Promise.resolve(STUB_STATE);
+        if (cmd === 'sync_state_patch') return Promise.resolve({ ...STUB_STATE, ...(args?.patch || {}) });
+        if (cmd === 'sync_state_reset') return Promise.resolve({ ...STUB_STATE, initialized: false });
+        if (cmd === 'sync_request') return Promise.resolve({ accepted: true, trigger: args?.trigger ?? 'manual' });
+        if (cmd === 'sync_resolve_choice') return Promise.resolve({ choice: args?.choice });
+        if (cmd === 'sync_commit_applied') return Promise.resolve({ epoch: 1, source: args?.source ?? 'import', scope: args?.scope ?? 'all' });
+        if (cmd === 'sync_download') return Promise.resolve({
+          path: 'stub-download.msbackup', size: 1572864, rev: 'stub-rev',
+          etag: '"stub-rev"', modified: STUB_TIME, notModified: false,
+        });
         if (cmd === 'sync_upload') return Promise.resolve(STUB_META);
         if (cmd === 'backup_snapshot') return Promise.resolve('stub-snapshot.msbackup');
         if (cmd === 'backup_restore') return Promise.resolve({
           snapshotPath: 'stub-download.msbackup', localStorageKeys: 0, plugins: 0,
-          pluginData: 0, settings: false, localStorage: {}, manifest: {},
+          pluginData: 0, settings: false, scope: 'all', localStorage: {}, manifest: {},
         });
         if (cmd === 'get_shortcut_bindings') return Promise.resolve([{ shortcut: 'ctrl+alt+s', action: 'toggle-window', target: null }]);
         if (cmd === 'get_default_subscribe_text') return Promise.resolve('');

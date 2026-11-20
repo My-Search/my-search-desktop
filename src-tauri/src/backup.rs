@@ -25,8 +25,9 @@
 //! ```
 
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -100,6 +101,17 @@ fn file_stamp() -> String {
         (rem % 3600) / 60,
         rem % 60
     )
+}
+
+/// 还原事务用的唯一时间戳（`file_stamp` 只精确到秒）。
+///
+/// 同一秒内连续两次还原会复用 staging / old / 留底目录名：上一次的残留
+/// 可能混进下一次交换。加一个进程内自增序号即可，且不影响用户看到的文件名
+/// （普通导出仍用 `file_stamp`）。
+static RESTORE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+fn restore_stamp() -> String {
+    format!("{}-{}", file_stamp(), RESTORE_SEQ.fetch_add(1, Ordering::Relaxed))
 }
 
 // ===================== 通用路径 / 文件工具 =====================
@@ -214,14 +226,6 @@ fn collect_files(root: &Path, rel_prefix: &str, out: &mut Vec<(String, PathBuf)>
     Ok(())
 }
 
-/// 清空目录（不存在则创建），用于还原时先移除旧内容
-fn reset_dir(dir: &Path) -> Result<(), String> {
-    if dir.exists() {
-        std::fs::remove_dir_all(dir).map_err(|e| err(format!("清理旧目录失败: {e}")))?;
-    }
-    std::fs::create_dir_all(dir).map_err(|e| err(format!("创建目录失败: {e}")))
-}
-
 /// 淘汰备份目录里的旧文件，只保留最近 `keep` 份（按修改时间）
 fn prune_backups(dir: &Path, keep: usize) {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -296,10 +300,15 @@ fn collect_internal_files(app: &AppHandle, out: &mut Vec<(String, PathBuf)>) -> 
     Ok(())
 }
 
-/// 导出归档的字节流。
+/// 导出归档的字节流（**内存版**）。
 ///
 /// `settings` 是前端从 Rust 侧「可备份的设置键」里读出来的（前端才是这些键的
 /// 使用方，Rust 只负责落盘），`local_storage` 是前端整个 localStorage 快照。
+///
+/// 注意：所有**写盘/上传**路径都已改用 `write_archive_to_path`（流式，内存占用与
+/// 归档大小无关）。本函数保留为「需要拿到完整字节」的通用实现（例如未来的
+/// 内存内校验/测试场景）。
+#[allow(dead_code)]
 pub fn build_archive(
     app: &AppHandle,
     local_storage: Value,
@@ -411,6 +420,166 @@ pub fn build_archive_from_parts(
         .finish()
         .map_err(|e| err(format!("归档收尾失败: {e}")))?;
     Ok(cursor.into_inner())
+}
+
+/// 流式打包：把归档**直接写进 sink**（文件），逐条目 `io::copy` 流式拷贝，
+/// 任何单个插件文件都不会被整块读进内存。
+///
+/// 为什么需要：`build_archive` 会把 `plugins/` + `plugin-data/` 下每个文件都读成
+/// `Vec<u8>`，再在内存里 zip 一遍。对「录屏」这类把 mp4 写进
+/// `plugin-data/recordings/` 的用户，一次云同步上传会让 RSS 峰值达到归档大小的
+/// 2~3 倍——几个 GB 就会 OOM。写盘路径不需要内存副本，改为流式后内存占用只与
+/// `io::copy` 的分块缓冲有关。
+///
+/// 归档内容（清单字段、条目顺序、超大条目跳过规则）与 `build_archive` 完全一致；
+/// 读不出来的文件仍按错误返回（与旧行为一致）。
+fn write_archive_stream<W: Write + Seek>(
+    sink: W,
+    local_storage: &Value,
+    settings: &Value,
+    files: &[(String, PathBuf)],
+    app_version: &str,
+) -> Result<W, String> {
+    let mut writer = zip::ZipWriter::new(sink);
+    let options: zip::write::FileOptions<'_, ()> =
+        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+    let plugin_count = files
+        .iter()
+        .filter(|(rel, _)| rel.starts_with(&format!("{PLUGINS_DIR}/")))
+        .count();
+    let plugin_data_count = files.len() - plugin_count;
+    let ls_count = local_storage
+        .as_object()
+        .map(|m| m.len())
+        .unwrap_or_default();
+
+    let manifest = json!({
+        "format": "my-search-backup",
+        "formatVersion": BACKUP_FORMAT_VERSION,
+        "app": "my-search-desktop",
+        "appVersion": app_version,
+        "exportedAt": now_ms() as u64,
+        "counts": {
+            "localStorageKeys": ls_count,
+            "pluginFiles": plugin_count,
+            "pluginDataFiles": plugin_data_count,
+        },
+        "platform": std::env::consts::OS,
+    });
+
+    // 1) 清单 / 2) localStorage / 3) Rust 侧设置（与内存版逐字节同样的 pretty JSON）
+    writer
+        .start_file(ENTRY_MANIFEST, options)
+        .map_err(|e| err(format!("写入归档失败: {e}")))?;
+    writer
+        .write_all(
+            serde_json::to_string_pretty(&manifest)
+                .map_err(|e| err(format!("序列化失败: {e}")))?
+                .as_bytes(),
+        )
+        .map_err(|e| err(format!("写入归档失败: {e}")))?;
+    writer
+        .start_file(ENTRY_LOCAL_STORAGE, options)
+        .map_err(|e| err(format!("写入归档失败: {e}")))?;
+    writer
+        .write_all(
+            serde_json::to_string_pretty(local_storage)
+                .map_err(|e| err(format!("序列化失败: {e}")))?
+                .as_bytes(),
+        )
+        .map_err(|e| err(format!("写入归档失败: {e}")))?;
+    writer
+        .start_file(ENTRY_SETTINGS, options)
+        .map_err(|e| err(format!("写入归档失败: {e}")))?;
+    writer
+        .write_all(
+            serde_json::to_string_pretty(settings)
+                .map_err(|e| err(format!("序列化失败: {e}")))?
+                .as_bytes(),
+        )
+        .map_err(|e| err(format!("写入归档失败: {e}")))?;
+
+    // 4) 插件文件与插件数据（流式拷贝，绝不整块读入）
+    for (rel, path) in files {
+        let meta = std::fs::metadata(path)
+            .map_err(|e| err(format!("读取失败 {}: {e}", path.display())))?;
+        if meta.len() > MAX_ENTRY_BYTES {
+            continue;
+        }
+        let mut src =
+            std::fs::File::open(path).map_err(|e| err(format!("读取失败 {}: {e}", path.display())))?;
+        writer
+            .start_file(rel.as_str(), options)
+            .map_err(|e| err(format!("写入归档失败 {rel}: {e}")))?;
+        std::io::copy(&mut src, &mut writer)
+            .map_err(|e| err(format!("写入归档失败 {rel}: {e}")))?;
+    }
+
+    writer
+        .finish()
+        .map_err(|e| err(format!("归档收尾失败: {e}")))
+}
+
+/// 计算「本机可同步数据」的指纹（插件安装文件 / 插件私有数据 / 内部状态）。
+///
+/// 云同步判断「本机到底变没变」时，**必须**把落盘数据也算进去：插件私有数据
+/// （剪贴板历史索引、待办、AI 会话…）与插件安装文件都进备份归档，但它们不在
+/// localStorage 里。只看 localStorage 摘要会出现「插件数据变了，但判定本机没变
+/// → 跳过上传」，这正是「本地要同步的数据变了却不触发同步」的根因之一。
+///
+/// 指纹只取 `(相对路径, 字节数, 修改时间)`，不读文件内容：
+/// - 目录里有 GB 级录屏也能秒级完成；
+/// - 可重建缓存（ffmpeg / exe 等）与备份规则**同一套排除**，避免
+///   「插件下载工具」被误判成「用户数据变化」而触发上传。
+pub fn data_digest(app: &AppHandle) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+
+    let mut files: Vec<(String, PathBuf)> = Vec::new();
+    collect_plugin_files(app, &mut files)?;
+    collect_internal_files(app, &mut files)?;
+    // 排序保证同一份目录内容得到同一个指纹（与遍历顺序无关）
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut hasher = Sha256::new();
+    for (rel, path) in &files {
+        let Ok(meta) = std::fs::metadata(path) else {
+            // 遍历与读取之间文件消失：跳过（下次会重新算），不让同步因此失败
+            continue;
+        };
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        hasher.update(rel.as_bytes());
+        hasher.update([0u8]);
+        hasher.update(meta.len().to_le_bytes());
+        hasher.update(mtime.to_le_bytes());
+    }
+
+    let digest = hasher.finalize();
+    Ok(digest.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// 把当前状态**流式**导出为归档文件，返回文件字节数。
+///
+/// 与 `build_archive` 产出的归档内容一致，但内存占用从「归档大小 × 2~3」
+/// 降到常数级（见 `write_archive_stream` 的说明）。
+pub fn write_archive_to_path(
+    app: &AppHandle,
+    path: &Path,
+    local_storage: Value,
+    settings: Value,
+    app_version: &str,
+) -> Result<u64, String> {
+    let mut files: Vec<(String, PathBuf)> = Vec::new();
+    collect_plugin_files(app, &mut files)?;
+    collect_internal_files(app, &mut files)?;
+    let file = std::fs::File::create(path).map_err(|e| err(format!("写入失败: {e}")))?;
+    let file = write_archive_stream(file, &local_storage, &settings, &files, app_version)?;
+    Ok(file.metadata().map(|m| m.len()).unwrap_or(0))
 }
 
 /// 解压归档到内存（条目名 → 字节）。
@@ -538,7 +707,7 @@ pub fn inspect_archive(bytes: &[u8]) -> Result<Value, String> {
 pub struct RestoreReport {
     /// 还原前自动留底的归档路径
     pub snapshot_path: Option<String>,
-    /// 实际写回的 localStorage 键数（由前端回填，Rust 只占位）
+    /// 实际写回的 localStorage 键数（Rust 按范围过滤后交给前端写回）
     pub local_storage_keys: usize,
     /// 写回的插件数
     pub plugins: usize,
@@ -548,21 +717,327 @@ pub struct RestoreReport {
     pub settings: bool,
     /// 是否写回了内部状态
     pub internal: bool,
+    /// 面向 `sync://applied` 广播的作用域：`all` / `plugins` / `config`
+    pub scope: String,
+}
+
+/// 还原范围（把面板的粗粒度选项翻译成各分区的布尔开关）。
+#[derive(Debug, Clone, Copy, Default)]
+struct RestoreScope {
+    /// localStorage 全量（仅 legacy 的 `localStorage` 选项）
+    local_all: bool,
+    /// localStorage 中的插件部分（注册表键 + `PLUGIN_DATA:*`）
+    local_plugins: bool,
+    /// localStorage 中的用户配置部分
+    local_config: bool,
+    settings: bool,
+    plugins: bool,
+    plugin_data: bool,
+    internal: bool,
+}
+
+impl RestoreScope {
+    fn all() -> Self {
+        Self {
+            local_all: true,
+            local_plugins: true,
+            local_config: true,
+            settings: true,
+            plugins: true,
+            plugin_data: true,
+            internal: true,
+        }
+    }
+
+    /// 还原会影响哪些运行时资源。
+    ///
+    /// - 插件文件 / 插件数据 / 注册表 / 内部状态 → 插件视图与后台必须重载；
+    /// - 用户配置 / Rust 设置 → 只需重应用主题等前端状态，不打断插件。
+    ///
+    /// 两者都有时返回 `all`。返回给前端用于决定 `sync://applied` 后的动作，
+    /// 避免「只导入了订阅配置却把所有插件重载一遍」这种无谓抖动。
+    fn broadcast_scope(&self) -> &'static str {
+        let touches_plugins = self.plugins
+            || self.plugin_data
+            || self.internal
+            || self.local_plugins
+            || self.local_all;
+        let touches_config = self.settings || self.local_config || self.local_all;
+        match (touches_plugins, touches_config) {
+            (true, true) => "all",
+            (true, false) => "plugins",
+            (false, true) => "config",
+            // 空范围（调用方传了无法识别的分类）：按全量处理，宁可多刷新一次
+            (false, false) => "all",
+        }
+    }
+}
+
+/// 解析还原范围。
+///
+/// 新语义（面向用户的两个选项）：
+/// - `all`：全量
+/// - `plugins`：插件安装文件 + 插件数据 + 插件注册表（localStorage 里的
+///   `PLUGIN_REGISTRY_CACHE_KEY` 与 `PLUGIN_DATA:*`）
+/// - `config`：用户配置（localStorage 用户键）+ Rust 侧设置
+///
+/// 旧调用方传的 `localStorage / settings / plugins / pluginData / internal`
+/// 仍然兼容，避免历史代码或用户脚本突然失效。
+fn parse_restore_scope(only: &[String]) -> RestoreScope {
+    let has = |part: &str| only.iter().any(|x| x.eq_ignore_ascii_case(part));
+    if only.is_empty() || has("all") {
+        return RestoreScope::all();
+    }
+    let mut scope = RestoreScope::default();
+    if has("plugins") {
+        scope.plugins = true;
+        scope.plugin_data = true;
+        scope.internal = true;
+        scope.local_plugins = true;
+    }
+    if has("pluginData") {
+        scope.plugin_data = true;
+        scope.local_plugins = true;
+    }
+    if has("internal") {
+        scope.internal = true;
+    }
+    if has("settings") {
+        scope.settings = true;
+    }
+    if has("config") {
+        scope.settings = true;
+        scope.local_config = true;
+    }
+    if has("localStorage") {
+        scope.local_all = true;
+    }
+    scope
+}
+
+/// 该还原范围是否会写插件目录（需要先停后台进程、解除文件占用）。
+pub fn scope_needs_plugin_stop(only: &[String]) -> bool {
+    let scope = parse_restore_scope(only);
+    scope.plugins || scope.plugin_data
+}
+
+/// 当前已安装的插件 id（还原前需要逐个停后台进程）。
+pub fn installed_plugin_ids(app: &AppHandle) -> Vec<String> {
+    data_dir(app)
+        .map(|root| installed_plugin_dirs(&root.join(PLUGINS_DIR)))
+        .unwrap_or_default()
+}
+
+/// 跨机还原时不能写回的键：凭据与可重建缓存。
+fn is_protected_local_key(key: &str) -> bool {
+    matches!(
+        key,
+        "USER_GITHUB_TOKEN_CACHE_KEY"
+            | "SYNC_CONFIG_CACHE_KEY"
+            | "SYNC_STATE_CACHE_KEY"
+            | "SEARCH_DATA_KEY"
+            | "OLD_SEARCH_DATAS_KEY"
+            | "SUBSCRIBE_FINGERPRINT_CACHE_KEY"
+            | "PLUGIN_RESTART_MARKS_CACHE_KEY"
+    )
+}
+
+/// 属于「插件」范畴的 localStorage 键（注册表 + 插件私有数据）。
+fn is_plugin_local_key(key: &str) -> bool {
+    key == "PLUGIN_REGISTRY_CACHE_KEY" || key.starts_with("PLUGIN_DATA:")
+}
+
+/// 按范围过滤归档里的 localStorage 快照。
+///
+/// 关键修复：旧实现无条件把整份 localStorage 返回给前端，导致「仅插件与设置」
+/// 也会把订阅/历史/标签等配置一起覆盖。现在过滤在 Rust 侧完成——前端只负责
+/// 写回，避免「前端忘了判断范围」这类重复实现。
+fn filter_local_storage(value: Value, scope: RestoreScope) -> Value {
+    let Some(map) = value.as_object() else {
+        return json!({});
+    };
+    let mut out = serde_json::Map::new();
+    for (key, value) in map {
+        if is_protected_local_key(key) {
+            continue;
+        }
+        let plugin_key = is_plugin_local_key(key);
+        let keep = scope.local_all
+            || (plugin_key && scope.local_plugins)
+            || (!plugin_key && scope.local_config);
+        if keep {
+            out.insert(key.clone(), value.clone());
+        }
+    }
+    Value::Object(out)
+}
+
+// ===================== 插件目录事务 =====================
+
+/// 还原日志：跨进程崩溃后据此回滚/清理
+const RESTORE_JOURNAL: &str = ".restore-journal.json";
+/// 还原中转目录前缀（与 `plugins/` 同卷，保证 rename 原子）
+const RESTORE_STAGING_PREFIX: &str = ".restore-staging-";
+/// 旧插件目录备份前缀（交换后异步删除；崩溃时由启动恢复清理）
+const RESTORE_OLD_PREFIX: &str = ".restore-old-";
+
+#[derive(Debug, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RestoreJournal {
+    target: String,
+    staging: String,
+    old: Option<String>,
+}
+
+fn journal_path(root: &Path) -> PathBuf {
+    root.join(RESTORE_JOURNAL)
+}
+
+fn write_journal(root: &Path, journal: &RestoreJournal) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(journal).map_err(|e| err(format!("写还原日志失败: {e}")))?;
+    std::fs::write(journal_path(root), text).map_err(|e| err(format!("写还原日志失败: {e}")))
+}
+
+/// 把归档里的插件文件写入同卷 staging 目录，然后「旧目录改名 → staging 改名」
+/// 完成交换。
+///
+/// 为什么不用 `reset_dir`：先删后写意味着中途失败就只剩一半插件；而且运行中的
+/// exe 会锁文件导致删除失败。交换式还原保证最终状态要么是旧目录、要么是新目录。
+fn restore_plugins(
+    entries: &BTreeMap<String, Vec<u8>>,
+    data_root: &Path,
+) -> Result<usize, String> {
+    // 归档里根本没有插件文件（早期备份 / 只备份配置）：不做目录交换。
+    // 否则一次「仅插件」还原会把本机现有插件全部清空。
+    let prefix = format!("{PLUGINS_DIR}/");
+    if !entries.keys().any(|name| name.starts_with(&prefix)) {
+        return Ok(0);
+    }
+    let stamp = restore_stamp();
+    let staging_root = data_root.join(format!("{RESTORE_STAGING_PREFIX}{stamp}"));
+    let staged_plugins = staging_root.join(PLUGINS_DIR);
+    std::fs::create_dir_all(&staged_plugins).map_err(|e| err(format!("创建还原暂存目录失败: {e}")))?;
+
+    let mut ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for (name, data) in entries {
+        let Some(rest) = name.strip_prefix(&format!("{PLUGINS_DIR}/")) else {
+            continue;
+        };
+        if rest.is_empty() || rest.starts_with(".staging/") {
+            continue;
+        }
+        // 开发挂载标记指向本机目录，跨机还原后只会指向不存在的路径
+        if rest.ends_with("/.dev-source") || rest == ".dev-source" {
+            continue;
+        }
+        if let Some(id) = rest.split('/').next() {
+            ids.insert(id.to_string());
+        }
+        // 写入失败时清掉本次 staging，别把半套插件留在应用数据目录里
+        if let Err(e) = write_relative(&staged_plugins, rest, data) {
+            let _ = std::fs::remove_dir_all(&staging_root);
+            return Err(e);
+        }
+    }
+
+    let target = data_root.join(PLUGINS_DIR);
+    let old = data_root.join(format!("{RESTORE_OLD_PREFIX}{stamp}"));
+    let journal = RestoreJournal {
+        target: target.to_string_lossy().to_string(),
+        staging: staging_root.to_string_lossy().to_string(),
+        old: if target.exists() { Some(old.to_string_lossy().to_string()) } else { None },
+    };
+    write_journal(data_root, &journal)?;
+
+    if target.exists() {
+        std::fs::rename(&target, &old).map_err(|e| {
+            let _ = std::fs::remove_dir_all(&staging_root);
+            let _ = std::fs::remove_file(journal_path(data_root));
+            err(format!(
+                "替换插件目录失败（可能有插件仍在运行，请先停用后再试）: {e}"
+            ))
+        })?;
+    }
+
+    if let Err(e) = std::fs::rename(&staged_plugins, &target) {
+        // 回滚：把旧目录改回去，保证用户至少还有还原前的插件
+        if old.exists() && !target.exists() {
+            let _ = std::fs::rename(&old, &target);
+        }
+        let _ = std::fs::remove_dir_all(&staging_root);
+        let _ = std::fs::remove_file(journal_path(data_root));
+        return Err(err(format!("写入新插件目录失败: {e}")));
+    }
+
+    let _ = std::fs::remove_dir_all(&staging_root);
+    // 旧目录删除失败（例如杀毒软件短暂占用）不是致命错误：日志留给下次启动清理
+    if old.exists() {
+        if std::fs::remove_dir_all(&old).is_ok() {
+            let _ = std::fs::remove_file(journal_path(data_root));
+        }
+    } else {
+        let _ = std::fs::remove_file(journal_path(data_root));
+    }
+    Ok(ids.len())
+}
+
+/// 应用启动时恢复未完成的还原事务（崩溃/断电留下的中转目录与旧目录）。
+pub fn recover_restore(app: &AppHandle) {
+    let Ok(root) = data_dir(app) else {
+        return;
+    };
+    let journal = journal_path(&root);
+    if let Ok(text) = std::fs::read_to_string(&journal) {
+        if let Ok(j) = serde_json::from_str::<RestoreJournal>(&text) {
+            let target = PathBuf::from(&j.target);
+            let staging = PathBuf::from(&j.staging);
+            let old = j.old.as_ref().map(PathBuf::from);
+            // 新目录没落地而旧目录还在 → 回滚
+            if !target.exists() {
+                if let Some(old) = old.as_ref().filter(|p| p.exists()) {
+                    let _ = std::fs::rename(old, &target);
+                }
+            }
+            let _ = std::fs::remove_dir_all(&staging);
+            // 只有新目录确认存在时才删旧目录（否则那是唯一的数据）
+            if target.exists() {
+                if let Some(old) = old.as_ref() {
+                    let _ = std::fs::remove_dir_all(old);
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&journal);
+    }
+
+    // 没有日志的遗留中转/旧目录：只清理本模块的固定前缀，绝不碰用户目录。
+    if let Ok(entries) = std::fs::read_dir(&root) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with(RESTORE_STAGING_PREFIX) {
+                let _ = std::fs::remove_dir_all(entry.path());
+            } else if name.starts_with(RESTORE_OLD_PREFIX) {
+                if root.join(PLUGINS_DIR).exists() {
+                    let _ = std::fs::remove_dir_all(entry.path());
+                }
+            }
+        }
+    }
 }
 
 /// 执行还原。
 ///
-/// `only`：为空表示全量还原；否则只还原列出的分区（`"localStorage"` /
-/// `"settings"` / `"plugins"` / `"pluginData"`），用于「只把订阅拿回来」这类操作。
+/// `only`：见 `parse_restore_scope`。`current_local_storage`：本机当前状态，
+/// 用于还原前留底（**必须包含前端数据**，否则留底只剩插件文件，用户想反悔
+/// 也拿不回配置）。
 ///
-/// 注意：**插件目录是按分区整体替换的**（先清空 `plugins/` 再写入），
-/// 因为备份里的插件清单就是那一刻的全部真相——半合并会出现
-/// 「注册表指向的目录不存在」的悬空记录。
+/// 插件目录走「staging + rename 交换」；`plugin-data/` 走**合并**并跳过可重建
+/// 缓存（ffmpeg / exe / dll 等），不再整目录 `reset_dir` 把缓存删掉。
 pub fn restore_archive(
     app: &AppHandle,
     bytes: &[u8],
     only: &[String],
     app_version: &str,
+    current_local_storage: Value,
 ) -> Result<(RestoreReport, Value, Value), String> {
     let entries = read_archive(bytes)?;
     let manifest = json_entry(&entries, ENTRY_MANIFEST);
@@ -579,93 +1054,68 @@ pub fn restore_archive(
         )));
     }
 
-    let wants = |part: &str| only.is_empty() || only.iter().any(|x| x == part);
+    let scope = parse_restore_scope(only);
+    let data_root = data_dir(app)?;
+    let mut report = RestoreReport {
+        scope: scope.broadcast_scope().to_string(),
+        ..RestoreReport::default()
+    };
 
     // 1) 还原前留底（失败不阻断还原，只提示）
-    let mut report = RestoreReport::default();
     if let Ok(dir) = backups_dir(app) {
-        let pre = dir.join(format!("{PRE_RESTORE_PREFIX}{}.msbackup", file_stamp()));
+        let pre = dir.join(format!("{PRE_RESTORE_PREFIX}{}.msbackup", restore_stamp()));
         if !pre.exists() {
-            // 用「当前状态」重新打包一份，而不是把原始归档复制一份：
-            // 用户点「还原」时，本机可能已经比归档新，留底要留的是**当前**状态。
-            let current = build_archive(
+            // 用「当前状态」重新打包一份，而不是复制原始归档：用户点还原时，
+            // 本机可能已经比归档新，留底要留的是**当前**状态。
+            // 走流式写盘：留底同样可能包含录屏等大文件，不能整块读进内存。
+            let current = write_archive_to_path(
                 app,
-                json!({}),
-                json!({}),
+                &pre,
+                current_local_storage,
+                crate::read_backup_settings(app),
                 app_version,
             );
             match current {
-                Ok(data) => {
-                    let _ = std::fs::write(&pre, data);
+                Ok(_) => {
                     report.snapshot_path = Some(pre.to_string_lossy().to_string());
                 }
-                Err(e) => eprintln!("还原前留底失败（继续还原）: {e}"),
+                Err(e) => {
+                    let _ = std::fs::remove_file(&pre);
+                    eprintln!("还原前留底失败（继续还原）: {e}");
+                }
             }
         }
     }
 
-    // 2) localStorage（交给前端写回，Rust 拿不到 WebView 的存储）
-    let local_storage = json_entry(&entries, ENTRY_LOCAL_STORAGE);
+    // 2) localStorage：Rust 按范围过滤，前端只写回
+    let local_storage = filter_local_storage(json_entry(&entries, ENTRY_LOCAL_STORAGE), scope);
+    report.local_storage_keys = local_storage.as_object().map(|m| m.len()).unwrap_or(0);
 
     // 3) Rust 侧设置（合并式：只覆盖备份里存在的键，其余保持本机现状）
-    let mut settings_written = false;
-    if wants("settings") {
+    if scope.settings {
         let settings = json_entry(&entries, ENTRY_SETTINGS);
         if let Some(map) = settings.as_object() {
             if !map.is_empty() {
                 crate::write_backup_settings(app, map)?;
-                settings_written = true;
+                report.settings = true;
             }
         }
     }
 
-    // 4) 插件安装文件与私有数据
-    let data_root = data_dir(app)?;
-    if wants("plugins") {
-        let root = data_root.join(PLUGINS_DIR);
-        // 先把当前插件目录整体挪走再重建：直接 reset 时若插件进程正占用文件
-        // （Windows 上运行中的 exe 会锁文件），删除会失败——此时明确报错，
-        // 让用户先在「插件」面板里停掉对应插件，而不是静默留下一堆旧文件。
-        if root.exists() {
-            for id in installed_plugin_dirs(&root) {
-                let _ = crate::plugin_host_stop_backend(app, &id);
-            }
-            reset_dir(&root).map_err(|e| {
-                err(format!(
-                    "清理旧插件目录失败（可能有插件正在运行，请先在「插件」面板停用后再试）: {e}"
-                ))
-            })?;
-        } else {
-            std::fs::create_dir_all(&root).map_err(|e| err(format!("创建插件目录失败: {e}")))?;
-        }
-        let mut count: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        for (name, data) in &entries {
-            let Some(rest) = name.strip_prefix(&format!("{PLUGINS_DIR}/")) else {
-                continue;
-            };
-            if rest.is_empty() || rest.starts_with(".staging/") {
-                continue;
-            }
-            // 开发挂载标记指向本机目录，跨机还原后只会指向不存在的路径
-            if rest.ends_with("/.dev-source") || rest == ".dev-source" {
-                continue;
-            }
-            if let Some(id) = rest.split('/').next() {
-                count.insert(id.to_string());
-            }
-            write_relative(&root, rest, data)?;
-        }
-        report.plugins = count.len();
+    // 4) 插件安装文件：整目录事务交换
+    if scope.plugins {
+        report.plugins = restore_plugins(&entries, &data_root)?;
     }
 
-    if wants("pluginData") {
+    // 5) 插件私有数据：**合并**（不删除本机已有数据），跳过可重建缓存。
+    //    旧实现整体 reset，会把 `plugin-data/<id>/` 下的 ffmpeg / exe / dll 删掉，
+    //    用户还原后插件还得重新下载几百 MB。
+    if scope.plugin_data {
         let root = data_root.join(PLUGIN_DATA_DIR);
-        if root.exists() {
-            reset_dir(&root).map_err(|e| err(format!("清理旧插件数据目录失败: {e}")))?;
-        } else {
+        if !root.exists() {
             std::fs::create_dir_all(&root).map_err(|e| err(format!("创建插件数据目录失败: {e}")))?;
         }
-        let mut count: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for (name, data) in &entries {
             let Some(rest) = name.strip_prefix(&format!("{PLUGIN_DATA_DIR}/")) else {
                 continue;
@@ -673,19 +1123,20 @@ pub fn restore_archive(
             if rest.is_empty() {
                 continue;
             }
+            if is_reconstructible_plugin_data(rest) {
+                continue;
+            }
             if let Some(id) = rest.split('/').next() {
-                count.insert(id.to_string());
+                ids.insert(id.to_string());
             }
             write_relative(&root, rest, data)?;
         }
-        report.plugin_data = count.len();
+        report.plugin_data = ids.len();
     }
 
-    report.settings = settings_written;
-
-    // 5) 内部状态（内置插件卸载标记等，增量合并——保留本机既有文件，
+    // 6) 内部状态（内置插件卸载标记等，增量合并——保留本机既有文件，
     //    备份里有的覆盖，两边互补）
-    if wants("internal") {
+    if scope.internal {
         let root = data_root.join(INTERNAL_DIR);
         if !root.exists() {
             std::fs::create_dir_all(&root).map_err(|e| err(format!("创建内部状态目录失败: {e}")))?;
@@ -702,7 +1153,6 @@ pub fn restore_archive(
         }
     }
 
-    report.settings = settings_written;
     Ok((report, local_storage, manifest))
 }
 
@@ -745,7 +1195,10 @@ pub fn backups_dir_path(app: &AppHandle) -> Result<String, String> {
     Ok(backups_dir(app)?.to_string_lossy().to_string())
 }
 
-/// 当前状态导出为归档（「导出到备份目录」/「自动备份」用）
+/// 当前状态导出为归档（「导出到备份目录」/「自动备份」用）。
+///
+/// 走流式写盘（`write_archive_to_path`）：归档可能包含录屏等大文件，
+/// 不能先整块读进内存再写。
 pub fn export_to_backups(
     app: &AppHandle,
     local_storage: Value,
@@ -753,9 +1206,12 @@ pub fn export_to_backups(
     app_version: &str,
     prefix: &str,
 ) -> Result<String, String> {
-    let bytes = build_archive(app, local_storage, settings, app_version)?;
+    let dir = backups_dir(app)?;
     let name = format!("{prefix}{}.msbackup", file_stamp());
-    write_archive_file(app, &name, &bytes)
+    let path = dir.join(&name);
+    write_archive_to_path(app, &path, local_storage, settings, app_version)?;
+    prune_backups(&dir, KEEP_BACKUPS);
+    Ok(path.to_string_lossy().to_string())
 }
 
 /// 读一个归档文件的字节（路径必须位于备份目录内，避免前端传入任意路径）
@@ -803,4 +1259,114 @@ pub fn is_reconstructible_plugin_data_public(rel: &str) -> bool {
 #[allow(dead_code)]
 pub fn read_archive_public(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, String> {
     read_archive(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_restore_scope;
+
+    /// 流式打包（写盘路径）必须与内存版产出**同样的归档内容**。
+    ///
+    /// 背景：为保证大文件（如插件录屏 mp4）不再整块进内存，导出/留底全部改走
+    /// `write_archive_stream`。这里用 `Cursor<Vec<u8>>` 当 sink，与
+    /// `build_archive_from_parts` 逐条目比对；唯一允许不同的是 manifest 的
+    /// `exportedAt`（时间戳）。
+    #[test]
+    fn stream_archive_matches_in_memory_archive() {
+        use super::{build_archive_from_parts, read_archive, write_archive_stream};
+        use serde_json::json;
+        use std::io::Cursor;
+
+        let base = std::env::temp_dir().join(format!("ms-backup-stream-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("plugins/demo")).unwrap();
+        std::fs::create_dir_all(base.join("plugin-data/demo/sub")).unwrap();
+        std::fs::write(base.join("plugins/demo/a.txt"), b"hello").unwrap();
+        std::fs::write(base.join("plugin-data/demo/sub/b.bin"), [0u8, 1, 2, 3]).unwrap();
+
+        let files = vec![
+            (
+                "plugins/demo/a.txt".to_string(),
+                base.join("plugins/demo/a.txt"),
+            ),
+            (
+                "plugin-data/demo/sub/b.bin".to_string(),
+                base.join("plugin-data/demo/sub/b.bin"),
+            ),
+        ];
+        let ls = json!({ "subscribes": [1, 2, 3] });
+        let st = json!({ "shortcut_bindings": [] });
+
+        let out =
+            write_archive_stream(Cursor::new(Vec::new()), &ls, &st, &files, "9.9.9").unwrap();
+        let streamed = read_archive(&out.into_inner()).unwrap();
+
+        let inmem = read_archive(
+            &build_archive_from_parts(
+                ls,
+                st,
+                vec![
+                    ("plugins/demo/a.txt".to_string(), b"hello".to_vec()),
+                    (
+                        "plugin-data/demo/sub/b.bin".to_string(),
+                        vec![0u8, 1, 2, 3],
+                    ),
+                ],
+                "9.9.9",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            streamed.keys().collect::<Vec<_>>(),
+            inmem.keys().collect::<Vec<_>>(),
+            "条目集合/顺序不一致"
+        );
+        for key in inmem.keys() {
+            if key == "manifest.json" {
+                continue; // exportedAt 天然不同
+            }
+            assert_eq!(streamed.get(key), inmem.get(key), "条目 {key} 内容不一致");
+        }
+        let a: serde_json::Value =
+            serde_json::from_slice(streamed.get("manifest.json").unwrap()).unwrap();
+        let b: serde_json::Value =
+            serde_json::from_slice(inmem.get("manifest.json").unwrap()).unwrap();
+        for key in [
+            "format",
+            "formatVersion",
+            "app",
+            "appVersion",
+            "counts",
+            "platform",
+        ] {
+            assert_eq!(a.get(key), b.get(key), "manifest.{key} 不一致");
+        }
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    fn scope_of(parts: &[&str]) -> String {
+        let only: Vec<String> = parts.iter().map(|s| s.to_string()).collect();
+        parse_restore_scope(&only).broadcast_scope().to_string()
+    }
+
+    #[test]
+    fn broadcast_scope_matches_runtime_impact() {
+        // 空/全量：所有窗口都按全量刷新
+        assert_eq!(scope_of(&[]), "all");
+        assert_eq!(scope_of(&["all"]), "all");
+        // 只有插件：重载插件，不碰配置刷新路径
+        assert_eq!(scope_of(&["plugins"]), "plugins");
+        assert_eq!(scope_of(&["pluginData"]), "plugins");
+        // 只有配置：不打断插件
+        assert_eq!(scope_of(&["config"]), "config");
+        assert_eq!(scope_of(&["settings"]), "config");
+        // 两类都碰：按全量
+        assert_eq!(scope_of(&["plugins", "config"]), "all");
+        assert_eq!(scope_of(&["localStorage"]), "all");
+        // 未知分类：保守按全量（宁可多刷新一次）
+        assert_eq!(scope_of(&["whatever"]), "all");
+    }
 }
