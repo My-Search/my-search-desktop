@@ -58,7 +58,8 @@ import {
   isFreshEvent,
   planReload,
 } from "../../lib/plugins/dev-reload.ts";
-import { loadRegistry, saveRegistry, type PluginRecord, type PluginRegistryFile } from "../../lib/plugins/registry.ts";
+import { loadRegistry, saveRegistry, createPluginRecord, upsertPlugin, manifestFromJson, type PluginRecord, type PluginRegistryFile } from "../../lib/plugins/registry.ts";
+import { compareVersion } from "../../lib/plugins/manifest.ts";
 import type { AttachedEntry } from "../../lib/plugins/attachments.ts";
 import type { SearchItem } from "../../types/index.ts";
 
@@ -229,6 +230,51 @@ export function usePluginHost(opts: PluginHostRuntimeOptions) {
     return iconCache.get(`${pluginId}/${ref}`);
   }
 
+  /**
+   * 以磁盘 `plugin.json` 为准，校正注册表记录的版本与清单。
+   *
+   * 为什么需要：注册表（localStorage）是宿主侧的权威镜像，但它可能与磁盘脱节——
+   * 升级/还原中断、文件被外部替换，或历史上「还原后没重载注册表」留下的错配。
+   * 错配的直接后果就是「低版本代码以高版本号工作」：权限、后台入口、快捷键动作
+   * 都来自注册表清单，而界面/后端代码来自磁盘。
+   *
+   * 判定与处理：**版本不同就按磁盘重建记录**（用户态开关 / 自启 / 关闭行为 /
+   * 授权 / 拒绝列表由 `upsertPlugin` 合并保留）。返回被修正的记录数。
+   */
+  async function repairRecordsFromDisk(reg: PluginRegistryFile): Promise<number> {
+    let changed = 0;
+    for (const rec of reg.plugins) {
+      if (rec.source.kind === "legacy" || rec.source.dev) continue;
+      let text: string;
+      try {
+        text = await readPluginText(rec.id, "plugin.json");
+      } catch {
+        continue; // 目录缺失 / 暂不可读：保留现有记录，不因读不到就判定
+      }
+      const manifest = manifestFromJson(text);
+      if (!manifest || manifest.id !== rec.id) continue;
+      if (compareVersion(manifest.version, rec.version) === 0) continue;
+      console.warn(
+        `[插件] 注册表与磁盘版本不一致（${rec.id}）：注册表 v${rec.version} / 磁盘 v${manifest.version}，按磁盘校正`
+      );
+      const merged = upsertPlugin(
+        reg,
+        createPluginRecord({
+          manifest,
+          dir: rec.dir,
+          source: rec.source,
+          runtime: rec.runtime,
+          integrity: rec.integrity,
+        }),
+        { preserveUserChoices: true }
+      );
+      // 运行态是当前进程的实时镜像，不被清单重建覆盖
+      merged.runtime = rec.runtime;
+      changed++;
+    }
+    return changed;
+  }
+
   /** 从 localStorage 读注册表并原子同步网关（幂等；内容未变则跳过） */
   async function reload(force = false): Promise<void> {
     const fp = registryFingerprint();
@@ -236,6 +282,19 @@ export function usePluginHost(opts: PluginHostRuntimeOptions) {
     registry = loadRegistry();
     syncedFingerprint = fp;
     loaded.value = true;
+    // 【注册表 ↔ 磁盘自愈】以磁盘 `plugin.json` 为准校正版本与清单。
+    // 覆盖「更新中断 / 文件被外部替换 / 历史还原错配」等场景：否则会出现
+    // 「磁盘跑的是低版本代码、注册表却写着高版本号」的错配（插件按错误版本工作）。
+    // 只在真正重读注册表时执行（首次加载 / force），避免常态 IPC 开销。
+    try {
+      const repaired = await repairRecordsFromDisk(registry);
+      if (repaired > 0) {
+        saveRegistry(registry);
+        syncedFingerprint = registryFingerprint();
+      }
+    } catch (e) {
+      console.warn("[插件] 注册表与磁盘版本校对失败:", e);
+    }
     refreshSyncConsumers();
     // 网关批量同步：一次 IPC 完成全部插件权限镜像、残留剔除、一次快照落盘与按需钩子调和
     try {

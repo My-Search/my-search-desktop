@@ -21,6 +21,7 @@
  */
 
 import { storageGet, storageSet, storageRemove } from "../util";
+import { PLUGIN_REGISTRY_KEY, keepLocalRecordsAfterRestore } from "../plugins/registry";
 
 /** 备份时**排除**的 localStorage 键（不跨机携带、不写回） */
 const SKIP_KEYS = new Set([
@@ -83,11 +84,29 @@ export function collectState(): Record<string, unknown> {
  */
 export function restoreState(
   data: Record<string, unknown>,
-  opts: { silent?: boolean } = {}
+  opts: {
+    silent?: boolean;
+    /**
+     * 被「版本守卫」跳过的插件 id：注册表里这些插件的记录**保留本机**。
+     *
+     * 还原会整目录交换 `plugins/`；对「本机版本更高」的插件我们拒绝降级（保留
+     * 本机文件），但归档里的注册表记录是旧版本。不换回本机记录就会出现
+     * 「磁盘代码是 v2、注册表写着 v1」的错配（表现为插件以错误的版本号工作）。
+     */
+    keepLocalPluginIds?: readonly string[];
+  } = {}
 ): number {
   const silent = opts.silent !== false;
+  let payload = data;
+  const keepIds = opts.keepLocalPluginIds ?? [];
+  if (keepIds.length > 0 && PLUGIN_REGISTRY_KEY in data) {
+    payload = {
+      ...data,
+      [PLUGIN_REGISTRY_KEY]: keepLocalRecordsAfterRestore(data[PLUGIN_REGISTRY_KEY], keepIds),
+    };
+  }
   let count = 0;
-  for (const [key, value] of Object.entries(data)) {
+  for (const [key, value] of Object.entries(payload)) {
     if (isSkippedKey(key)) continue;
     storageSet(key, value, { silent });
     count++;

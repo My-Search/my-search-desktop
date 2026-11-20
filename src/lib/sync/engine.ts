@@ -437,8 +437,16 @@ async function doDownload(
   // 还原当前状态一起传过去，供「还原前留底」使用（否则留底只有插件文件）。
   const restored = await backupRestore(result.path, ["all"], collectState());
   const back = (restored.localStorage ?? {}) as Record<string, unknown>;
-  restoreState(back, { silent: true });
+  // 版本守卫：本机版本更高的插件不被降级（文件与数据都保留本机），
+  // 注册表记录同样保留本机，确保「版本号」与磁盘代码一致。
+  const downgradeSkipped = restored.downgradeSkipped ?? [];
+  restoreState(back, { silent: true, keepLocalPluginIds: downgradeSkipped });
   pruneState(back);
+  if (downgradeSkipped.length > 0) {
+    debug(
+      `[同步] ${trigger}: 跳过 ${downgradeSkipped.length} 个本机版本更高的插件（拒绝降级）: ${downgradeSkipped.join(", ")}`
+    );
+  }
   // 递增 epoch 并广播：按实际范围重载插件视图/独立窗口/后台进程。
   await syncCommitApplied("cloud", restored.scope ?? "all");
 

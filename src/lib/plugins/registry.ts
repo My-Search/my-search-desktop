@@ -503,6 +503,38 @@ export function findPlugin(reg: PluginRegistryFile, id: string): PluginRecord | 
   return reg.plugins.find((p) => p.id === id);
 }
 
+/**
+ * 还原后合并注册表：把「被版本守卫跳过」的插件记录换回本机记录。
+ *
+ * 为什么需要：备份还原会整目录交换 `plugins/`；对「本机版本更高」的插件我们
+ * 拒绝降级（保留本机文件），而归档里的注册表记录也是旧版本——若照原样写回，
+ * 就会出现「磁盘代码 v1.0.0、版本号显示 v1.0.0 的旧记录」这类清单与代码错配。
+ * 这里把这些 id 换回本机记录，保证版本号与磁盘代码始终一致。
+ */
+export function keepLocalRecordsAfterRestore(
+  archived: unknown,
+  keepIds: readonly string[]
+): PluginRegistryFile {
+  const parsed =
+    archived &&
+    typeof archived === "object" &&
+    Array.isArray((archived as PluginRegistryFile).plugins)
+      ? (archived as PluginRegistryFile)
+      : { version: PLUGIN_REGISTRY_VERSION, plugins: [] as PluginRecord[] };
+  if (!keepIds || keepIds.length === 0) return parsed;
+
+  const keep = new Set(keepIds);
+  const local = new Map(loadRegistry().plugins.map((p) => [p.id, p]));
+  const plugins = parsed.plugins.filter(
+    (p): p is PluginRecord => !!p && typeof p.id === "string" && !keep.has(p.id)
+  );
+  for (const id of keep) {
+    const rec = local.get(id);
+    if (rec) plugins.push(rec);
+  }
+  return { version: parsed.version ?? PLUGIN_REGISTRY_VERSION, plugins };
+}
+
 /** 新增或替换记录（保留用户态字段：enabled / autoStart / closeBehavior / themePreference / grants / denied） */
 export function upsertPlugin(
   reg: PluginRegistryFile,

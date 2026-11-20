@@ -282,6 +282,12 @@ export interface RestoreReport {
   settings: boolean;
   /** Rust 按实际分类判定的广播作用域 */
   scope: SyncAppliedScope;
+  /**
+   * 被「版本守卫」跳过的插件 id：这些插件本机版本高于归档版本，还原时
+   * **保留本机文件与数据**（拒绝降级）。前端据此保留本机注册表记录，
+   * 保证版本号与磁盘代码一致。
+   */
+  downgradeSkipped: string[];
   localStorage: Record<string, unknown>;
   manifest: Record<string, unknown>;
 }

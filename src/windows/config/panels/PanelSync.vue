@@ -132,7 +132,9 @@ async function doRestore(cats?: string[]): Promise<void> {
   try {
     const r = await backupRestore(inspectPath.value, cats, collectState());
     const back = (r.localStorage ?? {}) as Record<string, unknown>;
-    restoreState(back, { silent: true });
+    // 版本守卫：本机版本更高的插件不被降级；注册表记录同样保留本机
+    const downgradeSkipped = r.downgradeSkipped ?? [];
+    restoreState(back, { silent: true, keepLocalPluginIds: downgradeSkipped });
     // 全量还原时删除「远端没有、本机还留着」的键，否则用户的删除操作
     // 会在下一次同步时被本机重新带回去。范围还原只增不减。
     const isFull = !cats || cats.length === 0 || cats.includes("all");
@@ -146,6 +148,8 @@ async function doRestore(cats?: string[]): Promise<void> {
     const parts: string[] = [];
     if (r.plugins > 0) parts.push(`${r.plugins} 个插件`);
     if (r.pluginData > 0) parts.push(`${r.pluginData} 个插件的私有数据`);
+    if (downgradeSkipped.length > 0)
+      parts.push(`已跳过 ${downgradeSkipped.length} 个本机版本更高的插件（未降级）`);
     if (r.settings) parts.push("设置");
     if (r.localStorageKeys > 0) parts.push(`${r.localStorageKeys} 项配置`);
     props.notify(`还原完成${parts.length ? `（${parts.join("、")}）` : ""}${r.snapshotPath ? "，已留底" : ""}`, "ok");

@@ -2990,7 +2990,9 @@ fn pick_asset(assets: &[ReleaseAsset], ext: &str, arch: &[&str]) -> Option<Strin
 
 /// 语义化版本比较：a > b 返回正数，a == b 返回 0，a < b 返回负数。
 /// 支持 `x.y.z` / `vx.y.z` / `x.y.z-beta` 等常见格式。
-fn compare_versions(a: &str, b: &str) -> i32 {
+///
+/// `pub(crate)`：备份还原的「插件版本守卫」也用它（`backup::restore_plugins`）。
+pub(crate) fn compare_versions(a: &str, b: &str) -> i32 {
     fn parse_segments(v: &str) -> Vec<i32> {
         v.trim_start_matches('v')
             .split(&['.', '-', '+', '_'][..])

@@ -719,6 +719,8 @@ pub struct RestoreReport {
     pub internal: bool,
     /// 面向 `sync://applied` 广播的作用域：`all` / `plugins` / `config`
     pub scope: String,
+    /// 被「版本守卫」跳过的插件（本机版本高于归档版本，拒绝降级）
+    pub downgrade_skipped: Vec<String>,
 }
 
 /// 还原范围（把面板的粗粒度选项翻译成各分区的布尔开关）。
@@ -898,29 +900,117 @@ fn write_journal(root: &Path, journal: &RestoreJournal) -> Result<(), String> {
     std::fs::write(journal_path(root), text).map_err(|e| err(format!("写还原日志失败: {e}")))
 }
 
+/// 读某个插件目录里 `plugin.json` 的 version（读不到返回 None）。
+fn local_dir_plugin_version(dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join("plugin.json")).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    value
+        .get("version")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// 读归档条目里某插件 `plugins/<id>/plugin.json` 的 version。
+fn archive_plugin_version(entries: &BTreeMap<String, Vec<u8>>, id: &str) -> Option<String> {
+    let bytes = entries.get(&format!("{PLUGINS_DIR}/{id}/plugin.json"))?;
+    let value: Value = serde_json::from_slice(bytes).ok()?;
+    value
+        .get("version")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// 递归复制目录（插件目录很小，几 KB ~ 几 MB）。
+fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_all(&entry.path(), &to)?;
+        } else {
+            std::fs::copy(entry.path(), &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// 计算「归档里比本机更旧」的插件 id 集合（版本守卫）。
+///
+/// 独立成函数的原因：不只「还原安装文件」需要它，「只还原插件数据」同样需要——
+/// 否则旧版本的私有数据会覆盖新版本写的数据（格式可能读不回来）。
+fn downgrade_skipped_of(
+    entries: &BTreeMap<String, Vec<u8>>,
+    data_root: &Path,
+) -> std::collections::BTreeSet<String> {
+    let prefix = format!("{PLUGINS_DIR}/");
+    let mut archive_ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for name in entries.keys() {
+        let Some(rest) = name.strip_prefix(&prefix) else {
+            continue;
+        };
+        if rest.is_empty() || rest.starts_with(".staging/") {
+            continue;
+        }
+        if let Some(id) = rest.split('/').next() {
+            if !id.is_empty() {
+                archive_ids.insert(id.to_string());
+            }
+        }
+    }
+
+    let local_root = data_root.join(PLUGINS_DIR);
+    let mut skipped: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for id in &archive_ids {
+        let (Some(arch_v), Some(local_v)) = (
+            archive_plugin_version(entries, id),
+            local_dir_plugin_version(&local_root.join(id)),
+        ) else {
+            continue;
+        };
+        if crate::compare_versions(&local_v, &arch_v) > 0 {
+            skipped.insert(id.clone());
+        }
+    }
+    skipped
+}
+
 /// 把归档里的插件文件写入同卷 staging 目录，然后「旧目录改名 → staging 改名」
 /// 完成交换。
 ///
 /// 为什么不用 `reset_dir`：先删后写意味着中途失败就只剩一半插件；而且运行中的
 /// exe 会锁文件导致删除失败。交换式还原保证最终状态要么是旧目录、要么是新目录。
+///
+/// **版本守卫（防降级）**：归档可能来自更早的备份、或装的插件更旧的另一台设备。
+/// 逐插件比较版本，**本机版本更高就保留本机目录**（拷进 staging），并把该 id 回传，
+/// 供调用方跳过它的 `plugin-data/`、并让前端保留本机注册表记录（版本号与磁盘代码
+/// 始终一致，避免「低版本代码 + 高版本号」）。
+///
+/// 返回 `(实际还原的插件数, 因降级被跳过的插件 id)`。
 fn restore_plugins(
     entries: &BTreeMap<String, Vec<u8>>,
     data_root: &Path,
-) -> Result<usize, String> {
+    downgrade_skipped: &std::collections::BTreeSet<String>,
+) -> Result<(usize, Vec<String>), String> {
     // 归档里根本没有插件文件（早期备份 / 只备份配置）：不做目录交换。
     // 否则一次「仅插件」还原会把本机现有插件全部清空。
     let prefix = format!("{PLUGINS_DIR}/");
     if !entries.keys().any(|name| name.starts_with(&prefix)) {
-        return Ok(0);
+        return Ok((0, Vec::new()));
     }
+
+    let target_root = data_root.join(PLUGINS_DIR);
+
     let stamp = restore_stamp();
     let staging_root = data_root.join(format!("{RESTORE_STAGING_PREFIX}{stamp}"));
     let staged_plugins = staging_root.join(PLUGINS_DIR);
     std::fs::create_dir_all(&staged_plugins).map_err(|e| err(format!("创建还原暂存目录失败: {e}")))?;
 
-    let mut ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut written: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for (name, data) in entries {
-        let Some(rest) = name.strip_prefix(&format!("{PLUGINS_DIR}/")) else {
+        let Some(rest) = name.strip_prefix(&prefix) else {
             continue;
         };
         if rest.is_empty() || rest.starts_with(".staging/") {
@@ -930,8 +1020,13 @@ fn restore_plugins(
         if rest.ends_with("/.dev-source") || rest == ".dev-source" {
             continue;
         }
-        if let Some(id) = rest.split('/').next() {
-            ids.insert(id.to_string());
+        let id = rest.split('/').next().unwrap_or("");
+        // 降级保护：归档里这个插件的文件全部跳过（本机目录随后拷进 staging）
+        if !id.is_empty() && downgrade_skipped.contains(id) {
+            continue;
+        }
+        if !id.is_empty() {
+            written.insert(id.to_string());
         }
         // 写入失败时清掉本次 staging，别把半套插件留在应用数据目录里
         if let Err(e) = write_relative(&staged_plugins, rest, data) {
@@ -940,7 +1035,26 @@ fn restore_plugins(
         }
     }
 
-    let target = data_root.join(PLUGINS_DIR);
+    // 被跳过的插件：把本机目录原样拷进 staging —— 交换是**整目录替换**，
+    // 不拷回来等于把本机更高版本的插件删掉。
+    for id in downgrade_skipped {
+        let src = target_root.join(id);
+        if !src.is_dir() {
+            continue;
+        }
+        if let Err(e) = copy_dir_all(&src, &staged_plugins.join(id)) {
+            let _ = std::fs::remove_dir_all(&staging_root);
+            return Err(err(format!("保留本机插件目录失败（{id}）: {e}")));
+        }
+    }
+
+    // staging 里一个插件都没有（归档只含残留条目）：不要交换，否则会清空本机插件
+    if written.is_empty() && downgrade_skipped.is_empty() {
+        let _ = std::fs::remove_dir_all(&staging_root);
+        return Ok((0, Vec::new()));
+    }
+
+    let target = target_root;
     let old = data_root.join(format!("{RESTORE_OLD_PREFIX}{stamp}"));
     let journal = RestoreJournal {
         target: target.to_string_lossy().to_string(),
@@ -978,7 +1092,7 @@ fn restore_plugins(
     } else {
         let _ = std::fs::remove_file(journal_path(data_root));
     }
-    Ok(ids.len())
+    Ok((written.len(), downgrade_skipped.iter().cloned().collect()))
 }
 
 /// 应用启动时恢复未完成的还原事务（崩溃/断电留下的中转目录与旧目录）。
@@ -1102,9 +1216,14 @@ pub fn restore_archive(
         }
     }
 
-    // 4) 插件安装文件：整目录事务交换
+    // 4) 插件安装文件：整目录事务交换（含版本守卫：本机更高则不降级）
+    //    守卫先算出来：即使本次只还原「插件数据」（scope.plugins=false），
+    //    也要跳过更旧的那份数据，避免旧格式覆盖新版本写的数据。
+    let downgrade_skipped = downgrade_skipped_of(&entries, &data_root);
+    report.downgrade_skipped = downgrade_skipped.iter().cloned().collect();
     if scope.plugins {
-        report.plugins = restore_plugins(&entries, &data_root)?;
+        let (count, _) = restore_plugins(&entries, &data_root, &downgrade_skipped)?;
+        report.plugins = count;
     }
 
     // 5) 插件私有数据：**合并**（不删除本机已有数据），跳过可重建缓存。
@@ -1127,6 +1246,10 @@ pub fn restore_archive(
                 continue;
             }
             if let Some(id) = rest.split('/').next() {
+                // 该插件因「本机版本更高」被跳过：保留本机数据，不让旧数据覆盖新版本
+                if downgrade_skipped.contains(id) {
+                    continue;
+                }
                 ids.insert(id.to_string());
             }
             write_relative(&root, rest, data)?;
@@ -1264,6 +1387,53 @@ pub fn read_archive_public(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, St
 #[cfg(test)]
 mod tests {
     use super::parse_restore_scope;
+
+    /// 还原插件目录时的「版本守卫」：本机更高不降级，本机更低正常升级。
+    #[test]
+    fn restore_plugins_refuses_downgrade() {
+        use super::restore_plugins;
+        use std::collections::BTreeMap;
+
+        let base = std::env::temp_dir().join(format!("ms-restore-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let plugins = base.join("plugins");
+        std::fs::create_dir_all(plugins.join("a")).unwrap();
+        std::fs::create_dir_all(plugins.join("b")).unwrap();
+        std::fs::write(plugins.join("a/plugin.json"), br#"{"id":"a","version":"2.0.0"}"#).unwrap();
+        std::fs::write(plugins.join("a/ui.js"), b"local-new").unwrap();
+        std::fs::write(plugins.join("b/plugin.json"), br#"{"id":"b","version":"1.0.0"}"#).unwrap();
+        std::fs::write(plugins.join("b/ui.js"), b"local-old").unwrap();
+
+        // 归档：a 是旧版本（应被拒绝），b 是新版本（应正常升级）
+        let mut entries: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        entries.insert(
+            "plugins/a/plugin.json".into(),
+            br#"{"id":"a","version":"1.0.0"}"#.to_vec(),
+        );
+        entries.insert("plugins/a/ui.js".into(), b"archive-old".to_vec());
+        entries.insert(
+            "plugins/b/plugin.json".into(),
+            br#"{"id":"b","version":"2.0.0"}"#.to_vec(),
+        );
+        entries.insert("plugins/b/ui.js".into(), b"archive-new".to_vec());
+
+        let skipped = super::downgrade_skipped_of(&entries, &base);
+        let (count, reported) = restore_plugins(&entries, &base, &skipped).unwrap();
+        assert_eq!(count, 1, "只有 b 被真正还原");
+        assert_eq!(reported, vec!["a".to_string()], "a 因本机版本更高被跳过");
+
+        let a_ui = std::fs::read_to_string(plugins.join("a/ui.js")).unwrap();
+        assert_eq!(a_ui, "local-new", "本机更高版本的插件文件必须保留");
+        let a_manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(plugins.join("a/plugin.json")).unwrap())
+                .unwrap();
+        assert_eq!(a_manifest["version"], "2.0.0", "本机版本号不能被归档回退");
+
+        let b_ui = std::fs::read_to_string(plugins.join("b/ui.js")).unwrap();
+        assert_eq!(b_ui, "archive-new", "本机更低的插件应被升级");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     /// 流式打包（写盘路径）必须与内存版产出**同样的归档内容**。
     ///
