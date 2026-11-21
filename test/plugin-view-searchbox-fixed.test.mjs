@@ -367,6 +367,46 @@ check(
   `sb=${taller.searchBoxH} ts=${taller.textShowH} box=${taller.boxH}`
 );
 
+/* ================= 回归：插件界面按 Esc 返回后，焦点回到搜索框 =================
+ * 背景（用户反馈）：在插件前端里按 Esc 会关掉插件界面，但焦点被浏览器丢给
+ * body（插件界面的输入框随会话停靠/卸载）——搜索框不聚焦，接着敲键盘什么都
+ * 不进去，看起来像「Esc 没生效」。期望：Esc 关闭插件界面 + 焦点自动回到搜索框。 */
+await evalJs(`(() => {
+  const q = document.getElementById('fs-query');
+  if (!q) return 0;
+  q.focus();
+  return 1;
+})()`);
+const focusedBefore = await evalJs(`document.activeElement && (document.activeElement.id || document.activeElement.tagName)`);
+check("前置：插件界面里的输入框可聚焦", focusedBefore === "fs-query", `activeElement=${focusedBefore}`);
+
+// 真实按键（走 CDP Input 通道，与真机一样经过 document 捕获阶段的全局 Esc）
+await S(
+  "Input.dispatchKeyEvent",
+  { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 },
+  sessionId
+);
+await S(
+  "Input.dispatchKeyEvent",
+  { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 },
+  sessionId
+);
+await sleep(450);
+
+const afterEsc = JSON.parse(await evalJs(`JSON.stringify((() => {
+  const ts = document.getElementById('text_show');
+  return {
+    detailDisplay: ts ? ts.style.display : null,
+    active: document.activeElement && (document.activeElement.id || document.activeElement.tagName),
+  };
+})())`));
+check("插件界面按 Esc 返回（详情关闭）", afterEsc.detailDisplay === "none", `display=${afterEsc.detailDisplay}`);
+check(
+  "插件界面按 Esc 返回后焦点自动回到搜索框（本回归的核心）",
+  afterEsc.active === "my_search_input",
+  `activeElement=${afterEsc.active}`
+);
+
 check("页面无未捕获异常", pageErrors.length === 0, pageErrors.join(" | ").slice(0, 400));
 
 console.log(`\n结果: ${pass} passed, ${fail} failed`);

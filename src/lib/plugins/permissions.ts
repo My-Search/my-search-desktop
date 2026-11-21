@@ -251,6 +251,16 @@ export const PERMISSION_CATALOG: readonly PermissionSpec[] = [
     runtime: "backend",
   },
   {
+    id: "secret.write",
+    group: "danger",
+    title: "保存密钥",
+    desc: "把插件拿到的密钥写入系统钥匙串（仅限该插件自己的命名空间）；密钥不会落进插件的 localStorage 或插件目录",
+    risk: "high",
+    scoped: true,
+    runtime: "backend",
+    revokeImpact: "插件无法再写入新密钥；已保存的密钥仍需在插件面板里手动删除",
+  },
+  {
     id: "gesture.exec",
     group: "danger",
     title: "执行手势动作",
@@ -383,6 +393,21 @@ export function groupOf(raw: string): PermissionGroup {
 /** 取权限风险等级 */
 export function riskOf(raw: string): PermissionRisk {
   return getPermissionSpec(raw)?.risk ?? "critical";
+}
+
+/**
+ * 升级（含静默自动更新）时，某个**新增**权限是否必须回到用户面前确认。
+ *
+ * 判据只有两条，刻意保持克制（其余新增权限仍可静默，避免把自动更新变成天天弹窗）：
+ *   1. 风险等级为 `critical`（运行本机程序 / 密钥 / 手势执行 / 插件安装）；
+ *   2. scope 为全通配 `*`（等于把「只访问某个域名」升级成「访问所有域名」）。
+ *
+ * 未知权限按 `critical` 处理（fail-closed）：能进到这里说明清单校验漏了，
+ * 宁可拦下来让用户看，也不能静默授予。
+ */
+export function requiresUpgradeConfirmation(raw: string): boolean {
+  if (permissionScope(raw) === "*") return true;
+  return riskOf(raw) === "critical";
 }
 
 /** 权限条目（用于安装确认 / 权限面板展示） */

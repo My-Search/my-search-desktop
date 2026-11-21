@@ -41,6 +41,17 @@ export interface MarketCatalog {
    * 目录内每条 `downloadUrl` 必须以此开头。
    */
   baseUrl: string;
+  /**
+   * 平台 ed25519 签名（可选字段，但官方市场链路**强制要求**）。
+   * 客户端先验签再采信目录里的 sha256 / downloadUrl，验签失败整份拒绝。
+   */
+  integrity?: {
+    algorithm: "ed25519";
+    keyId: string;
+    /** 64 字节 hex */
+    signature: string;
+    signedAt: string;
+  };
   plugins: MarketPluginEntry[];
 }
 
@@ -310,9 +321,28 @@ export function parseCatalog(raw: unknown): CatalogParseResult {
     errors.push("catalog.baseUrl.invalid");
   }
 
+  const integrity = obj.integrity;
+  if (integrity !== undefined) {
+    const ig = integrity as Record<string, unknown> | null;
+    if (
+      ig == null ||
+      typeof ig !== "object" ||
+      Array.isArray(ig) ||
+      ig.algorithm !== "ed25519" ||
+      typeof ig.keyId !== "string" ||
+      ig.keyId.length === 0 ||
+      ig.keyId.length > 32 ||
+      typeof ig.signature !== "string" ||
+      !/^[0-9a-f]{128}$/.test(ig.signature) ||
+      typeof ig.signedAt !== "string" ||
+      ig.signedAt.length === 0
+    ) {
+      errors.push("catalog.integrity.invalid");
+    }
+  }
+
   const rawPlugins = obj.plugins;
-  if (!Array.isArray(rawPlugins)) {
-    errors.push("catalog.plugins.invalid");
+  if (!Array.isArray(rawPlugins)) {    errors.push("catalog.plugins.invalid");
   } else {
     for (const [i, it] of rawPlugins.entries()) {
       const prefix = `entry:${i}:`;
@@ -437,6 +467,9 @@ export function parseCatalog(raw: unknown): CatalogParseResult {
       schemaVersion: MARKET_CATALOG_SCHEMA_VERSION,
       generatedAt: obj.generatedAt as string,
       baseUrl: baseUrl as string,
+      ...(integrity !== undefined
+        ? { integrity: integrity as MarketCatalog["integrity"] }
+        : {}),
       plugins: [...seen.values()],
     },
   };
@@ -461,6 +494,8 @@ export function describeCatalogErrors(errors: readonly string[]): string[] {
           return "目录缺少下载前缀（baseUrl）";
         case "catalog.baseUrl.invalid":
           return "下载前缀必须是 https 地址（本地调试可用 localhost）";
+        case "catalog.integrity.invalid":
+          return "目录签名结构不合法（algorithm/keyId/signature/signedAt）";
         case "catalog.plugins.invalid":
           return "目录缺少插件列表（plugins 必须是数组）";
         default:

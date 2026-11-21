@@ -24,6 +24,11 @@ export interface PluginNetFetchOptions {
   timeoutSecs?: number;
   /** 非 2xx 是否抛错；默认 true。WebDAV 需要自行处理 401/404/409 时传 false */
   throwOnHttpError?: boolean;
+  /**
+   * 使用哪条网络凭据（由宿主在发请求前注入，**插件永远拿不到值**）。
+   * 凭据绑定 origin：与请求地址不匹配时 Rust 直接拒绝。
+   */
+  credential?: string;
 }
 
 /** `ms.net.fetch` 的返回契约 */
@@ -102,11 +107,21 @@ export async function pluginFetch(
       responseType,
       maxBytes: options.maxBytes ?? null,
       timeoutSecs: options.timeoutSecs ?? null,
+      credential: options.credential ?? null,
     });
   } else {
+    const reqHeaders = { ...(options.headers ?? {}) };
+    if (options.credential) {
+      const { devNetCredentialHeader } = await import("../ipc.ts");
+      const [name, value] = devNetCredentialHeader(pluginId, options.credential, originOf(url));
+      for (const key of Object.keys(reqHeaders)) {
+        if (key.toLowerCase() === name.toLowerCase()) delete reqHeaders[key];
+      }
+      reqHeaders[name] = value;
+    }
     const init: RequestInit = {
       method: options.method ?? "GET",
-      headers: options.headers,
+      headers: reqHeaders,
     };
     if (options.bodyBase64 != null) init.body = base64ToBytes(options.bodyBase64) as BodyInit;
     else if (options.body != null) init.body = options.body;
@@ -167,5 +182,70 @@ export function createNetApi(
           return await pluginFetch(pluginId, target, options);
         },
       }),
+
+    /**
+     * 网络凭据：值只进 Rust 凭据库，请求时由代理注入。
+     * 保存前 Rust 会复核插件是否获授了该 origin 的 `net.fetch`。
+     */
+    credentials: {
+      set: (
+        name: string,
+        value: string,
+        options: {
+          scheme: "bearer" | "basic" | "header";
+          /** 凭据绑定到这个 origin（必填，防止被带去别的站点） */
+          origin: string;
+          header?: string;
+          username?: string;
+        }
+      ) =>
+        call({
+          api: "net.credentials.set",
+          detail: String(name).slice(0, 64),
+          run: async (rec) => {
+            const origin = String(options?.origin ?? "").replace(/\/+$/, "");
+            const scopes = rec.grants
+              .filter((g) => permissionBaseId(g.permission) === "net.fetch")
+              .map((g) => g.permission);
+            if (!scopes.some((s) => scopeAllows(s, `${origin}/`))) {
+              throw new PluginPermissionError(pluginId, `net.fetch:${origin}/*`);
+            }
+            const { pluginNetCredentialSet } = await import("../ipc.ts");
+            return await pluginNetCredentialSet(pluginId, {
+              name: String(name ?? ""),
+              value: String(value ?? ""),
+              scheme: options?.scheme,
+              origin,
+              header: options?.header,
+              username: options?.username,
+            });
+          },
+        }),
+
+      list: () =>
+        call({
+          api: "net.credentials.list",
+          run: async (rec) => {
+            if (!rec.grants.some((g) => permissionBaseId(g.permission) === "net.fetch")) {
+              throw new PluginPermissionError(pluginId, "net.fetch:<url>/*");
+            }
+            const { pluginNetCredentialList } = await import("../ipc.ts");
+            return await pluginNetCredentialList(pluginId);
+          },
+        }),
+
+      remove: (name: string) =>
+        call({
+          api: "net.credentials.remove",
+          detail: String(name).slice(0, 64),
+          run: async (rec) => {
+            if (!rec.grants.some((g) => permissionBaseId(g.permission) === "net.fetch")) {
+              throw new PluginPermissionError(pluginId, "net.fetch:<url>/*");
+            }
+            const { pluginNetCredentialDelete } = await import("../ipc.ts");
+            return await pluginNetCredentialDelete(pluginId, String(name ?? ""));
+          },
+        }),
+    },
   };
 }

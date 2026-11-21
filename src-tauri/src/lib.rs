@@ -47,6 +47,17 @@ mod favicon;
 mod file_assoc;
 mod market;
 mod mouse_gesture;
+/// 「点窗口外就收起」的兜底：依赖全局低级鼠标钩子，只在 Windows 编译。
+#[cfg(windows)]
+mod outside_click;
+/// 非 Windows：失焦事件足够可靠，无需兜底，保留同名空实现让调用点平台无关。
+#[cfg(not(windows))]
+mod outside_click {
+    /// 空实现（没有低级鼠标钩子可消费）。
+    pub fn spawn_watchdog(_app: tauri::AppHandle) {}
+    /// 空实现（没有兜底线程可停）。
+    pub fn stop_watchdog() {}
+}
 mod plugin_files;
 mod plugin_host;
 mod plugin_sync_store;
@@ -248,6 +259,17 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// 是否处于「呼出后的失焦抑制期」。
+///
+/// 失焦隐藏（`WindowEvent::Focused(false)`）与「点窗口外就收起」的兜底
+/// （见 `outside_click.rs`）是两条独立路径，但抑制期必须共用同一口径：
+/// 程序化呼出（Alt+点击 / 设置里打开插件界面）后的夺焦抖动不能被当成
+/// 「用户点了外面」，否则表现为「点了没反应」。
+pub(crate) fn blur_hide_suppressed() -> bool {
+    let until = SUPPRESS_BLUR_UNTIL_MS.load(Ordering::Relaxed);
+    until != 0 && now_ms() < until
 }
 
 /// 本次会话是否已经应用过「开机自启动」偏好。
@@ -2524,6 +2546,15 @@ fn animate_window_size(
     });
 }
 
+/// 收起主窗口：先收回搜索框高度（避免下次呼出残留高窗口），再隐藏。
+///
+/// 失焦隐藏与「点窗口外就收起」的兜底共用这一份实现——两处若各写一套，
+/// 很容易一边改了高度、另一边忘了，出现「有时收起后还是高窗口」。
+pub(crate) fn collapse_and_hide(window: &tauri::WebviewWindow) {
+    collapse_main_window(window);
+    let _ = window.hide();
+}
+
 /// 把主窗口收回到搜索框高度（隐藏时调用，避免下次呼出残留上次的高窗口）
 fn collapse_main_window(window: &tauri::WebviewWindow) {
     let width = window_width_for(window);
@@ -4311,6 +4342,24 @@ pub fn run() {
             plugin_host::plugin_storage_read,
             plugin_host::plugin_storage_write,
             plugin_host::plugin_storage_delete,
+            // ---------- 集合存储（ms.store.collection，逐条一文件） ----------
+            plugin_host::plugin_collection_put,
+            plugin_host::plugin_collection_get,
+            plugin_host::plugin_collection_delete,
+            plugin_host::plugin_collection_clear,
+            plugin_host::plugin_collection_list,
+            // ---------- 插件密钥（DPAPI / 按插件命名空间） ----------
+            plugin_host::plugin_secret_get,
+            plugin_host::plugin_secret_set,
+            plugin_host::plugin_secret_delete,
+            plugin_host::plugin_secret_list,
+            // ---------- 插件网络凭据（P2-3，值不出 Rust，按 origin 绑定） ----------
+            plugin_host::plugin_net_credential_set,
+            plugin_host::plugin_net_credential_list,
+            plugin_host::plugin_net_credential_delete,
+            // ---------- 宿主环境变量（值仅存 DPAPI，不进 localStorage） ----------
+            plugin_host::host_env_load,
+            plugin_host::host_env_save,
             // ---------- 插件云数据 store（ms.store.sync.*，带配额、随云备份） ----------
             plugin_sync_store::plugin_sync_store_get_all,
             plugin_sync_store::plugin_sync_store_get,
@@ -4494,6 +4543,9 @@ pub fn run() {
                 read_alt_click_pref(app.handle()).unwrap_or(DEFAULT_ALT_CLICK_ENABLED),
             );
             alt_click::install(app.handle().clone());
+            // 「点窗口外就收起」的兜底线程：消费上面那个低级鼠标钩子记下的
+            // 点击坐标（焦点事件偶发丢失时仍能收起，详见 outside_click.rs）
+            outside_click::spawn_watchdog(app.handle().clone());
             // 先加载插件网关快照，再按「已启用插件 + 实际授予权限」按需挂载原生钩子与监听：
             // 未安装或禁用对应插件时绝不挂载低级鼠标钩子（WH_MOUSE_LL）或剪贴板监听窗口。
             plugin_host::load_gateway_snapshot(app.handle());
@@ -4569,16 +4621,17 @@ pub fn run() {
             };
             // 呼出后短暂抑制：Alt+点击发生的呼出常常刚 show 就被前台锁定
             // 的抖动夺焦，此刻隐藏等于「点了没反应」。抑制期内的失焦忽略。
-            let until = SUPPRESS_BLUR_UNTIL_MS.load(Ordering::Relaxed);
-            if until != 0 && now_ms() < until {
+            if blur_hide_suppressed() {
                 return;
             }
             // 隐藏时把窗口收回到搜索框高度，
             // 这样下次呼出不会残留上一次搜索时的高窗口（下方空一大块）
             if let Some(main) = window.app_handle().get_webview_window("main") {
-                collapse_main_window(&main);
+                collapse_and_hide(&main);
+            } else {
+                // 理论上不可达（window 就是 main）：兜底也要隐藏，别把窗口留在屏幕上
+                let _ = window.hide();
             }
-            let _ = window.hide();
         })
         .build(tauri::generate_context!())
         .expect("构建我的搜索桌面版失败")
@@ -4592,6 +4645,8 @@ pub fn run() {
                 // 卸掉按需挂载的鼠标钩子与剪贴板监听窗口
                 mouse_gesture::uninstall();
                 clipboard_history::uninstall();
+                // 停掉「点窗口外就收起」兜底线程（窗口/事件循环即将拆掉）
+                outside_click::stop_watchdog();
                 // 停止所有插件后台进程：Windows 有 Job Object 兜底，Unix 没有——
                 // 不显式停止会留下孤儿进程（继续吃 CPU/内存），也收不回最后日志。
                 plugin_host::shutdown_all(app);

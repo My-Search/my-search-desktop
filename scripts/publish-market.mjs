@@ -122,6 +122,16 @@ if (!SKIP_INDEX) {
     "--local", staging,
     ...(carry ? ["--carry", carry] : []),
   ]);
+  if (!DRY) {
+    const distDoc = JSON.parse(readFileSync(path.join(root, "dist", "market", "index.dist.json"), "utf8"));
+    if (!distDoc.integrity) {
+      throw new Error(
+        "索引未签名，拒绝发布：客户端只信任平台签名（fail-closed）。\n" +
+        "先设置 MARKET_INDEX_PRIVATE_KEY（CI secret）或运行 node scripts/gen-market-key.mjs。"
+      );
+    }
+    console.log(`🔏 待发布索引已签名：keyId=${distDoc.integrity.keyId}`);
+  }
   console.log("");
 }
 

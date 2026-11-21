@@ -52,10 +52,11 @@ ok(
   !/AtomicBool[\s\S]{0,120}(hide|Hide)|(hide|Hide)[\s\S]{0,120}AtomicBool/.test(rustCode),
   "Rust 不再用原子布尔做失焦门控（AtomicBool 不得服务于 hide 门控）"
 );
-// on_window_event 里对 main 窗口的 Focused(false) 分支必须直接走到 hide()
+// on_window_event 里对 main 窗口的 Focused(false) 分支必须直接走到「收起 + 隐藏」
+// （收起 + 隐藏统一走 collapse_and_hide()，见下面第 4 节：兜底路径也复用同一份实现）
 ok(
-  /if\s+window\.label\(\)\s*!=\s*"main"[\s\S]{0,600}?window\.hide\(\)/.test(rustCode),
-  "Rust on_window_event：主窗口失焦分支直接 hide()（无前置状态判断）"
+  /if\s+window\.label\(\)\s*!=\s*"main"[\s\S]{0,600}?(collapse_and_hide\(window\)|window\.hide\(\))/.test(rustCode),
+  "Rust on_window_event：主窗口失焦分支直接收起（无前置状态判断）"
 );
 // 门控标志的读取（如果存在）不应出现在失焦分支里
 ok(
@@ -82,6 +83,39 @@ ok(codeHas(app, "resumeDetailViewIfAny"), "App.vue 保留唤醒还原逻辑 resu
 ok(
   /state\.mode\s*!==\s*MODE\.SHOW_ITEM_DETAIL[\s\S]{0,200}?detailVisible\.value/.test(stripComments(app)),
   "唤醒还原：详情视图状态下不走复位（原样保留）"
+);
+
+// ---- 4. 「点窗口外就收起」的兜底：焦点事件丢失时仍执行同一条用户规则 ----
+// 背景（用户反馈）：打开插件前端、按 Esc 后点窗口外，呼出框收不起来——窗口是
+// 置顶 + 跳任务栏的，收不起来就一直浮在别的应用上面。根因不是「要不要隐藏」的
+// 门控，而是 `Focused(false)` 事件本身可能不到达（呼出时被前台锁定拒绝、
+// WebView2 在插件界面焦点元素被移除后不再上报失焦）。兜底必须是**同一条规则**
+// 的另一条触发路径，不能引入新的状态门控。
+const outside = read("src-tauri/src/outside_click.rs");
+const outsideCode = stripComments(outside);
+const altClick = stripComments(read("src-tauri/src/alt_click.rs"));
+
+ok(codeHas(rust, "mod outside_click"), "Rust 注册 outside_click 兜底模块");
+ok(codeHas(rust, "outside_click::spawn_watchdog"), "Rust setup 启动「点窗口外就收起」兜底线程");
+ok(
+  /WM_LBUTTONDOWN[\s\S]{0,200}?outside_click::record_click/.test(altClick),
+  "鼠标钩子在左键按下时记录坐标（供兜底判定）"
+);
+// 记录动作必须发生在 hook_proc 里的 Alt+点击开关判断**之前**：兜底与该偏好无关
+ok(
+  /fn hook_proc[\s\S]{0,400}?outside_click::record_click[\s\S]{0,400}?ENABLED\.load/.test(altClick),
+  "点击记录位于 Alt+点击开关判断之前（兜底不依赖该偏好）"
+);
+ok(codeHas(outsideCode, "inside_window"), "兜底判定：点击点在主窗口矩形内不算点外面");
+ok(codeHas(outsideCode, "point_is_self"), "兜底判定：落点属于本进程（原生对话框/设置窗/托盘菜单）不算点外面");
+ok(codeHas(outsideCode, "collapse_and_hide"), "兜底收起复用 collapse_and_hide（与失焦路径同一份实现）");
+ok(
+  codeHas(outsideCode, "blur_hide_suppressed"),
+  "兜底与失焦隐藏共用同一抑制期（不新增门控）"
+);
+ok(
+  codeHas(rust, "pub(crate) fn blur_hide_suppressed"),
+  "Rust 提供 blur_hide_suppressed（失焦分支与兜底共用抑制口径）"
 );
 
 console.log(`\n结果: ${pass} passed, ${fail} failed`);

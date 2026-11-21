@@ -1,0 +1,617 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-search.local/plugin.schema.json",
+  "title": "my-search-desktop 插件清单",
+  "description": "plugin.json 的结构约束。运行时校验以宿主 parsePluginManifest 为准，本文件面向编辑器补全与作者自检。",
+  "type": "object",
+  "required": [
+    "id",
+    "name",
+    "version",
+    "apiVersion"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$",
+      "description": "反向域名式唯一 id；不得使用官方保留前缀 com.mysearch. / mysearch."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 48
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$"
+    },
+    "apiVersion": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1
+    },
+    "minAppVersion": {
+      "type": "string",
+      "pattern": "^\\d+(\\.[0-9]+)*$"
+    },
+    "autoUpdate": {
+      "type": "boolean",
+      "default": false
+    },
+    "author": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "homepage": {
+      "type": "string"
+    },
+    "repository": {
+      "type": "string"
+    },
+    "changelog": {
+      "type": "string"
+    },
+    "icon": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "not": {
+            "pattern": "..|\\\\|^/|^[A-Za-z]:|://"
+          }
+        },
+        {
+          "type": "string",
+          "pattern": "^data:image/"
+        },
+        {
+          "type": "string",
+          "pattern": "^https://"
+        }
+      ]
+    },
+    "license": {
+      "type": "string"
+    },
+    "permissions": {
+      "type": "array",
+      "items": {
+        "anyOf": [
+          {
+            "type": "string",
+            "enum": [
+              "search.read",
+              "search.write",
+              "ui.inlay",
+              "ui.window",
+              "ui.command",
+              "ui.notify",
+              "store",
+              "file.read",
+              "file.write",
+              "env.read",
+              "sync",
+              "clipboard.write",
+              "clipboard.read",
+              "selection.read",
+              "net.fetch",
+              "system.openExternal",
+              "screenshot.capture",
+              "screenshot.overlay",
+              "screenshot.write",
+              "screenshot.read",
+              "backend.spawn",
+              "secret.read",
+              "secret.write",
+              "gesture.exec",
+              "plugin.install"
+            ]
+          },
+          {
+            "type": "string",
+            "pattern": "^(env\\.read|net\\.fetch|secret\\.read|secret\\.write):[^\\s]+$"
+          }
+        ]
+      },
+      "uniqueItems": true
+    },
+    "optionalPermissions": {
+      "type": "array",
+      "items": {
+        "anyOf": [
+          {
+            "type": "string",
+            "enum": [
+              "search.read",
+              "search.write",
+              "ui.inlay",
+              "ui.window",
+              "ui.command",
+              "ui.notify",
+              "store",
+              "file.read",
+              "file.write",
+              "env.read",
+              "sync",
+              "clipboard.write",
+              "clipboard.read",
+              "selection.read",
+              "net.fetch",
+              "system.openExternal",
+              "screenshot.capture",
+              "screenshot.overlay",
+              "screenshot.write",
+              "screenshot.read",
+              "backend.spawn",
+              "secret.read",
+              "secret.write",
+              "gesture.exec",
+              "plugin.install"
+            ]
+          },
+          {
+            "type": "string",
+            "pattern": "^(env\\.read|net\\.fetch|secret\\.read|secret\\.write):[^\\s]+$"
+          }
+        ]
+      },
+      "uniqueItems": true
+    },
+    "contributes": {
+      "$ref": "#/$defs/contributes"
+    },
+    "backend": {
+      "$ref": "#/$defs/backend"
+    }
+  },
+  "$defs": {
+    "permission": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "search.read",
+            "search.write",
+            "ui.inlay",
+            "ui.window",
+            "ui.command",
+            "ui.notify",
+            "store",
+            "file.read",
+            "file.write",
+            "env.read",
+            "sync",
+            "clipboard.write",
+            "clipboard.read",
+            "selection.read",
+            "net.fetch",
+            "system.openExternal",
+            "screenshot.capture",
+            "screenshot.overlay",
+            "screenshot.write",
+            "screenshot.read",
+            "backend.spawn",
+            "secret.read",
+            "secret.write",
+            "gesture.exec",
+            "plugin.install"
+          ]
+        },
+        {
+          "type": "string",
+          "pattern": "^(env\\.read|net\\.fetch|secret\\.read|secret\\.write):[^\\s]+$"
+        }
+      ]
+    },
+    "closeBehavior": {
+      "type": "string",
+      "enum": [
+        "minimize",
+        "exit"
+      ]
+    },
+    "searchItem": {
+      "type": "object",
+      "required": [
+        "title",
+        "keyword"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "desc": {
+          "type": "string"
+        },
+        "keyword": {
+          "type": "string",
+          "minLength": 1
+        },
+        "icon": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "not": {
+                "pattern": "..|\\\\|^/|^[A-Za-z]:|://"
+              }
+            },
+            {
+              "type": "string",
+              "pattern": "^data:image/"
+            },
+            {
+              "type": "string",
+              "pattern": "^https://"
+            }
+          ]
+        },
+        "resource": {
+          "type": "string"
+        },
+        "visible": {
+          "type": "boolean",
+          "default": true
+        },
+        "subSearch": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "command": {
+      "type": "object",
+      "required": [
+        "id",
+        "prefix",
+        "title"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "prefix": {
+          "type": "string",
+          "minLength": 1,
+          "description": "搜索框关键词前缀，约定包含分隔符「:」"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "desc": {
+          "type": "string"
+        }
+      }
+    },
+    "detailView": {
+      "type": "object",
+      "required": [
+        "entry"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "entry": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "not": {
+            "pattern": "..|\\\\|^/|^[A-Za-z]:|://"
+          }
+        },
+        "script": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "not": {
+            "pattern": "..|\\\\|^/|^[A-Za-z]:|://"
+          }
+        },
+        "mode": {
+          "const": "inlay"
+        },
+        "compat": {
+          "const": "ms-script-env"
+        },
+        "closeBehavior": {
+          "type": "string",
+          "enum": [
+            "minimize",
+            "exit"
+          ]
+        },
+        "theme": {
+          "type": "string",
+          "enum": [
+            "dark",
+            "light",
+            "inherit"
+          ]
+        }
+      }
+    },
+    "resultProvider": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "trigger": {
+          "type": "string",
+          "enum": [
+            "always",
+            "prefix",
+            "regex"
+          ],
+          "default": "always"
+        },
+        "match": {
+          "type": "string",
+          "description": "trigger=prefix 为关键词前缀；trigger=regex 为正则源码（不含首尾斜杠）"
+        },
+        "maxItems": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10,
+          "default": 5
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 250,
+          "default": 120
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "trigger": {
+                "const": "prefix"
+              }
+            },
+            "required": [
+              "trigger"
+            ]
+          },
+          "then": {
+            "required": [
+              "match"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "trigger": {
+                "const": "regex"
+              }
+            },
+            "required": [
+              "trigger"
+            ]
+          },
+          "then": {
+            "required": [
+              "match"
+            ]
+          }
+        }
+      ]
+    },
+    "shortcut": {
+      "type": "object",
+      "required": [
+        "action",
+        "title"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "action": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]*$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "defaultShortcut": {
+          "type": "string"
+        }
+      }
+    },
+    "contributes": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "searchItem": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/searchItem"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/searchItem"
+              }
+            }
+          ]
+        },
+        "command": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/command"
+          }
+        },
+        "resultProvider": {
+          "$ref": "#/$defs/resultProvider"
+        },
+        "detailView": {
+          "$ref": "#/$defs/detailView"
+        },
+        "settingsPanel": {
+          "type": "object",
+          "required": [
+            "entry"
+          ],
+          "additionalProperties": true,
+          "properties": {
+            "entry": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "not": {
+                "pattern": "..|\\\\|^/|^[A-Za-z]:|://"
+              }
+            },
+            "title": {
+              "type": "string"
+            }
+          }
+        },
+        "handlers": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "files": {
+              "type": "boolean"
+            },
+            "folders": {
+              "type": "boolean"
+            }
+          }
+        },
+        "shortcut": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/shortcut"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/shortcut"
+              }
+            }
+          ]
+        },
+        "clipboardCapture": {
+          "type": "boolean"
+        }
+      }
+    },
+    "backend": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "entry": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "not": {
+            "pattern": "..|\\\\|^/|^[A-Za-z]:|://"
+          }
+        },
+        "command": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "protocol": {
+          "type": "string",
+          "enum": [
+            "jsonrpc-stdio",
+            "localhost-http"
+          ]
+        },
+        "autostart": {
+          "type": "string",
+          "enum": [
+            "always",
+            "on-demand",
+            "prompt",
+            "never"
+          ],
+          "default": "always"
+        },
+        "closeBehavior": {
+          "type": "string",
+          "enum": [
+            "minimize",
+            "exit"
+          ],
+          "default": "minimize"
+        },
+        "startupTimeoutMs": {
+          "type": "integer",
+          "minimum": 200,
+          "maximum": 30000,
+          "default": 3000
+        },
+        "callTimeoutMs": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 300000,
+          "default": 30000
+        },
+        "idleExitSec": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400,
+          "default": 30
+        },
+        "graceSec": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3600,
+          "default": 5
+        },
+        "shutdownTimeoutSec": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 60,
+          "default": 5
+        },
+        "maxRestarts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 20,
+          "default": 3
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "description": "字面量，或 $NAME / ${NAME} / $env:NAME / $secret:NAME 引用（引用需用户逐项授权）"
+          }
+        }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "entry"
+          ]
+        },
+        {
+          "required": [
+            "command"
+          ]
+        }
+      ]
+    }
+  },
+  "$comment": "生成文件，请勿手改；源：plugin.json 的宿主校验常量。"
+}

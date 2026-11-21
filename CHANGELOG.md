@@ -12,10 +12,45 @@
 
 ---
 
+## v7.10.0 - 2026-11-21
+
+### 新增
+
+- **插件平台能力升级（P0/P1/P2 共 12 项）**：
+  - **生命周期与进入参数**：入口脚本新增第 11 个参数 `action`（`type/code/keyword/payload/from/at`），并新增 `ms.lifecycle.onShow/onHide/onEnter/onDispose/current`；恢复、停靠、释放分别派发 `show/hide/dispose`，保活插件不再靠轮询猜状态。
+  - **搜索期结果提供者**：清单声明 `contributes.resultProvider` 后可用 `ms.results.provide(fn)` 在搜索结果里插入条目；支持 `always/prefix/regex` 触发，并发 4、单插件超时 120ms、总预算 250ms、全局最多 20 条，超时/异常只丢弃该插件结果，不拖慢宿主。
+  - **动态命令**：`ms.commands.register/unregister/list/limits` 可运行时注册「前缀 : 」命令（单插件 ≤20 条），落注册表并广播，卸载即回收。
+  - **自动更新权限分级**：新版本新增 `critical` 权限或 `scope:"*"` 时不再静默升级，只登记 `pendingUpgrade` 并在插件面板显示「待确认 + 高危权限」；其余新增权限仍静默授予。
+  - **权限申请闭环**：`ms.permissions.request(apis, reason)` 只能申请清单已声明、尚未授予的权限；24h 内非授予记录 ≤3 次、单次 ≤8 项；面板新增申请历史。
+  - **插件私钥与网络凭据**：`ms.system.getSecret/setSecret/deleteSecret/listSecrets` 打通 Rust DPAPI 存储；`ms.net.credentials.set/list/remove` 保存凭据元数据与值，`ms.net.fetch({ credential })` 由 Rust 按 origin 注入请求头，插件后续代码永远拿不到明文。
+  - **集合存储与宿主子输入框**：`ms.store.collection(name)` 提供逐条 JSON 的 `add/update/set/get/remove/list(cursor)/clear`（单集合 ≤1000 条）；`ms.ui.subInput.set/remove/focus` 在插件视图上方渲染二级输入框，键盘事件不冒泡到宿主搜索框。
+  - **类型包与脚手架**：新增 `packages/plugin-types/`（`ms.d.ts` + 生成的 JSON Schema）、`npm run plugin:schema`（`--check` 防漂移）、`npm run plugin:new`（生成可运行插件骨架）、`docs/plugin-api-versioning.md`。
+  - **市场索引 ed25519 验签**：平台对市场索引签名（覆盖除 `integrity` 外整个目录对象），客户端先验签再信索引里的 sha256，验签失败整份拒绝；未签名索引现在会让线上构建直接失败，发布脚本同样拒绝。
+  - **独立窗口隔离形态**：`ms.ui.openWindow` 默认改为 `sandbox` iframe（无 `allow-same-origin` / `allow-forms`）+ `postMessage` 白名单代理，插件页面拿不到宿主 DOM/localStorage/Tauri internals；宿主主题变量显式注入；`isolated:false` / `mode=legacy` 仅作排障回退。
+  - **环境变量与凭据下沉 Rust**：`host-env.json`（DPAPI）取代 localStorage 明文，`plugin-gateway.json` 整份密封；旧值一次性迁移成功后删除旧键，失败保留不丢配置。
+
+### 修复
+
+- **设置/主窗口构建不再依赖顶层 `await`**：环境变量初始化改为 async 启动函数，兼容当前 chrome87/es2020 构建目标。
+
 ## v7.9.41 - 2026-11-21
 
 ### 修复
 
+- **插件前端按 Esc 返回后，焦点自动回到搜索框**：插件界面的输入框会随会话被停靠 /
+  卸载，浏览器只把焦点丢给 `body`，旧实现只关视图、不交回焦点——返回后键盘就是哑的
+  （用户反馈「按 Esc 后输入框没有聚焦」）。现在 `hideTextView()` 在详情视图真正关闭时
+  统一把焦点交回 `#my_search_input`（用 `focus()` 而非 `focusEnd()`，不重置用户已有的
+  光标位置）；有宿主的弹窗（安装确认 / 提示确认 / 环境选择）开着时不抢焦点。
+- **点窗口外收起不再只靠失焦事件**：窗口置顶 + 跳任务栏，一旦 `Focused(false)` 没到达
+  就会一直浮在别的应用上面。根因有两类：① 呼出时被 Windows 前台锁定拒绝（`show()` 了
+  但从未拿到前台焦点，此后再点窗口外不会产生失焦）；② WebView2 在插件界面的焦点元素
+  被关闭/停靠后偶发不再上报窗口失焦。现在补了一条兜底（`src-tauri/src/outside_click.rs`）：
+  常驻的低级鼠标钩子在**左键按下**时只记坐标（纯原子写，回调里不做窗口查询，避免超时被
+  静默卸载），后台线程判定「落点在主窗口矩形外 + 落点窗口不属于本进程」就收起主窗口。
+  点窗口内部（含 WebView 右键菜单）不算点外面；原生「选择文件夹」对话框、设置窗、托盘
+  菜单属于本进程，点它们时不会误收。兜底与失焦隐藏共用同一抑制期（`SUPPRESS_BLUR_UNTIL_MS`）
+  与同一份收起实现（`collapse_and_hide`），不是新的状态门控。
 - **冲突按插件隔离，不再「一个冲突全盘停摆」**：某个插件的分片两边都改过时，只把这个
   插件的那几片挂起（记进 `conflicts`，界面上按插件一行列出「哪一片 / 两侧体积 / 云端时间」），
   其它插件、其它分片照常上传下载并提交，不被牵连；每行可单独「用云端 / 用本机」，

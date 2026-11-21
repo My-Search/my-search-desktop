@@ -256,10 +256,29 @@ export function useSearchState() {
       console.error("[我的搜索] 搜索失败:", e);
       results = [];
     }
-    // 竞态：已有更新的搜索
+
+    // 搜索期结果提供者（P0-2）：并发询问已注册的插件，250ms 硬预算。
+    // 只参与普通文本搜索；附件模式（engine.resultFilter）下不掺入，
+    // 避免「拖了文件却看到网页结果」这种语义混乱。
+    let provided: SearchItem[] = [];
+    if (resultProviders && !engine.resultFilter) {
+      try {
+        provided = await resultProviders(rawKeyword);
+      } catch (e) {
+        // 提供者链路自身已做过异常隔离；这里再兜一层，保证搜索永不因插件失败。
+        console.warn("[我的搜索] 结果提供者失败:", e);
+        provided = [];
+      }
+    }
+
+    // 竞态：已有更新的搜索（引擎与提供者两段 await 之后都要复核）
     if (seq !== searchSeq) return state.results;
 
-    state.results = results || [];
+    // 插件主动提供的结果排在前面（它们是对当前关键词的「直接回答」），
+    // 引擎自身的插件入口 / 订阅项排在后面，保证仍能按关键词打开插件界面。
+    state.results = provided.length
+      ? [...provided.map((item) => ({ item, level: 0 })), ...(results || [])]
+      : results || [];
     state.activeIndex = -1;
     state.mode = state.results.length > 0 ? MODE.SHOW_RESULT : MODE.WAIT_SEARCH;
     afterResultsRendered?.();
@@ -383,6 +402,11 @@ export function useSearchState() {
   // ============== 插件搜索项 ==============
   /** 由 App.vue 注入：合成当前启用插件贡献的搜索项 */
   let pluginItemsProvider: (() => SearchItem[]) | null = null;
+  /**
+   * 搜索期结果提供者（插件侧，P0-2）。每次搜索时在引擎结果之后询问，
+   * **受 250ms 预算约束、失败静默**；未注入（没有登记任何插件）时整条链路短路。
+   */
+  let resultProviders: ((keyword: string) => Promise<SearchItem[]>) | null = null;
   /** 上一次挂载的插件项「指纹」（用于判断是否真的变了） */
   let lastPluginItemsKey = "";
 
@@ -406,6 +430,12 @@ export function useSearchState() {
     pluginItemsProvider = provider;
     engine.extraItemsProvider = provider;
     attachPluginItems();
+  }
+
+  function bindResultProviders(
+    provider: ((keyword: string) => Promise<SearchItem[]>) | null
+  ): void {
+    resultProviders = provider;
   }
 
   /**
@@ -587,6 +617,7 @@ export function useSearchState() {
     bindInputValueGetter,
     bindAfterResultsRendered,
     bindPluginItems,
+    bindResultProviders,
     attachPluginItems,
     // 搜索
     doSearch,

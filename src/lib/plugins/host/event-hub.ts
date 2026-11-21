@@ -12,6 +12,7 @@
 
 import { effectiveTheme, THEME_CHANGED_EVENT } from "../../theme.ts";
 import { isTauri } from "../../tauri-bridge.ts";
+import { clearResultProviders } from "../result-provider.ts";
 
 export interface PluginEventHub<TArg> {
   /** 为指定插件添加监听，返回幂等退订函数 */
@@ -415,6 +416,144 @@ export function clearThemeProvider(pluginId: string): void {
   themeProviders.delete(pluginId);
 }
 
+/* ---------------- 4.5 生命周期（show / hide / enter / dispose） ---------------- */
+
+/** 插件进入参数：告诉插件「这次是怎么被打开/唤醒的」 */
+export interface PluginEnterAction {
+  /** 入口类型：普通文本 / 附件 / 子关键词 / 快捷键动作 / 命令 / 搜索结果项 / 恢复 */
+  type:
+    | "text"
+    | "files"
+    | "folders"
+    | "subKeyword"
+    | "shortcut"
+    | "command"
+    | "result"
+    | "restore";
+  /** 命中的入口标识（searchItem.keyword / command.id / shortcut.action） */
+  code: string;
+  /** 父关键词 */
+  keyword: string;
+  /** 子词 / 附件路径 / 结果项快照等 */
+  payload?: unknown;
+  /** 从哪条路进来 */
+  from: "search" | "hotkey" | "attachment" | "subsearch" | "restore" | "command";
+  at: number;
+}
+
+export type PluginLifecycleKind = "show" | "hide" | "enter" | "dispose";
+
+type LifecycleHandler = (arg?: unknown) => void;
+
+interface LifecycleState {
+  handlers: Record<PluginLifecycleKind, Set<LifecycleHandler>>;
+  /** 当前是否在前台（用于「注册晚于事件」的粘性补发） */
+  visible: boolean;
+  /** 最近一次进入参数（同上） */
+  lastAction: PluginEnterAction | null;
+}
+
+const lifecycleStates = new Map<string, LifecycleState>();
+
+function lifecycleState(pluginId: string): LifecycleState {
+  let st = lifecycleStates.get(pluginId);
+  if (!st) {
+    st = {
+      handlers: { show: new Set(), hide: new Set(), enter: new Set(), dispose: new Set() },
+      visible: false,
+      lastAction: null,
+    };
+    lifecycleStates.set(pluginId, st);
+  }
+  return st;
+}
+
+/**
+ * 注册生命周期处理器，返回幂等退订函数。
+ *
+ * 粘性语义（与 ZTools `onPluginEnter` 的待发缓存同构，但更克制）：
+ *   - `onShow` / `onEnter` 在「当前已经可见」时注册，会异步补发一次——
+ *     插件常常在 `await` 之后才注册，若不补发，首次进入就永远收不到；
+ *   - `onHide` / `onDispose` 不补发：它们描述的是「未来的离开」。
+ */
+export function addLifecycleHandler(
+  pluginId: string,
+  kind: PluginLifecycleKind,
+  handler: LifecycleHandler
+): () => void {
+  if (!pluginId || typeof handler !== "function") return () => {};
+  const st = lifecycleState(pluginId);
+  st.handlers[kind].add(handler);
+  if ((kind === "show" || kind === "enter") && st.visible) {
+    const arg = kind === "enter" ? st.lastAction ?? undefined : undefined;
+    queueMicrotask(() => {
+      if (!st.handlers[kind].has(handler)) return;
+      try {
+        handler(arg);
+      } catch (e) {
+        console.warn(`[插件 ${pluginId}] lifecycle.${kind} 处理器异常:`, e);
+      }
+    });
+  }
+  return () => {
+    st.handlers[kind].delete(handler);
+  };
+}
+
+/** 派发一次生命周期事件（内部对处理器异常做隔离，不影响宿主） */
+export function dispatchLifecycle(
+  pluginId: string,
+  kind: PluginLifecycleKind,
+  arg?: unknown
+): number {
+  if (!pluginId) return 0;
+  // 即使当前没人订阅也要建状态：可见性与最近一次 action 是「晚注册补发」的依据。
+  const st = lifecycleState(pluginId);
+  if (kind === "show") st.visible = true;
+  if (kind === "hide") st.visible = false;
+  if (kind === "enter") st.lastAction = (arg as PluginEnterAction) ?? null;
+  let called = 0;
+  for (const h of [...st.handlers[kind]]) {
+    try {
+      h(arg);
+      called++;
+    } catch (e) {
+      console.warn(`[插件 ${pluginId}] lifecycle.${kind} 处理器异常:`, e);
+    }
+  }
+  return called;
+}
+
+/** 当前是否可见 / 最近一次进入参数（`ms.lifecycle.current()` 用） */
+export function readLifecycleState(pluginId: string): {
+  visible: boolean;
+  action: PluginEnterAction | null;
+} {
+  const st = lifecycleStates.get(pluginId);
+  return { visible: st?.visible ?? false, action: st?.lastAction ?? null };
+}
+
+export function clearLifecycleHandlers(pluginId: string): void {
+  const st = lifecycleStates.get(pluginId);
+  if (st) {
+    st.visible = false;
+    st.lastAction = null;
+  }
+  lifecycleStates.delete(pluginId);
+}
+
+/** 某插件注册的 lifecycle 处理器总数（测试用） */
+export function lifecycleSubscriptionCount(pluginId: string): number {
+  const st = lifecycleStates.get(pluginId);
+  if (!st) return 0;
+  return (
+    st.handlers.show.size +
+    st.handlers.hide.size +
+    st.handlers.enter.size +
+    st.handlers.dispose.size
+  );
+}
+
 /* ---------------- 5. 会话级统一回收入口 ---------------- */
 
 /**
@@ -434,6 +573,9 @@ export function disposePluginHostSession(pluginId: string): void {
   clearShortcutActionHandlers(pluginId);
   clearThemeHandlers(pluginId);
   clearThemeProvider(pluginId);
+  clearLifecycleHandlers(pluginId);
+  // 视图关掉后它的搜索期提供者不能再被调用（回调可能持有已卸载的 DOM）
+  clearResultProviders(pluginId);
 }
 
 /** 供测试检查某插件是否仍有任何残留监听 */
@@ -449,5 +591,6 @@ export function activeSubscriptionCountForPlugin(pluginId: string): number {
     screenshotSavedHub.subscriberPluginCount() +
     clipboardUpdatedHub.subscriberPluginCount() +
     gestureRecordHub.subscriberPluginCount();
+  count += lifecycleSubscriptionCount(pluginId);
   return count;
 }

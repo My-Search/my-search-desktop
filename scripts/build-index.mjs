@@ -56,13 +56,55 @@
  * - 生成后调用宿主的 `parseCatalog` 回验，不通过即失败退出。
  */
 import { readFileSync, existsSync, mkdirSync, writeFileSync, readdirSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, createPrivateKey, sign } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 
+import { catalogSigningPayload } from "../src/lib/plugins/index-signature.ts";
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
+
+/**
+ * 读取索引签名私钥。
+ *
+ * 优先级：
+ *   1. `MARKET_INDEX_PRIVATE_KEY`（32 字节 hex 种子；CI secret 用它）
+ *   2. `MARKET_INDEX_PRIVATE_KEY_FILE` 指向的 JSON（`{keyId, privateKey}`）
+ *   3. 默认 `.secrets/market-index-key.json`（本地开发，已被 .gitignore 忽略）
+ *
+ * 没有密钥时返回 null：**线上构建直接失败**（客户端 fail-closed，不能把未签名索引发出去）；
+ * 只有 `--local` 离线构建允许未签名，仅用于测试/预览。
+ */
+function loadSigningKey() {
+  const hex = process.env.MARKET_INDEX_PRIVATE_KEY?.trim();
+  if (hex) {
+    if (!/^[0-9a-f]{64}$/i.test(hex)) throw new Error("MARKET_INDEX_PRIVATE_KEY 必须是 32 字节 hex");
+    return { keyId: process.env.MARKET_INDEX_KEY_ID?.trim() || "market-2026-01", privateKey: hex.toLowerCase() };
+  }
+  const file = path.resolve(root, process.env.MARKET_INDEX_PRIVATE_KEY_FILE || ".secrets/market-index-key.json");
+  if (!existsSync(file)) return null;
+  const doc = JSON.parse(readFileSync(file, "utf8"));
+  if (!doc.keyId || !/^[0-9a-f]{64}$/i.test(String(doc.privateKey ?? ""))) {
+    throw new Error(`签名私钥文件格式错误：${path.relative(root, file)}`);
+  }
+  return { keyId: String(doc.keyId), privateKey: String(doc.privateKey).toLowerCase() };
+}
+
+/** 对目录对象签名（ed25519）。返回 integrity 字段。 */
+function signCatalog(doc, { keyId, privateKey }) {
+  // ed25519 私钥的 PKCS#8 DER 前缀（RFC 8410）：seed 直接接在后面
+  const pkcs8 = Buffer.concat([
+    Buffer.from("302e020100300506032b657004220420", "hex"),
+    Buffer.from(privateKey, "hex"),
+  ]);
+  const key = createPrivateKey({ key: pkcs8, format: "der", type: "pkcs8" });
+  const signature = sign(null, Buffer.from(catalogSigningPayload(doc), "utf8"), key).toString("hex");
+  return { algorithm: "ed25519", keyId, signature, signedAt: new Date().toISOString() };
+}
+
+const signingKey = loadSigningKey();
 
 /** 市场仓库（官方插件包与索引都放这里） */
 const MARKET_REPO = "My-Search/my-search-plugin-market";
@@ -646,6 +688,26 @@ const dist = {
   baseUrl: BASE_URL,
   plugins: entries,
 };
+
+// ---- 平台签名（客户端先验签，才相信上面的 sha256）----
+if (signingKey) {
+  dist.integrity = signCatalog(dist, signingKey);
+  console.log(`🔏 已签名索引：keyId=${dist.integrity.keyId}  ${dist.integrity.signature.slice(0, 16)}…`);
+} else if (!offline) {
+  // 线上构建（市场仓库 CI / 手工发布）不允许产出未签名索引：
+  // 客户端 fail-closed，发出去等于整条市场链路不可用。宁可让 CI 失败。
+  console.error(
+    "✗ 线上构建缺少索引签名私钥（MARKET_INDEX_PRIVATE_KEY）。\n" +
+      "  客户端会 fail-closed 拒绝未签名索引；请先在构建环境配置该 secret。\n" +
+      "  本地预览可加 `--local <dir>` 走离线构建（允许未签名）。"
+  );
+  process.exit(1);
+} else {
+  console.warn(
+    "⚠ 未找到索引签名私钥（MARKET_INDEX_PRIVATE_KEY / .secrets/market-index-key.json）。\n" +
+      "  本次索引是**未签名**的：仅离线测试 / 本地预览可用，不能发布。"
+  );
+}
 const distPath = path.join(outDir, "index.dist.json");
 writeFileSync(distPath, JSON.stringify(dist, null, 2) + "\n");
 

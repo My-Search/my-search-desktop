@@ -47,7 +47,14 @@ import {
   readPluginThemeProvider,
   type PluginHostContext,
 } from "../../lib/plugins/host.ts";
+import type { PluginSubInputOptions } from "../../lib/plugins/host/core.ts";
 import { pluginIdOf, pluginKeywordOf } from "../../lib/plugins/plugin-items.ts";
+import {
+  PLUGIN_RESULT_ACTION_FLAG,
+  PLUGIN_RESULT_FLAG,
+  PLUGIN_RESULT_ID_FLAG,
+  PLUGIN_RESULT_PAYLOAD_FLAG,
+} from "../../lib/plugins/result-provider.ts";
 import type { PluginRecord } from "../../lib/plugins/registry.ts";
 import {
   pluginDataGet,
@@ -59,6 +66,7 @@ import {
 import { applyThemeOverride, clearThemeOverride } from "../../lib/theme-override.ts";
 import { decideViewClose, decideViewRestore } from "../../lib/plugins/dev-reload.ts";
 import { consumePluginFrontendRestart } from "../../lib/plugins/restart.ts";
+import { dispatchLifecycle, type PluginEnterAction } from "../../lib/plugins/host/event-hub.ts";
 import type { ScriptEnv } from "../../lib/script-runtime.ts";
 import { openViewChannel, type ViewChannel } from "./plugin-channels.ts";
 import { ensurePluginData } from "../../lib/sync/cloud.ts";
@@ -136,6 +144,15 @@ export interface PluginViewMount {
   mode?: "restore" | "remount";
 }
 
+/** 打开插件视图时的来源声明（快捷键 / 命令等非搜索路径用） */
+export interface PluginEnterOrigin {
+  type?: PluginEnterAction["type"];
+  from?: PluginEnterAction["from"];
+  /** 命中的入口标识（快捷键动作名 / 命令 id）；缺省用插件关键词 */
+  code?: string;
+  payload?: unknown;
+}
+
 /** 插件视图宿主依赖的宿主能力（由 App.vue 注入） */
 export interface PluginViewHostOptions {
   /** 取插件记录 */
@@ -190,6 +207,12 @@ interface PluginViewSession {
   api: Record<string, unknown>;
   /** 停靠前保存的滚动位置（display:none 会把滚动位置清零，必须自己记） */
   scrolls: Array<{ el: HTMLElement; top: number; left: number }>;
+  /** 本次进入参数（恢复时把 `from` 改成 restore 重发） */
+  action: PluginEnterAction;
+  /** 宿主子输入框（`ms.ui.subInput`）：与会话同生命周期，停靠时一起搬走 */
+  subInput: HTMLElement | null;
+  /** 子输入框的当前回调（remove 后置空，避免持有插件闭包） */
+  subInputOnChange: ((value: string) => void) | null;
 }
 
 export function usePluginViewHost(opts: PluginViewHostOptions) {
@@ -222,6 +245,52 @@ export function usePluginViewHost(opts: PluginViewHostOptions) {
   /** 子关键词处理器（插件在 view js 里通过 onSubKeyword 注册；返回值 false 表示不消费） */
   const subKeywordHandlers = new Map<string, (message: string) => unknown>();
 
+  /**
+   * 构造「本次进入参数」——宿主持有用户从哪条路进来的全部信息：
+   * 关键词、输入框内容（判断是否处于「父 : 子」）、以及快捷键/命令等外部来源。
+   */
+  function buildEnterAction(
+    item: SearchItem,
+    origin?: PluginEnterOrigin,
+    fromOverride?: PluginEnterAction["from"]
+  ): PluginEnterAction {
+    const input = String(opts.getInputValue() ?? "");
+    // 搜索期提供者返回的结果项：点击后把「是哪一条」原样交回插件，
+    // 由插件自己决定怎么处理（action.type === "result"）。
+    if (item[PLUGIN_RESULT_FLAG] === true) {
+      const resultKeyword = pluginKeywordOf(item) ?? input;
+      return {
+        type: "result",
+        code: String(item[PLUGIN_RESULT_ACTION_FLAG] ?? item[PLUGIN_RESULT_ID_FLAG] ?? ""),
+        keyword: resultKeyword,
+        payload: {
+          id: item[PLUGIN_RESULT_ID_FLAG],
+          keyword: resultKeyword,
+          action: item[PLUGIN_RESULT_ACTION_FLAG],
+          data: item[PLUGIN_RESULT_PAYLOAD_FLAG],
+          item: { title: item.title, desc: item.desc, resource: item.resource },
+        },
+        from: "search",
+        at: Date.now(),
+      };
+    }
+    const subIdx = input.indexOf(" : ");
+    const type: PluginEnterAction["type"] =
+      origin?.type ?? (subIdx >= 0 ? "subKeyword" : "text");
+    const from: PluginEnterAction["from"] =
+      fromOverride ?? origin?.from ?? (type === "subKeyword" ? "subsearch" : "search");
+    return {
+      type,
+      code: origin?.code ?? activeKeyword ?? pluginKeywordOf(item) ?? "",
+      keyword: activeKeyword ?? pluginKeywordOf(item) ?? "",
+      payload:
+        origin?.payload ??
+        (type === "subKeyword" ? input.slice(subIdx + 3).trim() : input || undefined),
+      from,
+      at: Date.now(),
+    };
+  }
+
   /* ==================== 停车场（停靠中的会话放这里） ==================== */
 
   /**
@@ -245,7 +314,10 @@ export function usePluginViewHost(opts: PluginViewHostOptions) {
 
   /** 把会话载体的 DOM 停靠到停车场（不销毁任何东西） */
   function detachToParking(session: PluginViewSession): void {
-    parkingLot().appendChild(session.channel.container);
+    const lot = parkingLot();
+    // 子输入框与载体是兄弟节点，必须一起搬，否则恢复时会「框在人不在」/相反
+    if (session.subInput) lot.appendChild(session.subInput);
+    lot.appendChild(session.channel.container);
   }
 
   /* ==================== 滚动位置：保存 / 还原 ==================== */
@@ -293,7 +365,13 @@ export function usePluginViewHost(opts: PluginViewHostOptions) {
   function attachToView(session: PluginViewSession): boolean {
     const host = opts.container.value;
     if (!host) return false;
+    if (session.subInput && session.subInput.parentElement !== host) {
+      host.appendChild(session.subInput);
+    }
     if (session.channel.container.parentElement !== host) host.appendChild(session.channel.container);
+    if (session.subInput) {
+      host.classList.toggle("has-sub-input", session.subInput.style.display !== "none");
+    }
     session.channel.setActive(true);
     // 供宿主样式（如「只在显示插件视图时」的规则）区分有没有插件在前台
     host.classList.add("has-plugin-session");
@@ -301,7 +379,7 @@ export function usePluginViewHost(opts: PluginViewHostOptions) {
   }
 
   /** 恢复一个保活中的会话（不重读文件、不重跑脚本） */
-  function restoreSession(session: PluginViewSession): PluginViewMount {
+  function restoreSession(session: PluginViewSession, action?: PluginEnterAction): PluginViewMount {
     sessionActive.value = true;
     activePluginId.value = session.pluginId;
     if (!attachToView(session)) {
@@ -321,6 +399,15 @@ export function usePluginViewHost(opts: PluginViewHostOptions) {
     // （用户常见路径：在结果列表里重新用「插件 : 问题」打开，期望这个问题被收到）。
     // 没有分隔符时不动作，因此不会凭空重复转发。
     pushCurrentSubKeyword();
+    if (action) session.action = action;
+    // 保活会话再次回到前台：发 onShow + onEnter（from=restore）。
+    // 脚本不会重跑，这里的事件就是插件「刷新数据/恢复动画」的唯一信号。
+    dispatchLifecycle(session.pluginId, "show");
+    dispatchLifecycle(session.pluginId, "enter", {
+      ...session.action,
+      from: "restore",
+      at: Date.now(),
+    });
     return { ok: true, mode: "restore" };
   }
 
@@ -329,6 +416,8 @@ export function usePluginViewHost(opts: PluginViewHostOptions) {
     session.scrolls = captureScrolls(session.channel.container);
     session.channel.setActive(false);
     detachToParking(session);
+    // 会话仍然活着，只是不可见：先通知插件（停动画/暂停轮询），再清宿主状态。
+    dispatchLifecycle(session.pluginId, "hide");
     if (activePluginId.value === session.pluginId) {
       // 摘掉「有前台会话」的标记：容器已空（样式钩子不该还亮着）
       opts.container.value?.classList.remove("has-plugin-session");
@@ -356,6 +445,9 @@ export function usePluginViewHost(opts: PluginViewHostOptions) {
     const session = sessions.get(pluginId);
     if (!session) return false;
     sessions.delete(pluginId);
+    // 0) 会话真正销毁前的最后一次通知：插件可以在这里停定时器/落盘未保存状态。
+    //    必须在 `disposePluginHostSession` 之前（它会把 lifecycle 处理器一并清空）。
+    dispatchLifecycle(pluginId, "dispose", { reason });
     // 0) 会话若还在详情视图里，先摘掉「有前台会话」的标记
     const viewHost = opts.container.value;
     if (viewHost && session.channel.container.parentElement === viewHost) {
@@ -384,6 +476,10 @@ export function usePluginViewHost(opts: PluginViewHostOptions) {
     }
     // 2) 会话通道：连同 DOM 载体一起从文档里删除
     try {
+      session.subInput?.remove();
+      session.subInput = null;
+      session.subInputOnChange = null;
+      viewHost?.classList.remove("has-sub-input");
       session.channel.dispose();
     } catch (e) {
       /* ignore */
@@ -500,7 +596,7 @@ export function usePluginViewHost(opts: PluginViewHostOptions) {
    * @param item 插件贡献的数据项（带 _pluginId）
    * @returns 是否成功打开（`mode` 区分「恢复保活会话」与「重新挂载」）
    */
-  async function open(item: SearchItem): Promise<PluginViewMount> {
+  async function open(item: SearchItem, origin?: PluginEnterOrigin): Promise<PluginViewMount> {
     const pluginId = pluginIdOf(item);
     if (!pluginId) return { ok: false, error: "不是插件数据项" };
     const record = opts.getRecord(pluginId);
@@ -526,6 +622,9 @@ export function usePluginViewHost(opts: PluginViewHostOptions) {
     activeKeyword = pluginKeywordOf(item);
     viewError.value = null;
     pendingPermission.value = null;
+
+    // 本次进入参数：构造一次，挂载与恢复两条路径共用（恢复时只把 from 改成 restore）。
+    const action = buildEnterAction(item, origin);
 
     // ---- 权限预检：ui.inlay ----
     if (!hasPerm(record, "ui.inlay")) {
@@ -566,14 +665,14 @@ export function usePluginViewHost(opts: PluginViewHostOptions) {
       sessionScript: existing?.script ?? null,
     });
     if (existing && decision.action === "restore") {
-      return restoreSession(existing);
+      return restoreSession(existing, action);
     }
     // 入口变了（或残留的半死会话）：先清掉再重新挂载
     if (existing) release(pluginId, decision.reason);
 
     sessionActive.value = true;
     try {
-      await mountSession(record, detail.entry, detail.script);
+      await mountSession(record, detail.entry, detail.script, action);
       opts.fitHeight();
       opts.flushHeight?.();
       return { ok: true, mode: "remount" };
@@ -602,7 +701,8 @@ export function usePluginViewHost(opts: PluginViewHostOptions) {
   async function mountSession(
     record: PluginRecord,
     entry: string,
-    declaredScript?: string
+    declaredScript?: string,
+    action?: PluginEnterAction
   ): Promise<void> {
     const host = opts.container.value;
     if (!host) throw new Error("视图容器不存在");
@@ -664,6 +764,15 @@ export function usePluginViewHost(opts: PluginViewHostOptions) {
         channel,
         api: {},
         scrolls: [],
+        subInput: null,
+        subInputOnChange: null,
+        action: action ?? {
+          type: "text",
+          code: "",
+          keyword: "",
+          from: "search",
+          at: Date.now(),
+        },
       };
 
       // 5) 注入宿主 API 并执行（30ms 等 HTML 渲染，与老脚本项一致）
@@ -685,6 +794,7 @@ export function usePluginViewHost(opts: PluginViewHostOptions) {
             host: sessionHost,
             keyword: activeKeyword ?? "",
             inputValue: opts.getInputValue(),
+            action: session.action,
             onSubKeyword: (fn) => subKeywordHandlers.set(record.id, fn),
           });
           if (!result.ok) throw new Error(result.error ?? "插件脚本运行出错");
@@ -697,6 +807,10 @@ export function usePluginViewHost(opts: PluginViewHostOptions) {
       applySessionTheme(record.id);
       // 自动转发一次子关键词（对齐老脚本项的挂载后自动转发；恢复路径不重复转发）
       pushCurrentSubKeyword();
+      // 全新挂载：脚本已经跑完（处理器已注册或即将注册，粘性补发兜底），
+      // 发 onShow + onEnter。
+      dispatchLifecycle(record.id, "show");
+      dispatchLifecycle(record.id, "enter", session.action);
     } catch (e) {
       // 半途失败：把这次开出来的通道（含 DOM）收干净，不留幽灵节点
       try {
@@ -918,6 +1032,86 @@ export function usePluginViewHost(opts: PluginViewHostOptions) {
     return session.channel.container.parentElement?.id === PLUGIN_PARKING_ID;
   }
 
+  /* ==================== 宿主子输入框（ms.ui.subInput） ==================== */
+
+  /**
+   * 创建 / 更新 / 移除位于插件视图上方的宿主输入框。
+   *
+   * 为什么由宿主渲染而不是插件自己画：搜索类插件（文件、剪贴板、待办）都需要
+   * 「在当前结果里再筛一次」，自己画一个输入框既难和宿主主题对齐，又会在
+   * 失焦/快捷键上与宿主搜索框抢键盘。宿主渲染 = 复用同一套键盘纪律。
+   *
+   * 停靠（最小化）时输入框与插件载体一起搬进停车场，恢复时一起搬回来；
+   * 会话销毁时随会话删除。
+   */
+  function subInput(
+    pluginId: string,
+    action: "set" | "remove" | "focus",
+    options: PluginSubInputOptions = {}
+  ): boolean {
+    const session = sessions.get(pluginId);
+    if (!session) return false;
+    const host = opts.container.value;
+    const input = (): HTMLInputElement | null =>
+      (session.subInput?.querySelector(".ms-sub-input-field") as HTMLInputElement | null) ?? null;
+
+    if (action === "remove") {
+      session.subInput?.remove();
+      session.subInput = null;
+      session.subInputOnChange = null;
+      if (host && !sessions.get(activePluginId.value ?? "")?.subInput) {
+        host.classList.remove("has-sub-input");
+      }
+      return true;
+    }
+    if (action === "focus") {
+      const el = input();
+      if (!el) return false;
+      el.focus();
+      return true;
+    }
+
+    let wrap = session.subInput;
+    if (!wrap) {
+      wrap = document.createElement("div");
+      wrap.className = "ms-sub-input";
+      const field = document.createElement("input");
+      field.type = "text";
+      field.className = "ms-sub-input-field";
+      field.autocomplete = "off";
+      field.spellcheck = false;
+      // 键盘纪律：子输入框里的按键不再冒泡给宿主的全局快捷键（否则输入空格
+      // 会触发搜索、方向键会移动结果选中项）。
+      field.addEventListener("keydown", (e) => {
+        e.stopPropagation();
+        if (e.key === "Escape") {
+          e.preventDefault();
+          field.blur();
+        }
+      });
+      field.addEventListener("input", () => {
+        session.subInputOnChange?.(field.value);
+      });
+      wrap.appendChild(field);
+      session.subInput = wrap;
+      const carrier = session.channel.container;
+      carrier.parentElement?.insertBefore(wrap, carrier);
+    }
+
+    const field = input();
+    if (!field) return false;
+    if (options.placeholder != null) field.placeholder = String(options.placeholder);
+    // 只有显式传 value 才覆盖：改 placeholder 不应清掉用户正在输入的内容
+    if (options.value != null) field.value = String(options.value);
+    if (typeof options.onChange === "function") session.subInputOnChange = options.onChange;
+    wrap.style.display = options.visible === false ? "none" : "";
+    if (host && wrap.parentElement === host) {
+      host.classList.toggle("has-sub-input", options.visible !== false);
+    }
+    if (options.focus === true) field.focus();
+    return true;
+  }
+
   /**
    * 强制卸载全部会话（插件被禁用/卸载、开发热重载、应用退出时调用）。
    *
@@ -1115,6 +1309,8 @@ export function usePluginViewHost(opts: PluginViewHostOptions) {
     sessionCount,
     hasSession,
     isParked,
+    // 宿主子输入框（ms.ui.subInput 的下游）
+    subInput,
     // 插件主题（呼出窗口联动）：applySessionTheme 供宿主主动重算，
     // refreshActiveTheme 是 ms.ui.applyTheme 的下游（App.vue 注入 ctx 时引用）。
     applySessionTheme,
@@ -1159,6 +1355,8 @@ export function runPluginEntry(
     host: HTMLElement;
     keyword: string;
     inputValue: string;
+    /** 本次进入参数（第 11 个注入参数；老脚本忽略多余参数，行为不变） */
+    action?: PluginEnterAction;
     onSubKeyword: (fn: (msg: string) => unknown) => void;
   }
 ): { ok: boolean; error?: string } {
@@ -1174,6 +1372,7 @@ export function runPluginEntry(
       "md2html",
       "openExternal",
       "MS_SCRIPT_ENV",
+      "action",
       `"use strict";\n${code}\n`
     );
     fn(
@@ -1193,7 +1392,8 @@ export function runPluginEntry(
       md2html,
       openExternal,
       // 兼容老脚本项：局部 env 也挂一个同名变量（不是全局单例）
-      scope.env
+      scope.env,
+      scope.action ?? null
     );
     return { ok: true };
   } catch (e) {

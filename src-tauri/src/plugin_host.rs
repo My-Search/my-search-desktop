@@ -47,6 +47,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 
+use crate::credential_store;
+
 /// 插件目录名（应用数据目录下）
 const PLUGINS_DIR: &str = "plugins";
 /// 插件私有数据目录名（后端进程的数据落这里，前端插件走 localStorage）
@@ -235,8 +237,9 @@ pub struct GatewaySpec {
     /// 为什么放在网关里而不是让插件自己存：值由宿主集中维护，Rust 只在
     /// `spawn_backend` 时把它读进进程环境——这样密钥不经过插件 JS 上下文，
     /// 也不会出现在插件可读的 DOM 里（inlay 不是沙箱）。
-    /// 注意：快照会把它明文落盘（plugin-gateway.json），这是「开机自启的插件
-    /// 也能拿到变量」的必要代价。
+    /// 注意：快照会包含注入值，因此**整份快照**由 `credential_store::write_sealed_file`
+    /// 落盘（Windows DPAPI；非 Windows 明确 `cipher:"plain"` + 0600），
+    /// 不再以明文躺在 `plugin-gateway.json`。
     #[serde(default)]
     pub env: HashMap<String, String>,
     /// 该插件是否订阅后台剪贴板变更流（需同时具备 `clipboard.read` 授权才生效）。
@@ -269,10 +272,9 @@ fn save_gateway_snapshot(app: &AppHandle) {
     let Ok(text) = serde_json::to_string_pretty(&list) else {
         return;
     };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Err(e) = std::fs::write(&path, text) {
+    // 快照可能含注入后台进程的 env 值：整份走平台密封（Windows DPAPI），
+    // 不再以明文躺在 plugin-gateway.json。
+    if let Err(e) = credential_store::write_sealed_file(&path, &text) {
         eprintln!("[插件] 网关快照写入失败: {e}");
     }
 }
@@ -282,8 +284,13 @@ pub fn load_gateway_snapshot(app: &AppHandle) {
     let Some(path) = gateway_snapshot_path(app) else {
         return;
     };
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return;
+    let text = match credential_store::read_sealed_file(&path) {
+        Ok(Some(text)) => text,
+        Ok(None) => return,
+        Err(e) => {
+            eprintln!("[插件] 网关快照读取失败，忽略（下次同步会重建）: {e}");
+            return;
+        }
     };
     let Ok(list) = serde_json::from_str::<Vec<GatewaySpec>>(&text) else {
         eprintln!("[插件] 网关快照解析失败，忽略（下次同步会重建）");
@@ -332,6 +339,44 @@ pub(crate) fn require_grant(plugin_id: &str, base: &str) -> Result<GatewaySpec, 
     }
     if !has_base_permission(&spec, base) {
         return Err(err(format!("插件「{plugin_id}」缺少权限: {base}")));
+    }
+    Ok(spec)
+}
+
+/// 带 scope 的授权判定：只认「同 base + scope 完全相等」或 `scope="*"`。
+///
+/// 密钥类能力必须用本函数而不是 `has_base_permission`：`secret.read` 的语义是
+/// 「读这一个名字的密钥」，拿 `secret.read:OPENAI` 去读 `WEBDAV` 必须被拒绝。
+pub(crate) fn has_scoped_grant(spec: &GatewaySpec, base: &str, scope: &str) -> bool {
+    spec.grants.iter().any(|g| {
+        let mut it = g.splitn(2, ':');
+        let gb = it.next().unwrap_or("");
+        let gs = it.next();
+        gb == base
+            && match gs {
+                Some("*") => true,
+                Some(s) => s == scope,
+                None => false,
+            }
+    })
+}
+
+/// 统一网关守卫（带 scope）：插件已注册、启用，且持有该 scope 的授权。
+pub(crate) fn require_scoped_grant(
+    plugin_id: &str,
+    base: &str,
+    scope: &str,
+) -> Result<GatewaySpec, String> {
+    validate_plugin_id(plugin_id)?;
+    let spec = gateway_get(plugin_id)
+        .ok_or_else(|| err(format!("插件「{plugin_id}」未注册到网关（请先同步注册表）")))?;
+    if !spec.enabled {
+        return Err(err(format!("插件「{plugin_id}」已禁用")));
+    }
+    if !has_scoped_grant(&spec, base, scope) {
+        return Err(err(format!(
+            "插件「{plugin_id}」缺少权限: {base}:{scope}"
+        )));
     }
     Ok(spec)
 }
@@ -1362,6 +1407,425 @@ pub fn plugin_storage_delete(
     Ok(true)
 }
 
+// ===================== 集合存储（store.collection，P1-4） =====================
+//
+// `ms.store.collection(name)` 是给「一条一条记录」用的最小文档集合：
+// 每条记录一个文件（`plugin-data/<id>/collections/<name>/<itemId>.json`），
+// 因此增删单条不需要重写整个大数组（旧做法 `writeJson` 整表回写，
+// 记录一多就变成 O(n) 写放大，还容易因并发写丢数据）。
+//
+// 上限：单集合 1000 条、单条 64MB（沿用 MAX_FILE_BYTES）。超限即拒绝，
+// 不做「静默丢弃最旧」——丢数据比报错更难排查。
+
+const COLLECTIONS_DIR: &str = "collections";
+const MAX_COLLECTION_ITEMS: usize = 1000;
+
+fn validate_collection_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.len() > 64 {
+        return Err(err("集合名非法（1-64 字）"));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+    {
+        return Err(err("集合名含非法字符（仅字母数字 . _ -）"));
+    }
+    Ok(())
+}
+
+fn validate_item_id(id: &str) -> Result<(), String> {
+    if id.is_empty() || id.len() > 128 {
+        return Err(err("记录 id 非法（1-128 字）"));
+    }
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+    {
+        return Err(err("记录 id 含非法字符（仅字母数字 . _ -）"));
+    }
+    Ok(())
+}
+
+fn collection_dir(app: &AppHandle, plugin_id: &str, collection: &str) -> Result<PathBuf, String> {
+    validate_collection_name(collection)?;
+    let dir = plugin_data_dir(app, plugin_id)?
+        .join(COLLECTIONS_DIR)
+        .join(collection);
+    std::fs::create_dir_all(&dir).map_err(|e| err(format!("创建集合目录失败: {e}")))?;
+    Ok(dir)
+}
+
+fn collection_item_path(
+    app: &AppHandle,
+    plugin_id: &str,
+    collection: &str,
+    id: &str,
+) -> Result<PathBuf, String> {
+    validate_item_id(id)?;
+    Ok(collection_dir(app, plugin_id, collection)?.join(format!("{id}.json")))
+}
+
+fn collection_item_count(dir: &Path) -> usize {
+    std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// 写入一条记录。`mode`：
+/// - `add`：id 必须不存在（冲突报错，避免静默覆盖别人的记录）；
+/// - `update`：id 必须已存在（不存在返回 false，不偷偷创建）；
+/// - `set`：存在则覆盖、不存在则创建（导入/迁移用）。
+#[tauri::command]
+pub fn plugin_collection_put(
+    app: AppHandle,
+    plugin_id: String,
+    collection: String,
+    id: String,
+    content: String,
+    mode: String,
+) -> Result<bool, String> {
+    require_grant(&plugin_id, "store")?;
+    if content.len() as u64 > MAX_FILE_BYTES {
+        return Err(err("单条记录过大（上限 64MB）"));
+    }
+    let _: Value = serde_json::from_str(&content)
+        .map_err(|e| err(format!("集合记录不是合法 JSON: {e}")))?;
+    let path = collection_item_path(&app, &plugin_id, &collection, &id)?;
+    let exists = path.exists();
+    match mode.as_str() {
+        "add" if exists => return Err(err(format!("记录已存在: {id}"))),
+        "update" if !exists => return Ok(false),
+        "add" | "update" | "set" => {}
+        other => return Err(err(format!("未知写入模式: {other}"))),
+    }
+    if !exists {
+        let dir = collection_dir(&app, &plugin_id, &collection)?;
+        if collection_item_count(&dir) >= MAX_COLLECTION_ITEMS {
+            return Err(err(format!(
+                "集合「{collection}」已达上限（{MAX_COLLECTION_ITEMS} 条）"
+            )));
+        }
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, content.as_bytes()).map_err(|e| err(format!("写入临时记录失败: {e}")))?;
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        let _ = std::fs::write(&path, content.as_bytes())
+            .map_err(|_| err(format!("落盘集合记录失败: {e}")))?;
+        let _ = std::fs::remove_file(&tmp);
+    }
+    let _ = app.emit(
+        EVENT_PLUGIN_DATA_CHANGED,
+        json!({
+            "pluginId": plugin_id,
+            "key": format!("collection:{collection}:{id}"),
+            "removed": false
+        }),
+    );
+    // update 成功 = 原本存在；add/set 成功 = 本次新建（set 也可能覆盖）
+    Ok(if mode == "update" { true } else { !exists })
+}
+
+/// 读取一条记录（不存在返回 null）。
+#[tauri::command]
+pub fn plugin_collection_get(
+    app: AppHandle,
+    plugin_id: String,
+    collection: String,
+    id: String,
+) -> Result<Option<String>, String> {
+    require_grant(&plugin_id, "store")?;
+    let path = collection_item_path(&app, &plugin_id, &collection, &id)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let meta = std::fs::metadata(&path).map_err(|e| err(format!("读取记录元数据失败: {e}")))?;
+    if meta.len() > MAX_FILE_BYTES {
+        return Err(err("记录超出上限（64MB）"));
+    }
+    std::fs::read_to_string(&path)
+        .map(Some)
+        .map_err(|e| err(format!("读取集合记录失败: {e}")))
+}
+
+/// 删除一条记录（返回是否真的删掉了）。
+#[tauri::command]
+pub fn plugin_collection_delete(
+    app: AppHandle,
+    plugin_id: String,
+    collection: String,
+    id: String,
+) -> Result<bool, String> {
+    require_grant(&plugin_id, "store")?;
+    let path = collection_item_path(&app, &plugin_id, &collection, &id)?;
+    if !path.exists() {
+        return Ok(false);
+    }
+    std::fs::remove_file(&path).map_err(|e| err(format!("删除集合记录失败: {e}")))?;
+    let _ = app.emit(
+        EVENT_PLUGIN_DATA_CHANGED,
+        json!({
+            "pluginId": plugin_id,
+            "key": format!("collection:{collection}:{id}"),
+            "removed": true
+        }),
+    );
+    Ok(true)
+}
+
+/// 清空集合（返回删除条数）。只删本项目录下的 `.json`，不动别的集合。
+#[tauri::command]
+pub fn plugin_collection_clear(
+    app: AppHandle,
+    plugin_id: String,
+    collection: String,
+) -> Result<u32, String> {
+    require_grant(&plugin_id, "store")?;
+    let dir = collection_dir(&app, &plugin_id, &collection)?;
+    let mut removed = 0u32;
+    for entry in std::fs::read_dir(&dir)
+        .map_err(|e| err(format!("读取集合目录失败: {e}")))?
+        .flatten()
+    {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
+/// 分页列出记录（按 id 字典序，cursor 为上一页最后一条 id）。
+#[tauri::command]
+pub fn plugin_collection_list(
+    app: AppHandle,
+    plugin_id: String,
+    collection: String,
+    prefix: Option<String>,
+    limit: Option<u32>,
+    cursor: Option<String>,
+) -> Result<Value, String> {
+    require_grant(&plugin_id, "store")?;
+    let dir = collection_dir(&app, &plugin_id, &collection)?;
+    let limit = limit.unwrap_or(50).clamp(1, 200) as usize;
+    let prefix = prefix.unwrap_or_default();
+    let cursor = cursor.unwrap_or_default();
+
+    let mut ids: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(&dir)
+        .map_err(|e| err(format!("读取集合目录失败: {e}")))?
+        .flatten()
+    {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            if stem.starts_with(&prefix) && (cursor.is_empty() || stem > cursor.as_str()) {
+                ids.push(stem.to_string());
+            }
+        }
+    }
+    ids.sort();
+
+    let has_more = ids.len() > limit;
+    let page: Vec<String> = ids.into_iter().take(limit).collect();
+    let mut items = Vec::with_capacity(page.len());
+    for id in &page {
+        let path = dir.join(format!("{id}.json"));
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue; // 半截/损坏的单条不影响整页
+        };
+        items.push(json!({ "id": id, "data": text }));
+    }
+    let next_cursor = if has_more {
+        page.last().cloned().unwrap_or_default()
+    } else {
+        String::new()
+    };
+    Ok(json!({ "items": items, "nextCursor": next_cursor, "hasMore": has_more }))
+}
+
+// ===================== 插件密钥（secret.read / secret.write，DPAPI 保护） =====================
+
+/// 读取插件自己命名空间下的一个密钥。**值只经 IPC 返回给该插件的前端/后端**，
+/// 不进入 localStorage、不写日志。
+#[tauri::command]
+pub fn plugin_secret_get(
+    app: AppHandle,
+    plugin_id: String,
+    name: String,
+) -> Result<Option<String>, String> {
+    require_scoped_grant(&plugin_id, "secret.read", &name)?;
+    credential_store::read_plugin_secret(&app, &plugin_id, &name)
+}
+
+/// 写入（覆盖）一个密钥；空值等同删除（避免出现「已设置但为空」的歧义）。
+#[tauri::command]
+pub fn plugin_secret_set(
+    app: AppHandle,
+    plugin_id: String,
+    name: String,
+    value: String,
+) -> Result<bool, String> {
+    require_scoped_grant(&plugin_id, "secret.write", &name)?;
+    if value.is_empty() {
+        return credential_store::delete_plugin_secret(&app, &plugin_id, &name);
+    }
+    credential_store::write_plugin_secret(&app, &plugin_id, &name, &value)?;
+    Ok(true)
+}
+
+/// 删除一个密钥（返回是否真的删掉了）。
+#[tauri::command]
+pub fn plugin_secret_delete(
+    app: AppHandle,
+    plugin_id: String,
+    name: String,
+) -> Result<bool, String> {
+    require_scoped_grant(&plugin_id, "secret.write", &name)?;
+    credential_store::delete_plugin_secret(&app, &plugin_id, &name)
+}
+
+/// 列出该插件已保存的密钥**名字**（不含值）：面板/插件自查用。
+#[tauri::command]
+pub fn plugin_secret_list(app: AppHandle, plugin_id: String) -> Result<Vec<String>, String> {
+    require_grant(&plugin_id, "secret.read")?;
+    let mut names: Vec<String> = credential_store::load_plugin_secrets(&app, &plugin_id)
+        .keys()
+        .cloned()
+        .collect();
+    names.sort();
+    Ok(names)
+}
+
+/// 读取「设置 → 环境变量」的整份配置（值已由 DPAPI 保护）。
+///
+/// 只有宿主自己的设置界面调用；不对插件网关暴露（插件只能拿到被授权注入
+/// 到它后台进程的那几个变量）。
+#[tauri::command]
+pub fn host_env_load(app: AppHandle) -> Result<Option<Value>, String> {
+    Ok(credential_store::load_host_env(&app))
+}
+
+/// 覆盖保存整份环境变量配置（前端提交的是「全量列表」，天然幂等）。
+#[tauri::command]
+pub fn host_env_save(app: AppHandle, vars: Value) -> Result<(), String> {
+    credential_store::save_host_env(&app, &vars)
+}
+
+/// 规范化 origin（`scheme://host[:port]`，小写、无尾斜杠、无用户信息）。
+fn normalize_origin(raw: &str) -> Result<String, String> {
+    let (scheme, rest) = raw
+        .split_once("://")
+        .ok_or_else(|| "origin 必须是 http(s) 地址".to_string())?;
+    if scheme != "http" && scheme != "https" {
+        return Err("origin 只支持 http / https".into());
+    }
+    let authority = rest.split('/').next().unwrap_or("");
+    if authority.is_empty() || authority.contains('@') || authority.contains(' ') {
+        return Err("origin 非法".into());
+    }
+    if !authority
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "-._:[]".contains(c))
+    {
+        return Err("origin 含非法字符".into());
+    }
+    Ok(format!("{scheme}://{}", authority.to_ascii_lowercase()))
+}
+
+/// 该插件是否获授了覆盖此 origin 的 `net.fetch` scope。
+fn net_scope_covers(spec: &GatewaySpec, origin: &str) -> bool {
+    let probe = format!("{origin}/");
+    spec.grants
+        .iter()
+        .filter(|g| g.split(':').next() == Some("net.fetch"))
+        .any(|g| scope_allows(g, &probe))
+}
+
+// ===================== 插件网络凭据（P2-3） =====================
+
+/// 保存一条网络凭据。值只进 Rust（DPAPI），前端/插件之后只能按名字引用。
+#[tauri::command]
+pub fn plugin_net_credential_set(
+    app: AppHandle,
+    plugin_id: String,
+    name: String,
+    value: String,
+    scheme: String,
+    origin: String,
+    header: Option<String>,
+    username: Option<String>,
+) -> Result<bool, String> {
+    let spec = require_grant(&plugin_id, "net.fetch")?;
+    let origin = normalize_origin(&origin)?;
+    if !net_scope_covers(&spec, &origin) {
+        return Err(err(format!(
+            "插件未获授权访问 {origin}，不能为它保存凭据（需 net.fetch:{origin}/*）"
+        )));
+    }
+    if scheme != "bearer" && scheme != "basic" && scheme != "header" {
+        return Err("scheme 只支持 bearer / basic / header".into());
+    }
+    if scheme == "header" && header.as_deref().unwrap_or("").is_empty() {
+        return Err("header 型凭据必须给出 header 名".into());
+    }
+    credential_store::write_net_credential(
+        &app,
+        &plugin_id,
+        &name,
+        credential_store::NetCredential {
+            origin,
+            scheme,
+            header,
+            username,
+            value,
+        },
+    )
+}
+
+/// 列出该插件保存的凭据**元数据**（名字 / origin / scheme），不含值。
+#[tauri::command]
+pub fn plugin_net_credential_list(app: AppHandle, plugin_id: String) -> Result<Vec<Value>, String> {
+    require_grant(&plugin_id, "net.fetch")?;
+    let entries = credential_store::load_net_credentials(&app, &plugin_id);
+    let mut out: Vec<Value> = entries
+        .into_iter()
+        .map(|(name, c)| {
+            json!({
+                "name": name,
+                "origin": c.origin,
+                "scheme": c.scheme,
+                "header": c.header,
+                "username": c.username,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        a.get("name")
+            .and_then(|v| v.as_str())
+            .cmp(&b.get("name").and_then(|v| v.as_str()))
+    });
+    Ok(out)
+}
+
+#[tauri::command]
+pub fn plugin_net_credential_delete(
+    app: AppHandle,
+    plugin_id: String,
+    name: String,
+) -> Result<bool, String> {
+    require_grant(&plugin_id, "net.fetch")?;
+    credential_store::delete_net_credential(&app, &plugin_id, &name)
+}
+
 // ===================== 通用插件独立窗口原语（ui.window 权限） =====================
 
 /// 计算稳定、仅含合法 label 字符的窗口标识：`plugin-win-<插件哈希>-<入口哈希>`。
@@ -1404,13 +1868,20 @@ pub async fn plugin_open_window(
     width: Option<f64>,
     height: Option<f64>,
     always_on_top: Option<bool>,
+    isolated: Option<bool>,
 ) -> Result<String, String> {
     require_grant(&plugin_id, "ui.window")?;
     let clean_entry = entry.trim().replace('\\', "/");
     // 确认目标 HTML 确实在插件目录内存在
     let _ = resolve_plugin_file(&app, &plugin_id, &clean_entry)?;
 
-    let label = plugin_window_label(&plugin_id, &clean_entry);
+    // 隔离与旧形态用不同 label：同一入口切形态时不会复用到错误上下文的窗口
+    let isolated = isolated.unwrap_or(true);
+    let label = if isolated {
+        plugin_window_label(&plugin_id, &clean_entry)
+    } else {
+        format!("{}-legacy", plugin_window_label(&plugin_id, &clean_entry))
+    };
     if let Some(existing) = app.get_webview_window(&label) {
         let _ = existing.show();
         let _ = existing.set_focus();
@@ -1440,7 +1911,11 @@ pub async fn plugin_open_window(
     let encoded_id = urlencoding_simple(&plugin_id);
     let encoded_entry = urlencoding_simple(&clean_entry);
     let url = tauri::WebviewUrl::App(
-        format!("plugin-window.html?pluginId={encoded_id}&entry={encoded_entry}").into(),
+        format!(
+            "plugin-window.html?pluginId={encoded_id}&entry={encoded_entry}{}",
+            if isolated { "" } else { "&mode=legacy" }
+        )
+        .into(),
     );
 
     tauri::WebviewWindowBuilder::new(&app, &label, url)
@@ -1483,6 +1958,7 @@ fn urlencoding_simple(s: &str) -> String {
 /// - `timeoutSecs`：超时（默认 30s，上限 300s）。
 #[tauri::command]
 pub async fn plugin_net_fetch(
+    app: AppHandle,
     plugin_id: String,
     url: String,
     method: String,
@@ -1492,6 +1968,7 @@ pub async fn plugin_net_fetch(
     response_type: Option<String>,
     max_bytes: Option<u64>,
     timeout_secs: Option<u64>,
+    credential: Option<String>,
 ) -> Result<crate::PluginHttpResponse, String> {
     let spec = gateway_get(&plugin_id).ok_or_else(|| err("插件未注册到网关"))?;
     if !spec.enabled {
@@ -1505,6 +1982,23 @@ pub async fn plugin_net_fetch(
     if !allowed {
         return Err(err(format!("插件未获授权访问该地址: {url}")));
     }
+
+    // P2-3：凭据由 Rust 注入，插件只给名字；且凭据绑定 origin，不能被带去别处
+    let mut headers = headers;
+    if let Some(name) = credential.filter(|n| !n.is_empty()) {
+        let target_origin = normalize_origin(&url)?;
+        let cred = credential_store::resolve_net_credential(&app, &plugin_id, &name)?;
+        if cred.origin != target_origin {
+            return Err(err(format!(
+                "凭据 {name} 只允许发往 {}，当前地址是 {target_origin}",
+                cred.origin
+            )));
+        }
+        let (header, value) = credential_store::credential_header(&cred)?;
+        headers.retain(|k, _| !k.eq_ignore_ascii_case(&header));
+        headers.insert(header, value);
+    }
+
     crate::http_request_for_plugin(
         method,
         url,

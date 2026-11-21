@@ -6,9 +6,11 @@
  *      用户在安装确认弹窗或「设置 → 插件」详情中的开关选择拥有最高优先级。
  *   2. **零空转开销**：当注册表里没有任何 `market` / `builtin` 来源插件开启 `autoUpdate` 时，
  *      定时与呼出检查直接短路返回，**不发起任何网络请求**。
- *   3. **授权即全静默升级**：只要某插件已开启自动更新（`isPluginAutoUpdateEnabled` 为真），
- *      检测到兼容新版本时无论新版本声明了哪些权限，一律在后台静默下载、校验 SHA-256、
- *      授予新清单声明权限并替换落盘（同时保留用户的启用/禁用、自启策略、关闭行为、界面主题等偏好）。
+ *   3. **授权即静默升级 + 高危权限例外**：某插件已开启自动更新（`isPluginAutoUpdateEnabled`
+ *      为真）时，普通新版本在后台静默下载、校验 SHA-256、授予新清单声明权限并替换落盘
+ *      （保留用户的启用/禁用、自启策略、关闭行为、界面主题等偏好）。但若新版本新增了
+ *      `critical` 权限或 `scope 为 *` 的权限，**不落盘**，只登记 `pendingUpgrade`
+ *      等用户确认——否则插件可借发版给自己静默提权（见 README「已知边界」）。
  *   4. **前台交互保护**：用户当前正在前台打开使用的插件本轮暂缓替换，待收起后下一轮再静默更新。
  */
 
@@ -22,13 +24,15 @@ import {
   diffCatalog,
   MARKET_CATALOG_URL,
 } from "./market.ts";
-import { compatibleEntries, parseCatalog } from "./market-types.ts";
-import { isKnownPermission } from "./permissions.ts";
+import { compatibleEntries } from "./market-types.ts";
+import { readCatalogWithIntegrity, describeCatalogSignatureError } from "./index-signature.ts";
+import { isKnownPermission, permissionCovers, requiresUpgradeConfirmation } from "./permissions.ts";
 import {
   createPluginRecord,
   findPlugin,
   isPluginAutoUpdateEnabled,
   loadRegistry,
+  markPendingUpgrade,
   saveRegistry,
   upsertPlugin,
   type PluginRecord,
@@ -53,6 +57,8 @@ export function hasAnyAutoUpdatePlugin(reg: PluginRegistryFile): boolean {
 export interface AutoUpdateRunResult {
   checked: boolean;
   updated: Array<{ id: string; from: string; to: string }>;
+  /** 因「高危新增权限」被拦下、等用户确认的升级 */
+  blocked: Array<{ id: string; version: string; permissions: string[] }>;
   skippedActive: string[];
   failed: Array<{ id: string; error: string }>;
 }
@@ -60,6 +66,8 @@ export interface AutoUpdateRunResult {
 export interface AutoUpdateDeps {
   hostVersion?: string;
   fetchRaw?: (pluginId: string, url: string, expectedSha256: string) => Promise<Uint8Array>;
+  /** 目录读取 + 验签（测试可注入；默认平台公钥、强制签名） */
+  readCatalog?: typeof readCatalogWithIntegrity;
   unpack?: (zipBytes: Uint8Array, hostVersion: string | null) => Promise<PreparedInstall>;
   writePackage?: (pluginId: string, files: InstallFilePayload[]) => Promise<string>;
   readRegistry?: () => PluginRegistryFile;
@@ -70,6 +78,8 @@ export interface AutoUpdateDeps {
   isPluginActiveInForeground?: (pluginId: string) => boolean;
   onPluginUpdated?: (pluginId: string, newVersion: string) => void;
   onBatchUpdated?: (updatedIds: string[]) => void;
+  /** 某插件因高危新增权限被拦下（面板可据此提示「待确认更新」） */
+  onUpgradeBlocked?: (pluginId: string, newVersion: string, permissions: string[]) => void;
 }
 
 let inFlight: Promise<AutoUpdateRunResult> | null = null;
@@ -78,6 +88,7 @@ function emptyResult(checked: boolean): AutoUpdateRunResult {
   return {
     checked,
     updated: [],
+    blocked: [],
     skippedActive: [],
     failed: [],
   };
@@ -118,13 +129,16 @@ async function executePluginAutoUpdate(deps: AutoUpdateDeps): Promise<AutoUpdate
   const syncKeys = deps.syncShortcuts ?? syncShortcutActions;
   const markRestart = deps.markRestart ?? markPluginFrontendRestart;
 
+  const readCatalog = deps.readCatalog ?? readCatalogWithIntegrity;
   const catalogBytes = await fetchRaw(MARKET_GATEWAY_ID, MARKET_CATALOG_URL, "");
-  const parsed = parseCatalog(new TextDecoder("utf-8").decode(catalogBytes));
-  if (!parsed.ok) {
-    throw new Error("插件市场目录解析失败");
+  const verified = await readCatalog(catalogBytes);
+  if (!verified.ok) {
+    throw new Error(
+      `插件市场目录校验失败：${describeCatalogSignatureError(verified.errors).join("；")}`
+    );
   }
 
-  const compat = compatibleEntries(parsed.catalog, hostVersion);
+  const compat = compatibleEntries(verified.catalog, hostVersion);
   const reg = readReg();
   const diff = diffCatalog(reg, compat);
   applyUpdateAvailable(reg, diff);
@@ -161,13 +175,41 @@ async function executePluginAutoUpdate(deps: AutoUpdateDeps): Promise<AutoUpdate
         continue;
       }
 
-      const prevVersion = current.version;
-      await writePackage(rec.id, prepared.files);
-
+      // 静默升级前先算「新增权限」：critical 或 scope 全通配必须回到用户面前确认。
+      // 注意要把 optional 也算进来——自动更新原本会连 optional 一起授予（见下方 allPerms），
+      // 只说「可选」不等于「无害」。
+      const prevGrants = current.grants.map((g) => g.permission);
       const allPerms = [
         ...(prepared.manifest.permissions ?? []),
         ...(prepared.manifest.optionalPermissions ?? []),
       ];
+      const addedPerms = allPerms.filter(
+        (p) => !prevGrants.some((g) => permissionCovers(g, p))
+      );
+      const blockedPermissions = addedPerms.filter(requiresUpgradeConfirmation);
+      if (blockedPermissions.length > 0) {
+        // 不落盘、不替换文件：只登记待确认记录并指向新版本角标。
+        const blockReg = readReg();
+        markPendingUpgrade(blockReg, rec.id, {
+          version: prepared.manifest.version,
+          downloadUrl: entry.downloadUrl,
+          sha256: prepared.sha256,
+          blockedPermissions,
+          at: Date.now(),
+        });
+        writeReg(blockReg);
+        out.blocked.push({
+          id: rec.id,
+          version: prepared.manifest.version,
+          permissions: blockedPermissions,
+        });
+        deps.onUpgradeBlocked?.(rec.id, prepared.manifest.version, blockedPermissions);
+        continue;
+      }
+
+      const prevVersion = current.version;
+      await writePackage(rec.id, prepared.files);
+
       const commitReg = readReg();
       const incoming = createPluginRecord({
         manifest: prepared.manifest,
@@ -225,6 +267,7 @@ export function createPluginAutoUpdater(
     isPluginActiveInForeground?: (pluginId: string) => boolean;
     onPluginUpdated?: (pluginId: string, newVersion: string) => void;
     onBatchUpdated?: (updatedIds: string[]) => void;
+    onUpgradeBlocked?: (pluginId: string, newVersion: string, permissions: string[]) => void;
   } = {}
 ) {
   let timer: ReturnType<typeof setInterval> | null = null;
@@ -241,6 +284,7 @@ export function createPluginAutoUpdater(
         isPluginActiveInForeground: hooks.isPluginActiveInForeground,
         onPluginUpdated: hooks.onPluginUpdated,
         onBatchUpdated: hooks.onBatchUpdated,
+        onUpgradeBlocked: hooks.onUpgradeBlocked,
       });
     } catch (e) {
       console.warn("[插件自动更新] 检查更新失败:", e);

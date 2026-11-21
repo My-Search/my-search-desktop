@@ -239,6 +239,9 @@ const openVassal = async () => {
 };
 const detailDisplay = () => evalJs(`document.getElementById('text_show').style.display`);
 const listDisplay = () => evalJs(`document.getElementById('matchResult').style.display`);
+/** 当前焦点元素（id 或标签名）—— 用来断言「Esc 返回后焦点回到搜索框」 */
+const activeId = () =>
+  evalJs(`document.activeElement && (document.activeElement.id || document.activeElement.tagName)`);
 
 // ---- 1. 打开附加内容（输入框失焦）→ Esc 返回 ----
 await typeKeyword("附加内容");
@@ -256,6 +259,11 @@ check("输入框已失焦", activeEl !== "my_search_input", `activeElement=${act
 await pressEsc();
 check("输入框失焦时 Esc 返回（关闭附加内容）", (await detailDisplay()) === "none", `display=${await detailDisplay()}`);
 check("返回后结果列表恢复显示", (await listDisplay()) === "block");
+check(
+  "返回后焦点自动回到输入框（可直接继续输入）",
+  (await activeId()) === "my_search_input",
+  `activeElement=${await activeId()}`
+);
 
 // ---- 2. 输入框仍聚焦时 Esc 也返回（且不重复触发）----
 await openVassal();
@@ -263,6 +271,11 @@ await evalJs(`document.getElementById('my_search_input').focus()`);
 const hideCountBefore = await evalJs(`window.__windowHideCount`);
 await pressEsc();
 check("输入框聚焦时 Esc 返回（关闭附加内容）", (await detailDisplay()) === "none", `display=${await detailDisplay()}`);
+check(
+  "原本已聚焦时返回后焦点仍在输入框（不被 focus() 打乱）",
+  (await activeId()) === "my_search_input",
+  `activeElement=${await activeId()}`
+);
 const hideCountAfter = await evalJs(`window.__windowHideCount`);
 check(
   "详情视图打开时 Esc 只返回、不隐藏窗口",
@@ -311,6 +324,11 @@ check(
 );
 check("返回后结果列表恢复显示", (await listDisplay()) === "block");
 check("返回时一并收起「最近添加」条带", (await stripShown()) === false);
+check(
+  "返回后焦点自动回到输入框（文本项场景）",
+  (await activeId()) === "my_search_input",
+  `activeElement=${await activeId()}`
+);
 check(
   "返回这一次不隐藏窗口（详情优先于条带）",
   (await evalJs(`window.__windowHideCount`)) === hideBefore3,

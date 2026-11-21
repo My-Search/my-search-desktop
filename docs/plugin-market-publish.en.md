@@ -431,9 +431,16 @@ only a badge and a note are shown. To stop distribution entirely, tell us separa
 
 ## 10. Known limitations
 
-- **Plugins are not signed yet**; integrity relies on the sha256 we compute. Do not
-  replace a release asset with different content while keeping the same tag — the
-  hash will mismatch and installation will be rejected.
+- **Plugin packages are not signed individually**; integrity relies on the sha256 the
+  platform computes over the actual package bytes. However, the **market index is
+  signed with ed25519 by the platform**, and the client verifies the whole index
+  before trusting any sha256 inside it. Tampering with a download URL/hash or
+  injecting an entry makes the entire index fail verification. **The developer
+  workflow is unchanged** — submit the package + `plugin.json`; you do not need your
+  own signing key.
+- Do not replace a release asset with different content while keeping the same tag —
+  the hash will mismatch and installation will be rejected. A rebuilt index will
+  detect tampering through its signature, but it will not "fix" the hash for you.
 - The index keeps only the **latest version** per plugin; the client offers no
   "install an older version / rollback". To roll back, **increase** the version in
   `plugin.json` (never decrease it, or the client will not treat it as an update).

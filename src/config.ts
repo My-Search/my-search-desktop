@@ -46,13 +46,26 @@ setThemeOverrideReporter((theme, resolved) => {
   void applyAppTheme(theme, resolved);
 });
 
-const app = createApp(App);
-app.config.errorHandler = (err, _instance, info) => {
-  console.error("[我的搜索-设置] Vue 渲染错误:", err, info);
-};
-app.mount("#app");
+// 环境变量值存 Rust 凭据库：挂载前先灌内存，面板打开即读到权威值。
+// 用 async 启动函数而不是顶层 await：构建目标（chrome87 / es2020）不支持顶层 await。
+async function bootstrap(): Promise<void> {
+  try {
+    const { initEnvStore } = await import("./lib/plugins/env-store.ts");
+    await initEnvStore();
+  } catch (e) {
+    console.warn("[我的搜索-设置] 环境变量初始化失败（将退回旧缓存）：", e);
+  }
 
-// 取消 config.html 内联脚本的 8 秒超时兜底（Vue 已成功挂载）
-if (typeof window.__cancelConfigFallback === "function") {
-  window.__cancelConfigFallback();
+  const app = createApp(App);
+  app.config.errorHandler = (err, _instance, info) => {
+    console.error("[我的搜索-设置] Vue 渲染错误:", err, info);
+  };
+  app.mount("#app");
+
+  // 取消 config.html 内联脚本的 8 秒超时兜底（Vue 已成功挂载）
+  if (typeof window.__cancelConfigFallback === "function") {
+    window.__cancelConfigFallback();
+  }
 }
+
+void bootstrap();

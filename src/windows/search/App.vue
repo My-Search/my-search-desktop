@@ -29,7 +29,7 @@ import { setDetailManualHeightLock } from "./useDetailHeight";
 import { useUpdateChecker } from "./useUpdateChecker";
 import { useScriptHost } from "./useScriptHost";
 import { usePluginHost } from "./usePluginHost";
-import { usePluginViewHost } from "./usePluginViewHost";
+import { usePluginViewHost, type PluginEnterOrigin } from "./usePluginViewHost";
 import { useSyncBridge } from "./useSyncBridge";
 import { resolveDropTarget, toCssPoint } from "./drop-target";
 import { computeStripEdges } from "../../lib/strip-overflow";
@@ -625,6 +625,8 @@ const pluginHost = usePluginHost({
   // 插件界面内改主题（ms.ui.applyTheme）：转发给视图宿主，由它切整个呼出窗口的主题。
   // pluginViewHost 在本行之后才创建，但这里只在**调用时**求值，晚绑定即可。
   refreshPluginTheme: () => pluginViewHost.refreshActiveTheme(),
+  // 插件 ms.ui.subInput：由视图宿主渲染在插件视图上方的输入框（晚绑定同上）
+  subInput: (id, action, options) => pluginViewHost.subInput(id, action, options),
   // 数据同步（ms.sync.*）：由 App.vue 的 syncBridge 注入，engine 的创建/销毁在那边。
   syncNow: () => syncBridge.now(),
   syncStatus: () => syncBridge.status(),
@@ -867,8 +869,28 @@ function collapseToBoxHeight(): void {
 }
 
 // ============== 视图切换 ==============
-/** 结束脚本 / 插件视图会话 + 关闭详情视图 */
+/** 有宿主的弹窗（安装确认 / 提示确认 / 环境选择）开着时，焦点归弹窗，别抢 */
+function hostDialogOpen(): boolean {
+  return installDialogVisible.value || message.state.visible || envPicker.state.visible;
+}
+
+/**
+ * 结束脚本 / 插件视图会话 + 关闭详情视图。
+ *
+ * ## 关闭后必须把焦点交回搜索框（`hadDetail` 为真时）
+ *
+ * 详情视图一关，用户接下来要做的必然是「继续输入」；而插件界面的输入框
+ * 会随会话被**停靠（display:none）或卸载**，浏览器只会把焦点丢给 body。
+ * 早期这里只关视图、不碰焦点，于是「打开插件前端 → 按 Esc 返回」以后
+ * 键盘就成了哑的：搜索框没聚焦，输入不进去——这正是用户反馈的那条。
+ * （Esc 走 handleEscape → 本函数，脚本视图 / 插件界面 / 文本详情共用同一条路。）
+ *
+ * 用 `focus()` 而不是 `focusEnd()`：输入框里可能还留着上次的关键词，
+ * 用户自己的光标位置不该被「返回」这一步重置。输入框原本就聚焦时
+ * `focus()` 是空操作，不会打断正常打字（onInput 路径也会走到这里）。
+ */
 function hideTextView(): void {
+  const hadDetail = detailVisible.value;
   scriptHost.clearScriptSession();
   // 插件视图：按插件设置「最小化」（停靠保活）或「退出」（卸载），
   // 由视图宿主内部判定；这里只负责收掉详情视图本身。
@@ -878,6 +900,7 @@ function hideTextView(): void {
   restoreWindowPositionIfPluginExited();
   detailVisible.value = false;
   state.mode = state.results.length > 0 ? MODE.SHOW_RESULT : MODE.WAIT_SEARCH;
+  if (hadDetail && !hostDialogOpen()) searchBoxRef.value?.focus();
   void nextTick(() => {
     if (state.results.length > 0) {
       void syncWindowHeightToContent();
@@ -1750,7 +1773,7 @@ function openVassal(rawItem: SearchItem | null | undefined): void {
  * 与脚本视图的分流点：插件项自带 `_pluginId`，渲染容器是 `.plugin-view`
  * （脚本项是 `.script-view`），两者互斥——先关掉脚本会话再挂插件视图。
  */
-async function openPluginView(item: SearchItem): Promise<void> {
+async function openPluginView(item: SearchItem, origin?: PluginEnterOrigin): Promise<void> {
   scriptHost.clearScriptSession();
   // 换插件前先清掉上一个插件的尺寸状态（宽高覆盖 / 本地记忆态）
   clearPluginViewSizeState();
@@ -1759,7 +1782,7 @@ async function openPluginView(item: SearchItem): Promise<void> {
   state.mode = MODE.SHOW_ITEM_DETAIL;
   // 等容器渲染出来（.plugin-view 由 DetailView 的 v-else-if 分支产出）
   await nextTick();
-  const result = await pluginViewHost.open(item);
+  const result = await pluginViewHost.open(item, origin);
   if (!result.ok) {
     toast.showToast(result.error ?? "插件视图打开失败", "error");
     return;
@@ -1795,7 +1818,7 @@ async function openPluginByShortcut(pluginId: string): Promise<void> {
     toast.showToast(`插件「${record.name}」不可用`, "error");
     return;
   }
-  await openPluginView(item);
+  await openPluginView(item, { type: "text", from: "hotkey" });
 }
 
 /**
@@ -1827,7 +1850,11 @@ async function runPluginActionByShortcut(pluginId: string, action: string): Prom
     toast.showToast(`插件「${record.name}」不可用`, "error");
     return;
   }
-  await openPluginView(item);
+  await openPluginView(item, {
+    type: "shortcut",
+    from: "hotkey",
+    code: pluginDefinedActionName(action) ?? action,
+  });
   // action 形如 `plugin:<插件id>:<本地名>`：取本地名派发给插件脚本。
   const name = pluginDefinedActionName(action) ?? action;
   // 等一帧：全新挂载时脚本刚执行完，给处理器注册留出时机
@@ -2273,6 +2300,7 @@ onMounted(async () => {
       unlistenBuiltin = await setupBuiltinAutoInstall();
       await pluginHost.reload(true);
       search.bindPluginItems(() => pluginHost.pluginItems());
+      search.bindResultProviders((keyword) => pluginHost.providerResults(keyword));
       await pluginHost.startDevWatcher();
     } catch (e) {
       warn("[我的搜索] 插件加载失败:", e);

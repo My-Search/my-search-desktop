@@ -430,6 +430,279 @@ export async function pluginStorageDelete(pluginId: string, key: string): Promis
 }
 
 /* ============================================================
+ * 集合存储（ms.store.collection）——每条记录一个文件
+ * ============================================================ */
+export interface PluginCollectionPage {
+  items: Array<{ id: string; data: string }>;
+  nextCursor: string;
+  hasMore: boolean;
+}
+
+const devCollections = new Map<string, string>();
+
+function devCollectionKey(pluginId: string, collection: string, id: string): string {
+  return `${pluginId}\u0000${collection}\u0000${id}`;
+}
+
+export async function pluginCollectionPut(
+  pluginId: string,
+  collection: string,
+  id: string,
+  value: unknown,
+  mode: "add" | "update" | "set" = "set"
+): Promise<boolean> {
+  const content = JSON.stringify(value ?? null);
+  if (!isTauri) {
+    const key = devCollectionKey(pluginId, collection, id);
+    const exists = devCollections.has(key);
+    if (mode === "add" && exists) throw new Error(`记录已存在: ${id}`);
+    if (mode === "update" && !exists) return false;
+    devCollections.set(key, content);
+    return mode === "update" ? true : !exists;
+  }
+  return await invoke<boolean>("plugin_collection_put", {
+    pluginId,
+    collection,
+    id,
+    content,
+    mode,
+  });
+}
+
+export async function pluginCollectionGet(
+  pluginId: string,
+  collection: string,
+  id: string
+): Promise<string | null> {
+  if (!isTauri) return devCollections.get(devCollectionKey(pluginId, collection, id)) ?? null;
+  return await invoke<string | null>("plugin_collection_get", { pluginId, collection, id });
+}
+
+export async function pluginCollectionDelete(
+  pluginId: string,
+  collection: string,
+  id: string
+): Promise<boolean> {
+  if (!isTauri) return devCollections.delete(devCollectionKey(pluginId, collection, id));
+  return await invoke<boolean>("plugin_collection_delete", { pluginId, collection, id });
+}
+
+export async function pluginCollectionClear(
+  pluginId: string,
+  collection: string
+): Promise<number> {
+  if (!isTauri) {
+    let removed = 0;
+    for (const key of [...devCollections.keys()]) {
+      const [, col] = key.split("\u0000");
+      if (key.startsWith(`${pluginId}\u0000`) && col === collection) {
+        devCollections.delete(key);
+        removed++;
+      }
+    }
+    return removed;
+  }
+  return await invoke<number>("plugin_collection_clear", { pluginId, collection });
+}
+
+export async function pluginCollectionList(
+  pluginId: string,
+  collection: string,
+  opts: { prefix?: string; limit?: number; cursor?: string } = {}
+): Promise<PluginCollectionPage> {
+  const limit = Math.max(1, Math.min(200, Number(opts.limit ?? 50)));
+  const prefix = String(opts.prefix ?? "");
+  const cursor = String(opts.cursor ?? "");
+  if (!isTauri) {
+    const ids = [...devCollections.keys()]
+      .filter((k) => k.startsWith(`${pluginId}\u0000${collection}\u0000`))
+      .map((k) => k.split("\u0000")[2])
+      .filter((id) => id.startsWith(prefix) && (cursor === "" || id > cursor))
+      .sort();
+    const page = ids.slice(0, limit);
+    return {
+      items: page.map((id) => ({
+        id,
+        data: devCollections.get(devCollectionKey(pluginId, collection, id)) ?? "null",
+      })),
+      nextCursor: ids.length > limit ? page[page.length - 1] : "",
+      hasMore: ids.length > limit,
+    };
+  }
+  return await invoke<PluginCollectionPage>("plugin_collection_list", {
+    pluginId,
+    collection,
+    prefix,
+    limit,
+    cursor,
+  });
+}
+
+/* ============================================================
+ * 插件密钥（secret.read / secret.write）
+ *
+ * 与 store 的 k/v 不同：值**只在需要时经 IPC 取回**，不参与 localStorage、
+ * 不随插件数据备份（凭据不能以明文离开 Rust）。浏览器调试环境没有 DPAPI，
+ * 用内存表模拟，保证插件开发时行为一致。
+ * ============================================================ */
+const devSecrets = new Map<string, string>();
+
+export async function pluginSecretGet(pluginId: string, name: string): Promise<string | null> {
+  const n = String(name ?? "").trim();
+  if (!n) return null;
+  if (!isTauri) return devSecrets.get(`${pluginId}:${n}`) ?? null;
+  return await invoke<string | null>("plugin_secret_get", { pluginId, name: n });
+}
+
+export async function pluginSecretSet(
+  pluginId: string,
+  name: string,
+  value: string
+): Promise<boolean> {
+  const n = String(name ?? "").trim();
+  if (!n) throw new Error("密钥名不能为空");
+  if (!isTauri) {
+    if (value === "") devSecrets.delete(`${pluginId}:${n}`);
+    else devSecrets.set(`${pluginId}:${n}`, value);
+    return true;
+  }
+  return await invoke<boolean>("plugin_secret_set", { pluginId, name: n, value });
+}
+
+export async function pluginSecretDelete(pluginId: string, name: string): Promise<boolean> {
+  const n = String(name ?? "").trim();
+  if (!n) return false;
+  if (!isTauri) return devSecrets.delete(`${pluginId}:${n}`);
+  return await invoke<boolean>("plugin_secret_delete", { pluginId, name: n });
+}
+
+export async function pluginSecretList(pluginId: string): Promise<string[]> {
+  if (!isTauri) {
+    const prefix = `${pluginId}:`;
+    return [...devSecrets.keys()]
+      .filter((k) => k.startsWith(prefix))
+      .map((k) => k.slice(prefix.length))
+      .sort();
+  }
+  return await invoke<string[]>("plugin_secret_list", { pluginId });
+}
+
+/* ============================================================
+ * 宿主环境变量（P2-5）
+ *
+ * 值只存 Rust（DPAPI），前端仅在内存持有；这里只做 IPC 包装。
+ * 浏览器调试环境由 env-store 自己走 localStorage 兜底，不经过本函数。
+ * ============================================================ */
+
+/** 读取整份环境变量；`null` 表示 Rust 侧尚无文件（首次运行 / 迁移前） */
+export async function hostEnvLoad(): Promise<unknown[] | null> {
+  if (!isTauri) return null;
+  return await invoke<unknown[] | null>("host_env_load");
+}
+
+/** 覆盖保存整份环境变量（全量提交，天然幂等） */
+export async function hostEnvSave(vars: unknown[]): Promise<void> {
+  if (!isTauri) return;
+  await invoke("host_env_save", { vars });
+}
+
+/* ============================================================
+ * 插件网络凭据（P2-3）
+ *
+ * 真实运行时值只存 Rust（DPAPI），前端只拿元数据；请求时由 Rust 注入。
+ * 浏览器调试环境用内存表模拟，并同样校验 origin 绑定。
+ * ============================================================ */
+
+export interface PluginNetCredentialMeta {
+  name: string;
+  origin: string;
+  scheme: "bearer" | "basic" | "header";
+  header?: string | null;
+  username?: string | null;
+}
+
+const devNetCredentials = new Map<
+  string,
+  PluginNetCredentialMeta & { value: string }
+>();
+
+export async function pluginNetCredentialSet(
+  pluginId: string,
+  meta: Omit<PluginNetCredentialMeta, "name"> & { name: string; value: string }
+): Promise<boolean> {
+  if (!isTauri) {
+    const key = `${pluginId}:${meta.name}`;
+    if (!meta.value) {
+      return devNetCredentials.delete(key);
+    }
+    let origin: string;
+    try {
+      origin = new URL(meta.origin).origin;
+    } catch {
+      throw new Error("origin 必须是合法的 http(s) 地址");
+    }
+    devNetCredentials.set(key, { ...meta, origin });
+    return true;
+  }
+  return await invoke<boolean>("plugin_net_credential_set", {
+    pluginId,
+    name: meta.name,
+    value: meta.value,
+    scheme: meta.scheme,
+    origin: meta.origin,
+    header: meta.header ?? null,
+    username: meta.username ?? null,
+  });
+}
+
+export async function pluginNetCredentialList(
+  pluginId: string
+): Promise<PluginNetCredentialMeta[]> {
+  if (!isTauri) {
+    const prefix = `${pluginId}:`;
+    return [...devNetCredentials.entries()]
+      .filter(([k]) => k.startsWith(prefix))
+      .map(([, v]) => ({
+        name: v.name,
+        origin: v.origin,
+        scheme: v.scheme,
+        header: v.header,
+        username: v.username,
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
+  return await invoke<PluginNetCredentialMeta[]>("plugin_net_credential_list", { pluginId });
+}
+
+export async function pluginNetCredentialDelete(pluginId: string, name: string): Promise<boolean> {
+  if (!isTauri) return devNetCredentials.delete(`${pluginId}:${name}`);
+  return await invoke<boolean>("plugin_net_credential_delete", { pluginId, name });
+}
+
+/**
+ * 浏览器调试用：按名字取要注入的请求头。
+ * 真实运行时**不存在**这个出口——凭据不经过前端。
+ */
+export function devNetCredentialHeader(
+  pluginId: string,
+  name: string,
+  origin: string
+): [string, string] {
+  const c = devNetCredentials.get(`${pluginId}:${name}`);
+  if (!c) throw new Error(`没有名为 ${name} 的网络凭据`);
+  if (c.origin !== origin) {
+    throw new Error(`凭据 ${name} 只允许发往 ${c.origin}，当前地址是 ${origin}`);
+  }
+  if (c.scheme === "bearer") return ["authorization", `Bearer ${c.value}`];
+  if (c.scheme === "basic") {
+    // btoa 在浏览器存在；Node 测试由 net-api 自行兜底
+    return ["authorization", `Basic ${btoa(`${c.username ?? ""}:${c.value}`)}`];
+  }
+  if (!c.header) throw new Error("header 型凭据缺少 header 名");
+  return [c.header.toLowerCase(), c.value];
+}
+
+/* ============================================================
  * 插件云数据 store（`sync-store/<pluginId>.json`）
  *
  * 与上面的「文件化 KV」的区别：这份数据**专为跨设备同步而存在**，随云备份
@@ -595,6 +868,11 @@ export interface PluginOpenWindowOptionsIpc {
   width?: number;
   height?: number;
   alwaysOnTop?: boolean;
+  /**
+   * 隔离形态（P2-4）：默认 `true`。
+   * `false` 只用于显式回退到旧的「插件 HTML 与宿主 API 同上下文」形态。
+   */
+  isolated?: boolean;
 }
 
 export async function pluginOpenWindow(
@@ -609,6 +887,7 @@ export async function pluginOpenWindow(
     width: options.width ?? null,
     height: options.height ?? null,
     alwaysOnTop: options.alwaysOnTop ?? null,
+    isolated: options.isolated !== false,
   });
 }
 

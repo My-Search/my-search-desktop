@@ -15,8 +15,22 @@ import {
   pluginDataRemove,
   pluginDataSet,
   resolvePluginTheme,
+  listAllCommands,
+  removeRuntimeCommand,
+  upsertRuntimeCommand,
+  MAX_RUNTIME_COMMANDS,
+  type PluginRegistryFile,
 } from "../registry.ts";
 import { loadEnvVars } from "../env-store.ts";
+import {
+  hasResultProvider,
+  registerResultProvider,
+  resultProviderOf,
+  RESULT_PROVIDER_BUDGET_MS,
+  RESULT_PROVIDER_GLOBAL_CAP,
+  RESULT_PROVIDER_MAX_ITEMS,
+  type ResultProviderFn,
+} from "../result-provider.ts";
 import {
   attachmentFileIcons,
   attachmentList,
@@ -28,6 +42,11 @@ import {
   pluginOpenWindow,
   pluginPickFiles,
   pluginSaveFile,
+  pluginCollectionClear,
+  pluginCollectionDelete,
+  pluginCollectionGet,
+  pluginCollectionList,
+  pluginCollectionPut,
   pluginStorageDelete,
   pluginStorageRead,
   pluginStorageWrite,
@@ -39,11 +58,23 @@ import {
   pluginSyncStoreUsage,
 } from "../ipc.ts";
 import {
+  addLifecycleHandler,
+  readLifecycleState,
+  type PluginEnterAction,
+} from "./event-hub.ts";
+import {
   defineRpcNamespace,
   type CallRunner,
+  type PermissionRequestOutcome,
   type PluginHostContext,
+  type PluginSubInputOptions,
   type PluginSyncState,
 } from "./core.ts";
+import {
+  PERMISSION_REQUEST_LIMIT,
+  PERMISSION_REQUEST_MAX_APIS,
+  PERMISSION_REQUEST_WINDOW_MS,
+} from "../permission-requests.ts";
 import {
   addThemeChangedHandler,
   clearThemeHandlers,
@@ -138,6 +169,10 @@ export function createUiDataApis(
   env: Record<string, unknown>;
   sync: Record<string, unknown>;
   system: Record<string, unknown>;
+  lifecycle: Record<string, unknown>;
+  commands: Record<string, unknown>;
+  results: Record<string, unknown>;
+  permissions: Record<string, unknown>;
 } {
   /* ---------------- 1. 插件自身元信息 ---------------- */
   const plugin = {
@@ -237,6 +272,99 @@ export function createUiDataApis(
     },
   });
 
+  /* ---------------- 2.6 权限申请闭环 ---------------- */
+  /**
+   * `ms.permissions.request(apis, reason)`：批量申请清单里声明过的权限。
+   *
+   * 申请本身**不需要权限**（否则「没权限就申请不了权限」是死循环），
+   * 但宿主会校验：只能申请清单声明过的、一次 ≤8 项、同权限 24h 内 ≤3 次。
+   */
+  const permissions = defineRpcNamespace("permissions", pluginId, call, {
+    request: {
+      detail: (apis: unknown, reason: unknown) =>
+        `${Array.isArray(apis) ? apis.length : 0} 项:${String(reason ?? "").slice(0, 60)}`,
+      handler: async (
+        _env,
+        apis: unknown,
+        reason?: unknown
+      ): Promise<PermissionRequestOutcome> => {
+        if (!ctx.requestPermissions) {
+          throw new Error("当前窗口不支持权限申请（请在主窗口的插件界面里使用）");
+        }
+        const list = Array.isArray(apis) ? apis.map((p) => String(p ?? "")) : [];
+        return await ctx.requestPermissions(
+          pluginId,
+          list,
+          typeof reason === "string" ? reason.slice(0, 200) : undefined
+        );
+      },
+    },
+    /** 本插件最近的申请历史（最多 20 条，供插件自查「别再骚扰用户」） */
+    history: {
+      handler: ({ record: rec }) => (rec.permissionRequests ?? []).slice(-20),
+    },
+    limits: {
+      handler: () => ({
+        maxApisPerRequest: PERMISSION_REQUEST_MAX_APIS,
+        windowMs: PERMISSION_REQUEST_WINDOW_MS,
+        maxPerWindow: PERMISSION_REQUEST_LIMIT,
+      }),
+    },
+  });
+
+  /* ---------------- 2.5 搜索期结果提供者 ---------------- */
+  /**
+   * `ms.results.provide(fn)`：注册「每次搜索都有机会贡献结果」的回调。
+   *
+   * 约束：
+   *   - 清单必须声明 `contributes.resultProvider`（声明 ≠ 自动参与，
+   *     视图开过、注册了回调才参与）；
+   *   - 权限 `search.write`（与 triggerSearch / setInput 同族）；
+   *   - 回调返回数组，宿主按清单 `maxItems`（≤10）与全局 20 条截断，
+   *     超时/异常只丢自己的结果。
+   */
+  const results = defineRpcNamespace("results", pluginId, call, {
+    provide: {
+      permission: "search.write",
+      detail: (fn: unknown) => (typeof fn === "function" ? "register" : "unregister"),
+      handler: (_env, fn: unknown) => {
+        const rec = record();
+        if (!rec) throw new Error("插件未加载，无法注册结果提供者");
+        if (fn != null && typeof fn !== "function") {
+          throw new Error("ms.results.provide 需要传入函数（传 null 表示注销）");
+        }
+        if (fn != null && !resultProviderOf(rec)) {
+          throw new Error(
+            "清单未声明 contributes.resultProvider，插件不能提供搜索结果"
+          );
+        }
+        registerResultProvider(pluginId, (fn as ResultProviderFn | null) ?? null);
+        return true;
+      },
+    },
+    /** 注销本插件的提供者（等价 provide(null)） */
+    clear: {
+      permission: "search.write",
+      handler: () => {
+        registerResultProvider(pluginId, null);
+        return true;
+      },
+    },
+    /** 当前是否已注册（视图重载后可据此判断要不要重新注册） */
+    active: {
+      permission: "search.write",
+      handler: () => hasResultProvider(pluginId),
+    },
+    limits: {
+      permission: "search.write",
+      handler: () => ({
+        maxItems: RESULT_PROVIDER_MAX_ITEMS,
+        globalCap: RESULT_PROVIDER_GLOBAL_CAP,
+        budgetMs: RESULT_PROVIDER_BUDGET_MS,
+      }),
+    },
+  });
+
   /* ---------------- 3. 界面与独立窗口能力 ---------------- */
   const ui = defineRpcNamespace(
     "ui",
@@ -285,6 +413,8 @@ export function createUiDataApis(
                 width?: number;
                 height?: number;
                 alwaysOnTop?: boolean;
+                /** 默认 true（sandbox iframe + 白名单桥）；false 回退同上下文旧形态 */
+                isolated?: boolean;
               },
           maybeTitle?: string
         ) => {
@@ -301,11 +431,13 @@ export function createUiDataApis(
             throw new Error("缺少窗口入口文件（entry）");
           }
           const resolvedTitle = opts.title?.trim() || rec.name || pid;
+          const isolated = opts.isolated !== false;
           if (ctx.openPluginWindow) {
             const r = await ctx.openPluginWindow(pid, resolvedEntry, resolvedTitle, {
               width: opts.width,
               height: opts.height,
               alwaysOnTop: opts.alwaysOnTop,
+              isolated,
             });
             return r ?? true;
           }
@@ -315,6 +447,7 @@ export function createUiDataApis(
             width: opts.width,
             height: opts.height,
             alwaysOnTop: opts.alwaysOnTop,
+            isolated,
           });
         },
       },
@@ -364,6 +497,40 @@ export function createUiDataApis(
         return true;
       },
       _clearThemeProvider: (): void => clearThemeProvider(pluginId),
+      /**
+       * `ms.ui.subInput`：宿主渲染在插件视图上方的输入框（P1-5）。
+       * 由 `ui.inlay` 授权（与「能渲染插件界面」同一件事，不新增负担）。
+       */
+      subInput: {
+        set: (opts: PluginSubInputOptions = {}) =>
+          call({
+            api: "ui.subInput.set",
+            permission: "ui.inlay",
+            detail: String(opts.placeholder ?? "").slice(0, 40),
+            run: () => {
+              if (!ctx.subInput) throw new Error("当前窗口不支持子输入框");
+              return ctx.subInput(pluginId, "set", opts);
+            },
+          }),
+        remove: () =>
+          call({
+            api: "ui.subInput.remove",
+            permission: "ui.inlay",
+            run: () => {
+              if (!ctx.subInput) return false;
+              return ctx.subInput(pluginId, "remove");
+            },
+          }),
+        focus: () =>
+          call({
+            api: "ui.subInput.focus",
+            permission: "ui.inlay",
+            run: () => {
+              if (!ctx.subInput) return false;
+              return ctx.subInput(pluginId, "focus");
+            },
+          }),
+      },
     }
   );
   Object.defineProperty(ui, "theme", {
@@ -567,6 +734,104 @@ export function createUiDataApis(
   });
 
   /* ---------------- 5. 键值存储（轻量同步 localStorage + 大容量异步文件化 JSON） ---------------- */
+  /**
+   * `ms.store.collection(name)` 的工厂（P1-4）。
+   *
+   * 为什么不直接把集合方法摊在 `ms.store` 上：集合是有名字的命名空间，
+   * `ms.store.collection("todos").add({...})` 比 `ms.store.add("todos", …)`
+   * 更难写错，也方便插件把「一个集合」当对象传来传去。
+   */
+  function collectionApi(rawName: string): Record<string, unknown> {
+    const name = String(rawName ?? "").trim();
+    const NAME_RE = /^[a-zA-Z0-9._-]{1,64}$/;
+    const ID_RE = /^[a-zA-Z0-9._-]{1,128}$/;
+    const assertReady = (): void => {
+      if (!NAME_RE.test(name)) {
+        throw new Error("集合名非法（1-64 字，仅字母数字 . _ -）");
+      }
+    };
+    const run = <T>(method: string, detail: string, fn: () => Promise<T> | T): Promise<T> =>
+      Promise.resolve(
+        call({
+          api: `store.collection.${method}`,
+          permission: "store",
+          detail: `${name}:${detail}`.slice(0, 120),
+          run: () => fn(),
+        })
+      );
+    return {
+      name,
+      add: async (data: unknown, id?: string) => {
+        assertReady();
+        const itemId = String(id ?? "").trim() || newId();
+        if (!ID_RE.test(itemId)) throw new Error("记录 id 非法（1-128 字，仅字母数字 . _ -）");
+        const created = await run("add", itemId, () =>
+          pluginCollectionPut(pluginId, name, itemId, data, "add")
+        );
+        if (!created) throw new Error(`记录已存在: ${itemId}`);
+        return itemId;
+      },
+      update: async (id: string, data: unknown) => {
+        assertReady();
+        const itemId = String(id ?? "").trim();
+        if (!ID_RE.test(itemId)) throw new Error("记录 id 非法");
+        return await run("update", itemId, () =>
+          pluginCollectionPut(pluginId, name, itemId, data, "update")
+        );
+      },
+      remove: async (id: string) => {
+        assertReady();
+        return await run("remove", String(id ?? ""), () =>
+          pluginCollectionDelete(pluginId, name, String(id ?? "").trim())
+        );
+      },
+      get: async (id: string, fallback: unknown = null) => {
+        assertReady();
+        const raw = await run("get", String(id ?? ""), () =>
+          pluginCollectionGet(pluginId, name, String(id ?? "").trim())
+        );
+        if (raw == null) return fallback;
+        return parseCollectionJson(raw, `记录 ${id}`);
+      },
+      list: async (opts: { prefix?: string; limit?: number; cursor?: string } = {}) => {
+        assertReady();
+        const page = await run("list", String(opts.prefix ?? ""), () =>
+          pluginCollectionList(pluginId, name, {
+            prefix: opts.prefix == null ? "" : String(opts.prefix),
+            limit: opts.limit,
+            cursor: opts.cursor,
+          })
+        );
+        return {
+          items: page.items.map((it) => ({
+            id: it.id,
+            data: parseCollectionJson(it.data, `记录 ${it.id}`),
+          })),
+          nextCursor: page.nextCursor,
+          hasMore: page.hasMore,
+        };
+      },
+      clear: async () => {
+        assertReady();
+        return await run("clear", "", () => pluginCollectionClear(pluginId, name));
+      },
+    };
+  }
+
+  function newId(): string {
+    const c = globalThis.crypto as Crypto | undefined;
+    if (c?.randomUUID) return c.randomUUID();
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+
+  function parseCollectionJson(raw: string, what: string): unknown {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      throw new Error(`${what} 不是合法 JSON（可能已损坏）`);
+    }
+  }
+
   const store = defineRpcNamespace("store", pluginId, call, {
     get: {
       permission: "store",
@@ -624,6 +889,12 @@ export function createUiDataApis(
         return true;
       },
     },
+  }, {
+    /**
+     * `ms.store.collection(name)`：按集合名拿到 add / update / remove / get / list / clear。
+     * 所有方法都走 `store` 权限（与 ms.store 同一门禁），不新增授权负担。
+     */
+    collection: (name: string) => collectionApi(name),
   });
 
   /**
@@ -771,7 +1042,154 @@ export function createUiDataApis(
       handler: ({ pluginId: pid }, name: string) =>
         ctx.getSecret?.(pid, String(name ?? "")) ?? Promise.resolve(null),
     },
+    /**
+     * `ms.system.setSecret(name, value)`（P1-2）：把密钥写进系统的 DPAPI 存储。
+     *
+     * 为什么值得单独开一个写权限：插件常见的做法是「让用户粘贴一次 API Key」，
+     * 如果没有这层能力，密钥只能明文进 localStorage——一次误备份就泄漏。
+     * 写入后插件仍可以通过 `getSecret` 读回，但**不会**在宿主日志里出现明文。
+     */
+    setSecret: {
+      permission: (name: string) => `secret.write:${String(name ?? "")}`,
+      detail: (name: unknown) => String(name ?? "").slice(0, 64),
+      handler: async ({ pluginId: pid }, name: string, value: string) => {
+        const n = String(name ?? "").trim();
+        if (!n) throw new Error("密钥名不能为空");
+        if (!ctx.setSecret) throw new Error("当前窗口不支持写入密钥");
+        return await ctx.setSecret(pid, n, String(value ?? ""));
+      },
+    },
+    /** 删除密钥（`secret.write:<name>`；不存在的名字返回 false） */
+    deleteSecret: {
+      permission: (name: string) => `secret.write:${String(name ?? "")}`,
+      detail: (name: unknown) => String(name ?? "").slice(0, 64),
+      handler: async ({ pluginId: pid }, name: string) => {
+        if (!ctx.deleteSecret) throw new Error("当前窗口不支持删除密钥");
+        return await ctx.deleteSecret(pid, String(name ?? "").trim());
+      },
+    },
+    /**
+     * 列出本插件已保存的密钥**名字**（不含值）。
+     *
+     * 不设权限门禁：名字通常是插件自己写进去的，值才是秘密；而 `secret.read`
+     * 是带 scope 的权限，没有「任意 scope」的授予形态可复用。真正的读取仍要
+     * `secret.read:<name>`。
+     */
+    listSecrets: {
+      handler: async ({ pluginId: pid }) => {
+        if (!ctx.listSecrets) return [];
+        return await ctx.listSecrets(pid);
+      },
+    },
   });
 
-  return { plugin, search, ui, input, store, env, sync, system };
+  /* ---------------- 9. 生命周期 ---------------- */
+  /**
+   * `ms.lifecycle.*`：插件视图的显示/隐藏/进入/销毁事件。
+   *
+   * 为什么需要：`minimize` 语义下关闭界面只是把会话停到停车场，再次打开
+   * **不会重跑脚本**——插件没有「我又回到前台」的信号，只能轮询或让用户手动刷新。
+   * 另外「这次是从搜索/快捷键/附件/子关键词哪条路进来的」也只有宿主知道。
+   *
+   * 权限沿用 `ui.inlay`：事件与视图同生命周期，不新增授权负担。
+   * 注册返回退订函数；`onShow` / `onEnter` 支持「注册晚于事件」的粘性补发。
+   */
+  const lifecycle = defineRpcNamespace("lifecycle", pluginId, call, {
+    onShow: {
+      permission: "ui.inlay",
+      handler: (_env, fn: (arg?: unknown) => void) =>
+        addLifecycleHandler(pluginId, "show", fn),
+    },
+    onHide: {
+      permission: "ui.inlay",
+      handler: (_env, fn: (arg?: unknown) => void) =>
+        addLifecycleHandler(pluginId, "hide", fn),
+    },
+    onEnter: {
+      permission: "ui.inlay",
+      handler: (_env, fn: (arg?: PluginEnterAction) => void) =>
+        addLifecycleHandler(pluginId, "enter", fn as unknown as (arg?: unknown) => void),
+    },
+    onDispose: {
+      permission: "ui.inlay",
+      handler: (_env, fn: (arg?: unknown) => void) =>
+        addLifecycleHandler(pluginId, "dispose", fn),
+    },
+    /** 当前是否可见 + 最近一次进入参数（供「注册晚于事件」之外的自查） */
+    current: {
+      permission: "ui.inlay",
+      handler: () => readLifecycleState(pluginId),
+    },
+  });
+
+  /* ---------------- 10. 运行时命令 ---------------- */
+  /**
+   * `ms.commands.*`：注册/注销搜索命令（等价于 uTools 的 `setFeature`）。
+   *
+   * 设计取舍：
+   *   - **必须落盘**（写注册表并广播 `plugin://registry-changed`），否则重启后
+   *     命令消失，搜索入口与插件实际能力对不上；
+   *   - 单插件上限 20 条，前缀必须含 `" : "`（缺失时自动补齐）；
+   *   - 与清单 `contributes.command` 同 id 合并，运行时优先。
+   */
+  const commands = defineRpcNamespace("commands", pluginId, call, {
+    register: {
+      permission: "ui.command",
+      detail: (cmd: { id?: string; prefix?: string; title?: string; desc?: string }) =>
+        `${String(cmd?.id ?? "")}:${String(cmd?.prefix ?? "")}`.slice(0, 120),
+      handler: (
+        _env,
+        cmd: { id: string; prefix: string; title: string; desc?: string }
+      ) => {
+        const reg = ctx.registry() as PluginRegistryFile;
+        const res = upsertRuntimeCommand(reg, pluginId, {
+          id: String(cmd?.id ?? ""),
+          prefix: String(cmd?.prefix ?? ""),
+          title: String(cmd?.title ?? ""),
+          desc: cmd?.desc == null ? undefined : String(cmd.desc),
+        });
+        if (!res.ok) throw new Error(res.error);
+        ctx.persistRegistry();
+        return res.command;
+      },
+    },
+    unregister: {
+      permission: "ui.command",
+      detail: (id: string) => String(id ?? "").slice(0, 64),
+      handler: (_env, id: string) => {
+        const reg = ctx.registry() as PluginRegistryFile;
+        const removed = removeRuntimeCommand(reg, pluginId, String(id ?? ""));
+        if (removed) ctx.persistRegistry();
+        return removed;
+      },
+    },
+    list: {
+      permission: "ui.command",
+      handler: ({ record: rec }) => listAllCommands(rec),
+    },
+    /** 配额与规范（作者自检用） */
+    limits: {
+      permission: "ui.command",
+      handler: () => ({
+        maxRuntimeCommands: MAX_RUNTIME_COMMANDS,
+        prefixBoundary: " : ",
+        idPattern: "^[a-zA-Z0-9._-]{1,64}$",
+      }),
+    },
+  });
+
+  return {
+    plugin,
+    search,
+    ui,
+    input,
+    store,
+    env,
+    sync,
+    system,
+    lifecycle,
+    commands,
+    results,
+    permissions,
+  };
 }

@@ -23,7 +23,7 @@
 
 // 显式带 .ts 后缀：本模块被 Node 测试直接 import（见 test/env-store.test.mjs），
 // 而 Node 的 ESM 解析器不做扩展名补全。
-import { storageGet, storageSet } from "../util.ts";
+import { storageGet, storageRemove, storageSet } from "../util.ts";
 
 /** 存储键（与既有缓存键命名风格一致：大写下划线 + _CACHE_KEY） */
 export const ENV_VARS_KEY = "ENV_VARS_CACHE_KEY";
@@ -95,10 +95,30 @@ export function envRefOf(name: string): string {
 }
 
 // ========== 存储读写 ==========
+//
+// 值存哪里（P2-5）：
+//   - 桌面端：Rust `host-env.json`（DPAPI），本文件只在**内存**持有值；
+//     localStorage 不再写任何变量值（首启会把旧明文迁移到 Rust 后删除旧键）。
+//   - 浏览器调试 / Node 测试：退回 localStorage（无 DPAPI，仅开发用）。
+//
+// 同步 API（`loadEnvVars` / `saveEnvVars`）保持不变：调用方（面板、buildPluginEnv）
+// 无需改成异步。启动时先 `await initEnvStore()` 把值灌进内存，之后读写都在内存，
+// 落盘由 `persist()` 串行异步完成。
 
-/** 读取全部变量（按名字排序，非法记录被丢弃） */
-export function loadEnvVars(): EnvVar[] {
-  const raw = storageGet<unknown>(ENV_VARS_KEY, null);
+const TAURI_RUNTIME =
+  typeof window !== "undefined" && "__TAURI_INTERNALS__" in (window as unknown as Record<string, unknown>);
+
+/** 内存缓存；null = 尚未从任何来源加载 */
+let cache: EnvVar[] | null = null;
+/** 是否已完成一次权威加载（Rust / 旧 localStorage） */
+let hydrated = false;
+/** 串行落盘队列：避免快速连续保存时后一次覆盖前一次 */
+let persistChain: Promise<void> = Promise.resolve();
+/** 最近一次落盘失败（面板可读，便于提示「改了但没存上」） */
+let lastPersistError: string | null = null;
+
+/** 把任意来源的数组规整成 EnvVar[]（丢弃非法项、排序） */
+function normalizeEnvVars(raw: unknown): EnvVar[] {
   if (!Array.isArray(raw)) return [];
   const out: EnvVar[] = [];
   for (const item of raw) {
@@ -117,6 +137,106 @@ export function loadEnvVars(): EnvVar[] {
   }
   out.sort((a, b) => a.name.localeCompare(b.name));
   return out;
+}
+
+/** 读旧版 localStorage 里的明文配置（仅迁移/兜底用） */
+function readLegacyEnvVars(): EnvVar[] {
+  return normalizeEnvVars(storageGet<unknown>(ENV_VARS_KEY, null));
+}
+
+function persist(vars: readonly EnvVar[]): void {
+  if (!TAURI_RUNTIME) {
+    storageSet(ENV_VARS_KEY, vars);
+    return;
+  }
+  const snapshot = vars.map((v) => ({ ...v }));
+  persistChain = persistChain
+    .then(async () => {
+      const { hostEnvSave } = await import("./ipc.ts");
+      await hostEnvSave(snapshot);
+      lastPersistError = null;
+    })
+    .catch((e) => {
+      lastPersistError = e instanceof Error ? e.message : String(e);
+      console.error("[环境变量] 保存到凭据库失败：", e);
+    });
+}
+
+export interface EnvStoreRemoteIO {
+  load: () => Promise<unknown[] | null>;
+  save: (vars: EnvVar[]) => Promise<void>;
+}
+
+/**
+ * 启动时调用一次：把权威配置灌进内存。
+ *
+ * - Rust 有文件 → 以它为准；顺手删除旧 localStorage 明文键；
+ * - Rust 无文件但 localStorage 有值 → **一次性迁移**：写 Rust → 校验成功后再删旧键；
+ *   写失败则保留旧键（绝不因迁移失败丢用户配置）。
+ *
+ * `io` 仅供测试注入；省略时按运行环境选择 Rust IPC / localStorage。
+ */
+export async function initEnvStore(io?: EnvStoreRemoteIO): Promise<EnvVar[]> {
+  if (hydrated) return loadEnvVars();
+  const legacy = readLegacyEnvVars();
+
+  if (TAURI_RUNTIME || io) {
+    try {
+      const remoteIO =
+        io ??
+        (await (async () => {
+          const { hostEnvLoad, hostEnvSave } = await import("./ipc.ts");
+          return { load: hostEnvLoad, save: hostEnvSave };
+        })());
+      const remote = await remoteIO.load();
+      if (remote === null) {
+        cache = legacy;
+        if (legacy.length > 0) {
+          await remoteIO.save(legacy.map((v) => ({ ...v })));
+          storageRemove(ENV_VARS_KEY);
+        }
+      } else {
+        cache = normalizeEnvVars(remote);
+        // 迁移已完成 / 旧数据已被权威源取代：清掉可能残留的明文
+        storageRemove(ENV_VARS_KEY);
+      }
+    } catch (e) {
+      // Rust 侧不可用（浏览器 mock / 旧版本 / 迁移写失败）→ 保持旧行为，不丢数据
+      console.warn("[环境变量] 读取凭据库失败，退回 localStorage：", e);
+      cache = legacy;
+    }
+  } else {
+    cache = legacy;
+  }
+
+  hydrated = true;
+  return cache ?? [];
+}
+
+/** 仅测试用：重置内存态，允许重新走一次 init 流程 */
+export function __resetEnvStoreForTests(): void {
+  cache = null;
+  hydrated = false;
+  persistChain = Promise.resolve();
+  lastPersistError = null;
+}
+
+/** 等待所有待落盘保存完成（关闭窗口 / 测试用） */
+export async function flushEnvStore(): Promise<void> {
+  await persistChain;
+  if (lastPersistError) throw new Error(lastPersistError);
+}
+
+/** 最近一次保存是否失败（null = 正常） */
+export function envStorePersistError(): string | null {
+  return lastPersistError;
+}
+
+/** 读取全部变量（按名字排序，非法记录被丢弃） */
+export function loadEnvVars(): EnvVar[] {
+  if (cache) return cache;
+  cache = readLegacyEnvVars();
+  return cache;
 }
 
 /** 写入全部变量（去重 + 丢弃非法项；返回落盘后的列表） */
@@ -138,7 +258,8 @@ export function saveEnvVars(list: readonly EnvVar[]): EnvVar[] {
     });
   }
   clean.sort((a, b) => a.name.localeCompare(b.name));
-  storageSet(ENV_VARS_KEY, clean);
+  cache = clean;
+  persist(clean);
   return clean;
 }
 

@@ -186,6 +186,11 @@ if (typeof onSubKeyword === "function") {
 }
 ms.log("info", "ui-test 插件视图已就绪");
 window.__pluginProbe = { keyword: keyword, pluginId: plugin.id, hasStore: !!ms.store };
+// 供独立隔离窗口测试：生命周期 + 网关（store）是否真的通
+if (ms.lifecycle && typeof ms.lifecycle.onShow === "function") {
+  ms.lifecycle.onShow(function () { void ms.store.set("isolated-shown", true); });
+  ms.lifecycle.onEnter(function (action) { void ms.store.set("isolated-enter", action && action.type); });
+}
 `
 );
 
@@ -579,6 +584,48 @@ check(
   pageErrors.length === beforeErrors,
   pageErrors.slice(beforeErrors, beforeErrors + 2).join(" | ")
 );
+
+/* ---------------- P2-4：独立窗口默认隔离形态（真实浏览器） ---------------- */
+await S(
+  "Page.navigate",
+  {
+    url: `${base}/plugin-window.html?pluginId=com.example.ui-test&entry=${encodeURIComponent("ui/view.html")}`,
+  },
+  sessionId
+);
+await sleep(1800);
+const isolatedState = JSON.parse(
+  (await evalJs(`(() => {
+    const f = document.querySelector('.ms-pw-frame');
+    let opaque = false;
+    try { opaque = !!f && f.contentDocument === null; } catch { opaque = true; }
+    return JSON.stringify({
+      hasFrame: !!f,
+      sandbox: f ? f.getAttribute('sandbox') : null,
+      opaque,
+      title: document.title,
+      shown: localStorage.getItem('my-search-desktop:PLUGIN_DATA:com.example.ui-test:isolated-shown'),
+      enter: localStorage.getItem('my-search-desktop:PLUGIN_DATA:com.example.ui-test:isolated-enter'),
+      leakedProbe: typeof window.__pluginProbe !== 'undefined',
+    });
+  })()`)) || "null"
+);
+check("独立窗口创建了隔离 iframe", isolatedState?.hasFrame === true, JSON.stringify(isolatedState));
+check(
+  "iframe sandbox 禁用 allow-same-origin、允许脚本",
+  /allow-scripts/.test(isolatedState?.sandbox || "") &&
+    !/allow-same-origin/.test(isolatedState?.sandbox || ""),
+  String(isolatedState?.sandbox)
+);
+check("父窗口无法读取 iframe 文档（隔离生效）", isolatedState?.opaque === true);
+check("插件脚本经白名单桥写入 ms.store", isolatedState?.shown === "true", String(isolatedState?.shown));
+check("生命周期 enter 经桥送达插件", isolatedState?.enter != null, String(isolatedState?.enter));
+check(
+  "插件脚本的全局探测变量没有泄漏到父窗口",
+  isolatedState?.leakedProbe === false,
+  String(isolatedState?.leakedProbe)
+);
+check("独立窗口标题正确", isolatedState?.title === "UI 测试插件", String(isolatedState?.title));
 
 /* ---------------- 汇总 ---------------- */
 check("全程无页面异常", pageErrors.length === 0, pageErrors.slice(0, 3).join(" | "));

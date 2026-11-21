@@ -88,9 +88,23 @@ function removeSkeleton(): void {
   });
 }
 
-const app = createApp(App);
-app.config.errorHandler = (err, _instance, info) => {
-  console.error("[我的搜索] Vue 渲染错误:", err, info);
-};
-app.mount("#ms-app");
-removeSkeleton();
+// 环境变量的值可能存在 Rust 凭据库（DPAPI），挂载前先灌进内存，
+// 保证首轮插件网关/设置面板读到的就是权威值（不把明文落 localStorage）。
+// 用 async 启动函数而不是顶层 await：构建目标（chrome87 / es2020）不支持顶层 await。
+async function bootstrap(): Promise<void> {
+  try {
+    const { initEnvStore } = await import("./lib/plugins/env-store.ts");
+    await initEnvStore();
+  } catch (e) {
+    console.warn("[我的搜索] 环境变量初始化失败（将退回旧缓存）：", e);
+  }
+
+  const app = createApp(App);
+  app.config.errorHandler = (err, _instance, info) => {
+    console.error("[我的搜索] Vue 渲染错误:", err, info);
+  };
+  app.mount("#ms-app");
+  removeSkeleton();
+}
+
+void bootstrap();

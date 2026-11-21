@@ -268,9 +268,57 @@ export interface PluginShortcutContribution {
   defaultShortcut?: string;
 }
 
+/** 搜索期结果提供者的触发方式 */
+export type PluginResultProviderTrigger = "always" | "prefix" | "regex";
+
+/**
+ * 贡献点：搜索期结果提供者（等价 uTools `onMainPush` 的声明部分）。
+ *
+ * 声明了它，插件才被允许在运行时调用 `ms.results.provide(fn)`；
+ * 宿主在每次搜索时（普通文本搜索、无附件）并发询问所有匹配的提供者，
+ * **不会**为此拉起插件视图——提供者是插件视图启动时注册的回调，
+ * 视图没开过自然没有结果，这是有意的：搜索不能被插件冷启动拖慢。
+ */
+export interface PluginResultProviderContribution {
+  /** 默认 `always`（每次搜索都问） */
+  trigger?: PluginResultProviderTrigger;
+  /**
+   * `trigger=prefix` 时为关键词前缀（如 `"天气"`，`"天气 广州"` 也命中）；
+   * `trigger=regex` 时为正则源码（不含首尾 `/`，编译失败按清单错误拒绝）。
+   */
+  match?: string;
+  /** 单次最多返回条数（1-10，默认 5） */
+  maxItems?: number;
+  /** 单次调用超时毫秒（1-250，默认 120）；宿主还有 250ms 全局总预算 */
+  timeoutMs?: number;
+}
+
+/** 插件通过 `ms.results.provide()` 返回的单条结果 */
+export interface PluginProvidedResult {
+  /** 稳定 id（同一插件内唯一，用于点击回传；缺省以序号代替） */
+  id?: string;
+  title: string;
+  desc?: string;
+  /** 图标：插件内相对路径或 data: URL */
+  icon?: string;
+  /** 点击时回传给插件的动作码（`action.type === "result"` 时的 `action.code`） */
+  action?: string;
+  /** 点击时回传给插件的原始数据 */
+  payload?: unknown;
+}
+
 export interface PluginContributes {
   searchItem?: PluginSearchItemContribution | PluginSearchItemContribution[];
   command?: PluginCommandContribution[];
+  /**
+   * 搜索期结果提供者：允许插件在用户每次搜索时直接返回结果项
+   * （等价于 uTools 的 `onMainPush`，但**不需要拉起插件视图**）。
+   *
+   * 只有声明了本贡献点，插件才能在运行时调用 `ms.results.provide()`；
+   * 提供者受 250ms 总预算与条数上限约束，超时/异常只会丢自己的结果，
+   * 绝不影响宿主的其余搜索结果。
+   */
+  resultProvider?: PluginResultProviderContribution;
   detailView?: PluginDetailViewContribution;
   settingsPanel?: PluginSettingsPanelContribution;
   handlers?: PluginInputHandlersContribution;
@@ -287,6 +335,8 @@ export interface PluginContributes {
 
 /** 插件清单 */
 export interface PluginManifest {
+  /** JSON Schema 地址（编辑器补全用；宿主忽略，不影响安装） */
+  $schema?: string;
   /** 反向域名式唯一 id，如 com.zhuangjie.ai-ask */
   id: string;
   name: string;
@@ -337,7 +387,7 @@ export type ManifestParseResult =
   | { ok: false; errors: string[]; warnings: string[] };
 
 /** 数值字段的合法区间（越界即夹紧，不算错误——避免第三方程子写错就让插件装不上） */
-const NUMBER_LIMITS = {
+export const NUMBER_LIMITS = {
   startupTimeoutMs: { min: 200, max: 30000, def: 3000 },
   callTimeoutMs: { min: 1000, max: 300000, def: 30000 },
   idleExitSec: { min: 0, max: 86400, def: 30 },
@@ -619,6 +669,52 @@ function normalizeContributes(
     }
   }
 
+  // ---- resultProvider（搜索期结果提供者）----
+  if (src.resultProvider != null) {
+    if (typeof src.resultProvider !== "object" || Array.isArray(src.resultProvider)) {
+      errors.push("contributes.resultProvider.invalid");
+    } else {
+      const o = src.resultProvider as Record<string, unknown>;
+      const trigger =
+        o.trigger == null ? "always" : (asString(o.trigger) as PluginResultProviderTrigger);
+      if (trigger !== "always" && trigger !== "prefix" && trigger !== "regex") {
+        errors.push("contributes.resultProvider.trigger.unsupported");
+      } else {
+        const match = asString(o.match) ?? undefined;
+        if (trigger !== "always" && !match) {
+          errors.push("contributes.resultProvider.match.missing");
+        } else if (trigger === "regex" && match) {
+          try {
+            new RegExp(match);
+          } catch {
+            errors.push("contributes.resultProvider.match.invalid");
+          }
+        }
+        const maxItems = o.maxItems == null ? 5 : Number(o.maxItems);
+        if (!Number.isInteger(maxItems) || maxItems < 1 || maxItems > 10) {
+          errors.push("contributes.resultProvider.maxItems.invalid");
+        }
+        const timeoutMs = o.timeoutMs == null ? 120 : Number(o.timeoutMs);
+        if (!Number.isFinite(timeoutMs) || timeoutMs < 1 || timeoutMs > 250) {
+          errors.push("contributes.resultProvider.timeoutMs.invalid");
+        }
+        if (
+          !errors.some((e) => e.startsWith("contributes.resultProvider.trigger")) &&
+          !errors.some((e) => e.startsWith("contributes.resultProvider.match")) &&
+          !errors.some((e) => e.startsWith("contributes.resultProvider.maxItems")) &&
+          !errors.some((e) => e.startsWith("contributes.resultProvider.timeoutMs"))
+        ) {
+          out.resultProvider = {
+            trigger,
+            match,
+            maxItems,
+            timeoutMs,
+          };
+        }
+      }
+    }
+  }
+
   // ---- detailView ----
   if (src.detailView != null) {
     if (typeof src.detailView !== "object" || Array.isArray(src.detailView)) {
@@ -848,13 +944,24 @@ export function describeManifestError(code: string): string {
     case "contributes.searchItem.subSearch.invalid":
       return `第 ${arg} 个搜索项的 subSearch 必须是布尔值（true = 参与二次搜索候选）`;
     case "contributes.command.invalid":
-      return arg ? `第 ${arg} 个命令不是合法对象` : "contributes.command 必须是数组";
-    case "contributes.command.id.missing":
+      return arg ? `第 ${arg} 个命令不是合法对象` : "contributes.command 必须是数组";    case "contributes.command.id.missing":
       return `第 ${arg} 个命令缺少 id`;
     case "contributes.command.prefix.missing":
       return `第 ${arg} 个命令缺少 prefix`;
     case "contributes.command.title.missing":
       return `第 ${arg} 个命令缺少 title`;
+    case "contributes.resultProvider.invalid":
+      return "contributes.resultProvider 必须是一个对象";
+    case "contributes.resultProvider.trigger.unsupported":
+      return "结果提供者的 trigger 只能是 always / prefix / regex";
+    case "contributes.resultProvider.match.missing":
+      return "trigger 为 prefix / regex 时必须提供 match";
+    case "contributes.resultProvider.match.invalid":
+      return "结果提供者的 match 不是合法的正则表达式";
+    case "contributes.resultProvider.maxItems.invalid":
+      return "结果提供者的 maxItems 必须是 1-10 的整数";
+    case "contributes.resultProvider.timeoutMs.invalid":
+      return "结果提供者的 timeoutMs 必须是 1-250 的整数（毫秒）";
     case "contributes.command.id.duplicated":
       return `命令 id 重复：${arg}`;
     case "contributes.detailView.invalid":
@@ -1084,6 +1191,7 @@ export function parsePluginManifest(
   if (errors.length > 0) return { ok: false, errors, warnings };
 
   const manifest: PluginManifest = {
+    $schema: asString(obj.$schema) ?? undefined,
     id: id as string,
     name: name as string,
     version: version as string,

@@ -1,45 +1,19 @@
 /**
- * 插件清单签名工具 — ed25519 离线签名（预留，P5 启用）。
+ * ⚠️ 已废弃：本脚本不再承担签名职责。
  *
- * MVP 阶段目录信任靠策展 + sha256；P5 升级到 Firefox 级强签名。
- * 本工具当前只做密钥生成骨架，验签逻辑待 P5 接入。
+ * 现行签名体系（P2-6）签的是**市场索引**，不是单个 `plugin.json`：
+ *   - 生成/轮换密钥：`node scripts/gen-market-key.mjs`
+ *   - 构建并签名索引：`node scripts/build-index.mjs`（需要私钥，见脚本内说明）
+ *   - 发布前校验：`node scripts/publish-market.mjs`
+ *   - 客户端验签：`src/lib/plugins/index-signature.ts::readCatalogWithIntegrity`
  *
- * 用法:
- *   node scripts/sign-manifest.mjs generate          # 生成密钥对（输出到 stdout）
- *   node scripts/sign-manifest.mjs sign <私钥hex> <清单.json>  # 对 plugin.json 签名
- *   node scripts/sign-manifest.mjs verify <公钥hex> <清单.json> <签名hex>
+ * 为什么不再逐插件签名：索引里的 `sha256` 才是下载完整性的信任根；
+ * 平台签索引后，任何一个条目的下载地址/哈希被篡改都会导致整份索引验签失败。
+ * 这样三方开发者的提交流程不变（仍然只提插件包 + 清单），签名成本只在平台侧。
  *
- * MVP 阶段调用会提示「P5 启用」并退出。
+ * 本脚本保留仅为兼容旧的调用习惯：任何 `generate/sign/verify` 都直接报错退出，
+ * 避免有人误以为「签了 plugin.json 就完成了供应链校验」。
  */
-import { createHash, randomBytes } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-
-const cmd = process.argv[2];
-
-switch (cmd) {
-  case "generate":
-    console.error("⚠️  ed25519 签名 P5 启用，当前使用策展信任（sha256 + PR 评审）");
-    const seed = randomBytes(32).toString("hex");
-    console.log(`私钥种子（保存好！）: ${seed}`);
-    console.log("");
-    console.log("公钥推导命令（安装 openssl 后运行）:");
-    console.log(`  echo "${seed}" | openssl pkey -provider legacy -provider default -in /dev/stdin -pubout`);
-    break;
-
-  case "sign":
-  case "verify":
-    console.error("⚠️  ed25519 签名尚未启用（P5 计划），当前使用策展信任模型");
-    process.exit(1);
-    break;
-
-  default:
-    console.log("用法:");
-    console.log("  node scripts/sign-manifest.mjs generate          # 生成密钥对");
-    console.log("  node scripts/sign-manifest.mjs sign <key> <json> # 签名（P5 启用）");
-    console.log("  node scripts/sign-manifest.mjs verify <key> <json> <sig> # 验签（P5 启用）");
-    break;
-}
+console.error("scripts/sign-manifest.mjs 已废弃：请使用 scripts/gen-market-key.mjs + scripts/build-index.mjs（签名对象是市场索引）。");
+console.error("客户端验签逻辑见 src/lib/plugins/index-signature.ts；文档见 docs/plugin-api-versioning.md。");
+process.exit(2);

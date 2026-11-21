@@ -15,7 +15,11 @@
 import type { SearchItem } from "../../types/index.ts";
 import { listSearchItems, type PluginManifest } from "./manifest.ts";
 import { isInlineIconRef } from "./icon.ts";
-import type { PluginRecord } from "./registry.ts";
+import {
+  listAllCommands,
+  normalizeCommandPrefix,
+  type PluginRecord,
+} from "./registry.ts";
 
 // 图标引用的判定与解析集中在 icon.ts（设置面板与搜索窗口必须一致），
 // 这里原样再导出一次，纯粹为了让既有导入路径继续可用。
@@ -25,6 +29,8 @@ export { isInlineIconRef, iconDataUrl, iconMimeOf, iconRefsOf } from "./icon.ts"
 export const PLUGIN_ITEM_FLAG = "_pluginId";
 /** 插件项「参与二次搜索」的标记字段（清单 contributes.searchItem.subSearch 的运行时投影） */
 export const PLUGIN_SUB_SEARCH_FLAG = "_pluginSubSearch";
+/** 命令型插件项的标记字段：值为命令 id（`contributes.command` / `ms.commands`） */
+export const PLUGIN_COMMAND_FLAG = "_pluginCommandId";
 /** 来源标记：结果列表里显示为「插件：xxx」 */
 export const PLUGIN_SUBSCRIBE_PREFIX = "插件：";
 
@@ -49,29 +55,66 @@ export function buildPluginItems(
 ): SearchItem[] {
   if (!record.enabled) return [];
   const list = listSearchItems(record.manifest);
-  if (list.length === 0) return [];
-  return list
-    .filter((it) => it.visible !== false)
-    .map((it) => {
-      // 条目自身没写图标时，退回插件清单的顶层 icon（作者通常只写一处）
-      const rawIcon = it.icon ?? record.manifest.icon;
-      const icon = rawIcon == null ? undefined : isInlineIconRef(rawIcon) ? rawIcon : resolveIcon?.(rawIcon);
-      const item: SearchItem = {
-        title: it.title,
-        desc: it.desc ?? record.description ?? "",
-        resource: it.resource ?? "",
-        type: "script", // 复用脚本项的渲染与打开路径（点击 = 打开视图）
-        icon,
-        subscribe: PLUGIN_SUBSCRIBE_PREFIX + record.name,
-      };
-      // 标记 + 关键词：宿主据此渲染插件视图、以及把「关键词 : 子词」转发给插件
-      item[PLUGIN_ITEM_FLAG] = record.id;
-      item._pluginKeyword = it.keyword;
-      // 参与二次搜索的声明：只有它为 true，宿主才会补 `[可搜索]` 标记
-      // （补标记 = 进入 PRO 模式候选，见 search-engine 的 _indexItem）
-      item[PLUGIN_SUB_SEARCH_FLAG] = it.subSearch === true;
-      return item;
-    });
+  const out: SearchItem[] = [];
+
+  const itemIcon = (declared?: string): string | undefined => {
+    // 条目自身没写图标时，退回插件清单的顶层 icon（作者通常只写一处）
+    const rawIcon = declared ?? record.manifest.icon;
+    return rawIcon == null
+      ? undefined
+      : isInlineIconRef(rawIcon)
+        ? rawIcon
+        : resolveIcon?.(rawIcon);
+  };
+
+  for (const it of list) {
+    if (it.visible === false) continue;
+    const item: SearchItem = {
+      title: it.title,
+      desc: it.desc ?? record.description ?? "",
+      resource: it.resource ?? "",
+      type: "script", // 复用脚本项的渲染与打开路径（点击 = 打开视图）
+      icon: itemIcon(it.icon),
+      subscribe: PLUGIN_SUBSCRIBE_PREFIX + record.name,
+    };
+    // 标记 + 关键词：宿主据此渲染插件视图、以及把「关键词 : 子词」转发给插件
+    item[PLUGIN_ITEM_FLAG] = record.id;
+    item._pluginKeyword = it.keyword;
+    // 参与二次搜索的声明：只有它为 true，宿主才会补 `[可搜索]` 标记
+    // （补标记 = 进入 PRO 模式候选，见 search-engine 的 _indexItem）
+    item[PLUGIN_SUB_SEARCH_FLAG] = it.subSearch === true;
+    out.push(item);
+  }
+
+  /**
+   * 命令 → 搜索项。
+   *
+   * 命令天生消费「父 : 子」，因此 subSearch 恒为 true（补 `[可搜索]` 后
+   * 才能进入 PRO 模式候选）。与 searchItem 共用同一个关键词时以 searchItem
+   * 为准——同一个关键词出现两条一模一样的入口只会让用户困惑。
+   */
+  const usedKeyword = new Set(out.map((it) => it._pluginKeyword).filter(Boolean) as string[]);
+  for (const cmd of listAllCommands(record)) {
+    const normalized = normalizeCommandPrefix(cmd.prefix);
+    if (!normalized) continue;
+    if (usedKeyword.has(normalized.keyword)) continue;
+    usedKeyword.add(normalized.keyword);
+    const item: SearchItem = {
+      title: cmd.title,
+      desc: cmd.desc ?? `命令 · ${record.name}`,
+      resource: "",
+      type: "script",
+      icon: itemIcon(undefined),
+      subscribe: PLUGIN_SUBSCRIBE_PREFIX + record.name,
+    };
+    item[PLUGIN_ITEM_FLAG] = record.id;
+    item[PLUGIN_COMMAND_FLAG] = cmd.id;
+    item._pluginKeyword = normalized.keyword;
+    item[PLUGIN_SUB_SEARCH_FLAG] = true;
+    out.push(item);
+  }
+
+  return out;
 }
 
 /** 合成所有启用插件的搜索项 */
@@ -95,6 +138,12 @@ export function pluginIdOf(item: SearchItem | null | undefined): string | null {
 /** 取插件项声明的关键词（用于子关键词转发与命令注册） */
 export function pluginKeywordOf(item: SearchItem | null | undefined): string | null {
   const v = item?._pluginKeyword;
+  return typeof v === "string" && v !== "" ? v : null;
+}
+
+/** 取「命令型」插件项的命令 id（非命令项返回 null） */
+export function pluginCommandIdOf(item: SearchItem | null | undefined): string | null {
+  const v = item?.[PLUGIN_COMMAND_FLAG];
   return typeof v === "string" && v !== "" ? v : null;
 }
 

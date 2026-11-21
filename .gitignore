@@ -34,6 +34,9 @@ test/_fix-*.mjs
 # 插件运行时落盘数据（如资源监控的 history.json：含使用者本机进程信息，不入库也不入包）
 plugins/*/.data/
 
+# 本地签名私钥（生产放 CI secret；绝不提交）
+.secrets/
+
 # 系统文件
 .DS_Store
 *.log

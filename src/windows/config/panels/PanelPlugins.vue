@@ -883,6 +883,28 @@ function showPermissions(rec: any): void {
 function closePerms(): void {
   permPanel.value = null;
 }
+/** 最近 8 条权限申请（倒序）：让用户看到插件「讨要过什么」 */
+function requestHistoryOf(rec: any): any[] {
+  const list = rec?.permissionRequests;
+  return Array.isArray(list) ? list.slice(-8).reverse() : [];
+}
+function requestResultText(result: string): string {
+  switch (result) {
+    case "granted":
+      return "已允许";
+    case "denied":
+      return "已拒绝";
+    case "throttled":
+      return "限流";
+    default:
+      return "无效";
+  }
+}
+function requestTime(at: number): string {
+  const d = new Date(Number(at) || 0);
+  const p = (n: number): string => String(n).padStart(2, "0");
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
 async function revokePerm(pluginId: string, permission: string): Promise<void> {
   rt.revoke(pluginId, permission);
   const rec = rt.get(pluginId);
@@ -1051,13 +1073,20 @@ function durFrom(ts: number | null): string {
               :class="{ updating: updatingId === record.id }"
               role="button"
               tabindex="0"
-              :title="`有可用更新 v${record.updateAvailable}，点击更新`"
+              :title="record.pendingUpgrade
+                ? `新版 v${record.updateAvailable} 新增了高危权限（${record.pendingUpgrade.blockedPermissions.join('、')}），点击确认后更新`
+                : `有可用更新 v${record.updateAvailable}，点击更新`"
               @click.stop="updatePlugin(record)"
               @keydown.enter.prevent.stop="updatePlugin(record)"
               @keydown.space.prevent.stop="updatePlugin(record)"
             >
               <span class="arrow">→</span>
               <span class="new-ver">{{ updatingId === record.id ? '更新中…' : `v${record.updateAvailable}` }}</span>
+              <span
+                v-if="record.pendingUpgrade"
+                class="new-ver-pending"
+                title="自动更新已暂停：等待你确认高危权限"
+              >待确认</span>
             </span>
           </div>
           <div class="plugin-arrow">{{ expanded[record.id] ? '▼' : '▶' }}</div>
@@ -1210,6 +1239,21 @@ function durFrom(ts: number | null): string {
                     <button class="btn-tiny btn-warn" @click="revokePerm(permPanel.pluginId, entry.raw)">撤销</button>
                   </div>
                 </div>
+              </div>
+            </div>
+            <!-- 申请历史：插件在运行时向你讨要过什么、你怎么回答的 -->
+            <div v-if="requestHistoryOf(permPanel.record).length > 0" class="perm-requests">
+              <h5>申请历史（最近 8 条）</h5>
+              <div
+                v-for="(req, i) in requestHistoryOf(permPanel.record)"
+                :key="`${req.at}-${i}`"
+                class="perm-request-row"
+              >
+                <span class="perm-request-time">{{ requestTime(req.at) }}</span>
+                <span class="perm-request-apis">{{ req.apis.join("、") }}</span>
+                <span class="perm-request-result" :class="`req-${req.result}`">{{ requestResultText(req.result) }}</span>
+                <span v-if="req.reason" class="perm-request-reason">理由：{{ req.reason }}</span>
+                <span v-if="req.message" class="perm-request-message">{{ req.message }}</span>
               </div>
             </div>
           </div>

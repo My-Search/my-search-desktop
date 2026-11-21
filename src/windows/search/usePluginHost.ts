@@ -25,6 +25,12 @@ import {
   type PluginSyncState,
 } from "../../lib/plugins/host.ts";
 import { permissionBaseId } from "../../lib/plugins/permissions.ts";
+import type { PluginSubInputOptions } from "../../lib/plugins/host/core.ts";
+import {
+  permissionRequestText,
+  planPermissionRequest,
+  recordPermissionRequest,
+} from "../../lib/plugins/permission-requests.ts";
 import {
   onRegistryChanged,
   syncRecordGateway,
@@ -42,6 +48,10 @@ import {
   restartPluginBackend,
   stopPluginBackend,
   watchPluginDir,
+  pluginSecretGet,
+  pluginSecretSet,
+  pluginSecretDelete,
+  pluginSecretList,
 } from "../../lib/plugins/ipc.ts";
 import {
   buildAllPluginItems,
@@ -51,6 +61,10 @@ import {
   PLUGIN_SUBSCRIBE_PREFIX,
 } from "../../lib/plugins/plugin-items.ts";
 import { iconDataUrl, iconRefsOf } from "../../lib/plugins/icon.ts";
+import {
+  collectProviderResults as collectFromProviders,
+  type CollectResultProvidersOptions,
+} from "../../lib/plugins/result-provider.ts";
 import {
   approveNewPermissions,
   decideBackendReload,
@@ -146,6 +160,15 @@ export interface PluginHostRuntimeOptions {
    * 本模块只负责把插件的调用转达出去，不碰视图 DOM。
    */
   refreshPluginTheme?: () => void;
+  /**
+   * 宿主子输入框（P1-5）：转发给视图宿主渲染在插件上方的输入框。
+   * 不注入（如独立插件窗口）时 `ms.ui.subInput.*` 返回 false。
+   */
+  subInput?: (
+    pluginId: string,
+    action: "set" | "remove" | "focus",
+    options?: PluginSubInputOptions
+  ) => boolean;
   /**
    * 数据同步（插件的 `ms.sync.status` / `ms.sync.trigger`）。
    *
@@ -514,6 +537,25 @@ export function usePluginHost(opts: PluginHostRuntimeOptions) {
   }
 
   /**
+   * 询问插件的搜索期结果提供者（P0-2）。
+   *
+   * 只问「已启用 + 清单声明了 resultProvider + 当前注册了回调」的插件；
+   * 超时/异常在内层已隔离，这里不会再抛错。视图没开过的插件没有回调，
+   * 因此搜索不会为插件冷启动付出代价。
+   */
+  async function providerResults(keyword: string): Promise<SearchItem[]> {
+    if (!loaded.value) return [];
+    const opts: CollectResultProvidersOptions = {
+      keyword,
+      records: activePlugins(),
+      resolveIcon,
+      onError: (pluginId, reason) =>
+        console.warn(`[插件 ${pluginId}] 结果提供者跳过: ${reason}`),
+    };
+    return await collectFromProviders(opts);
+  }
+
+  /**
    * 取某插件用于「打开视图」的数据项（全局快捷键 open-plugin 用）。
    *
    * 插件视图的打开路径要求一个带 `_pluginId` 的 SearchItem（视图宿主据此找记录、
@@ -605,9 +647,14 @@ export function usePluginHost(opts: PluginHostRuntimeOptions) {
       detachPath: opts.detachPath,
       // 插件界面内改主题（ms.ui.applyTheme）→ 视图宿主重算呼出窗口主题
       refreshPluginTheme: () => opts.refreshPluginTheme?.(),
+      subInput: opts.subInput,
       // 市场安装/更新的用户确认闸门（ms.market.install）：弹宿主安装确认框
       confirmPluginInstall: opts.confirmPluginInstall,
       // 详情视图里的运行期授权：直接改注册表并同步网关
+      getSecret: (id, name) => pluginSecretGet(id, name),
+      setSecret: (id, name, value) => pluginSecretSet(id, name, value),
+      deleteSecret: (id, name) => pluginSecretDelete(id, name),
+      listSecrets: (id) => pluginSecretList(id),
       requestPermission: async (id, permission) => {
         const rec = get(id);
         if (!rec) return false;
@@ -622,6 +669,60 @@ export function usePluginHost(opts: PluginHostRuntimeOptions) {
         denyPermission(id, permission);
         auditDenied(id, "permission.request", permission, "用户拒绝");
         return false;
+      },
+      /**
+       * `ms.permissions.request`（P1-1）：批量申请清单里声明过的权限。
+       * 校验顺序：合法/已声明 → 24h 频率 → 一次弹窗 → 逐项授予。
+       */
+      requestPermissions: async (id, apis, reason) => {
+        const rec = get(id);
+        if (!rec) throw new Error("插件未加载，无法申请权限");
+        const now = Date.now();
+        const plan = planPermissionRequest(rec, apis, now);
+        const why = String(reason ?? "").slice(0, 200);
+        if (!plan.ok) {
+          recordPermissionRequest(rec, {
+            apis: Array.isArray(apis) ? apis.map((p) => String(p ?? "")) : [],
+            reason: why,
+            at: now,
+            result: plan.reason === "throttled" ? "throttled" : "invalid",
+            message: plan.message,
+          });
+          persist();
+          auditDenied(id, "permissions.request", why, plan.message);
+          return {
+            ok: false,
+            granted: [],
+            denied: [],
+            throttled: plan.throttled ?? [],
+            error: plan.message,
+          };
+        }
+        // 全部已授予：不弹窗、不写历史
+        if (plan.apis.length === 0) {
+          return { ok: true, granted: plan.already, denied: [], throttled: [] };
+        }
+        const allowed = await opts.confirm(
+          permissionRequestText(rec, plan.apis, reason)
+        );
+        recordPermissionRequest(rec, {
+          apis: plan.apis,
+          reason: why,
+          at: now,
+          result: allowed ? "granted" : "denied",
+        });
+        persist();
+        if (!allowed) {
+          return { ok: false, granted: plan.already, denied: plan.apis, throttled: [] };
+        }
+        for (const p of plan.apis) await grantPermission(id, p);
+        opts.toast(`已允许「${rec.name}」使用 ${plan.apis.length} 项权限`, "ok");
+        return {
+          ok: true,
+          granted: [...plan.already, ...plan.apis],
+          denied: [],
+          throttled: [],
+        };
       },
       callBackend: async (id, method, params) => {
         // 同步网关，确保 Rust 侧有此插件的注册记录
@@ -710,6 +811,7 @@ export function usePluginHost(opts: PluginHostRuntimeOptions) {
     get,
     activePlugins,
     pluginItems,
+    providerResults,
     hasPluginItems,
     itemForPlugin,
     grantPermission,

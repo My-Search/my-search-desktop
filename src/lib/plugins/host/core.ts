@@ -76,6 +76,31 @@ export interface PluginSyncState {
  * 宿主为插件注入的运行上下文（精简后仅保留窗口/界面交互钩子；
  * 截图、剪贴板、手势、存储、快捷键等原生能力一律由网关模块直连 IPC 表驱动分派）。
  */
+/** 批量权限申请的结果（`ms.permissions.request` 原样返回给插件） */
+export interface PermissionRequestOutcome {
+  /** 至少有一项权限在本次调用后处于已授予状态 */
+  ok: boolean;
+  granted: string[];
+  denied: string[];
+  /** 24h 内申请次数超限、本次未弹窗的权限 */
+  throttled: string[];
+  /** 申请本身不合法时的可读原因（未知/未声明/超量/空） */
+  error?: string;
+}
+
+/** `ms.ui.subInput.set()` 的选项（等价 uTools `setSubInput`） */
+export interface PluginSubInputOptions {
+  placeholder?: string;
+  /** 指定初始值（仅在 set 时显式传入才覆盖用户正在输入的内容） */
+  value?: string;
+  /** false = 隐藏但保留状态（默认 true） */
+  visible?: boolean;
+  /** 设置后立即聚焦 */
+  focus?: boolean;
+  /** 输入变化回调（宿主每次 input 都调用；跨插件视图与宿主同一 JS 域） */
+  onChange?: (value: string) => void;
+}
+
 export interface PluginHostContext {
   /** 当前注册表 */
   registry: () => PluginRegistryFile;
@@ -109,7 +134,7 @@ export interface PluginHostContext {
     pluginId: string,
     entry: string,
     title: string,
-    opts?: { width?: number; height?: number; alwaysOnTop?: boolean }
+    opts?: { width?: number; height?: number; alwaysOnTop?: boolean; isolated?: boolean }
   ) => Promise<string | boolean> | void;
   /** 市场安装/更新前的用户确认弹窗（未注入时 fail-closed 拒绝安装） */
   confirmPluginInstall?: (req: PluginInstallConfirmRequest) => Promise<boolean>;
@@ -141,6 +166,32 @@ export interface PluginHostContext {
   log?: (pluginId: string, level: "info" | "warn" | "error", text: string) => void;
   /** 读取受控密钥 */
   getSecret?: (pluginId: string, name: string) => Promise<string | null>;
+  /** 写入（覆盖）受控密钥（DPAPI / 插件命名空间；空值等同删除） */
+  setSecret?: (pluginId: string, name: string, value: string) => Promise<boolean>;
+  /** 删除受控密钥（返回是否真的删掉了） */
+  deleteSecret?: (pluginId: string, name: string) => Promise<boolean>;
+  /** 列出该插件已保存的密钥名字（不含值） */
+  listSecrets?: (pluginId: string) => Promise<string[]>;
+  /**
+   * 宿主子输入框（`ms.ui.subInput`）：在插件视图上方渲染一个宿主输入框，
+   * 让插件做「列表筛选 / 二次检索」时不必自己画一个和宿主风格割裂的输入框。
+   * 返回是否成功（会话不在前台/停靠中找不到时为 false）。
+   */
+  subInput?: (
+    pluginId: string,
+    action: "set" | "remove" | "focus",
+    options?: PluginSubInputOptions
+  ) => boolean;
+  /**
+   * 批量权限申请（`ms.permissions.request`）：宿主弹**一次**分组确认框，
+   * 返回哪些已授予 / 被拒绝 / 被限流。频率限制与「只能申请清单声明过的权限」
+   * 由宿主实现（见 `permission-requests.ts`）。
+   */
+  requestPermissions?: (
+    pluginId: string,
+    apis: string[],
+    reason?: string
+  ) => Promise<PermissionRequestOutcome>;
   /** 调用插件后台进程方法 */
   callBackend?: (pluginId: string, method: string, params: unknown) => Promise<unknown>;
   /** 打开宿主的「选择环境变量」授权弹层 */

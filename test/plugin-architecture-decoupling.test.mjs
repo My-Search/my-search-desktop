@@ -186,7 +186,7 @@ function pass(name) {
     pid: "com.example.demo",
     entry: "ui/popup.html",
     title: "独立工具窗",
-    opts: { width: 640, height: 480, alwaysOnTop: undefined },
+    opts: { width: 640, height: 480, alwaysOnTop: undefined, isolated: true },
   });
 
   // 通用文件化 JSON 存储读写删除

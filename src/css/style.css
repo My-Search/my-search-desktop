@@ -971,6 +971,49 @@ html, body {
   display: none;
 }
 
+/* 宿主子输入框（ms.ui.subInput）：渲染在插件视图上方，复用宿主风格 */
+#text_show .plugin-view > .ms-sub-input {
+  flex: none;
+  margin: 0 0 8px;
+  padding: 0 2px;
+}
+
+#text_show .plugin-view.has-sub-input {
+  display: flex;
+  flex-direction: column;
+}
+
+#text_show .plugin-view.has-sub-input > .ms-sub-input-field {
+  flex: none;
+}
+
+#text_show .plugin-view.has-sub-input > .ms-plugin-session {
+  flex: 1;
+  min-height: 0;
+  height: auto;
+}
+
+.ms-sub-input-field {
+  width: 100%;
+  box-sizing: border-box;
+  height: 34px;
+  padding: 0 10px;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--field-bg, rgba(127, 127, 127, 0.08));
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  outline: none;
+}
+
+.ms-sub-input-field:focus {
+  border-color: var(--accent, #4c8dff);
+}
+
+.ms-sub-input-field::placeholder {
+  color: var(--muted);
+}
+
 /* 脚本视图执行失败时，宿主在 #text_show 顶部插入的提示条
  * （view:html 照常显示，但 view:js 抛错，见 useScriptHost / App.vue）。 */
 #text_show .script-view-tip {
@@ -4021,6 +4064,16 @@ html.theme-dark #ms-config-view .btn-warn:hover {
   border-bottom: none;
 }
 
+/* 自动更新被高危权限拦下：角标旁的小徽标，提示「需要你确认」而不是「点一下就装」 */
+#ms-config-view .btn-update-link .new-ver-pending {
+  margin-left: 2px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--err) 14%, transparent);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+}
+
 #ms-config-view .plugin-arrow {
   flex-shrink: 0;
   width: 16px;
@@ -4299,6 +4352,69 @@ html.theme-dark #ms-config-view .btn-warn:hover {
   border-radius: 4px;
   padding: 1px 6px;
   font-family: Consolas, Menlo, monospace;
+}
+
+/* ---- 权限申请历史（插件运行时申请过什么） ---- */
+#ms-config-view .perm-requests {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line);
+}
+
+#ms-config-view .perm-requests h5 {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+#ms-config-view .perm-request-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 0;
+  font-size: 12px;
+  border-bottom: 1px dotted rgba(127, 127, 127, 0.12);
+}
+
+#ms-config-view .perm-request-time {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-family: Consolas, Menlo, monospace;
+  font-size: 11px;
+}
+
+#ms-config-view .perm-request-apis {
+  flex: 1;
+  min-width: 0;
+  font-family: Consolas, Menlo, monospace;
+  font-size: 11.5px;
+}
+
+#ms-config-view .perm-request-result {
+  flex-shrink: 0;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--code-bg);
+}
+
+#ms-config-view .perm-request-result.req-granted {
+  color: var(--ok, #2f9e6f);
+}
+
+#ms-config-view .perm-request-result.req-denied,
+#ms-config-view .perm-request-result.req-throttled {
+  color: var(--err, #d9534f);
+}
+
+#ms-config-view .perm-request-reason,
+#ms-config-view .perm-request-message {
+  flex-basis: 100%;
+  color: var(--muted);
+  font-size: 11.5px;
+  padding-left: 2px;
 }
 
 /* ---- 日志面板 ---- */

@@ -147,7 +147,8 @@ export function updateableCount(reg: PluginRegistryFile): number {
  */
 export async function checkAndApplyMarketUpdates(): Promise<number> {
   const { marketFetchRaw } = await import("./ipc.ts");
-  const { compatibleEntries, parseCatalog } = await import("./market-types.ts");
+  const { compatibleEntries } = await import("./market-types.ts");
+  const { readCatalogWithIntegrity, describeCatalogSignatureError } = await import("./index-signature.ts");
   const { loadRegistry, saveRegistry } = await import("./registry.ts");
 
   const reg = loadRegistry();
@@ -156,11 +157,12 @@ export async function checkAndApplyMarketUpdates(): Promise<number> {
     typeof MARKET_CATALOG_URL !== "undefined" ? MARKET_CATALOG_URL : "",
     ""
   );
-  const text = new TextDecoder("utf-8").decode(raw);
-  const parsed = parseCatalog(text);
-  if (!parsed.ok) throw new Error("市场目录解析失败");
+  const verified = await readCatalogWithIntegrity(raw);
+  if (!verified.ok) {
+    throw new Error(`市场目录校验失败：${describeCatalogSignatureError(verified.errors).join("；")}`);
+  }
   const compat = compatibleEntries(
-    parsed.catalog,
+    verified.catalog,
     typeof __APP_VERSION__ !== "undefined" ? __APP_VERSION__ : ""
   );
   const diff = diffCatalog(reg, compat);

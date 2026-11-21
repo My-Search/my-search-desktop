@@ -12,8 +12,9 @@
  *      - 本地 `file` / `folder` 来源插件 `isPluginAutoUpdateEnabled` 恒为 `false`；
  *   4. `runPluginAutoUpdate` 编排流水线：
  *      - 所有已安装插件 `autoUpdate` 均为关闭时零网络请求（`checked: false`）；
- *      - 只要插件已开启 `autoUpdate`，无论新版本声明了哪些权限（含新增 `backend.spawn` 等），
- *        一律后台静默下载、自动授予新清单声明权限并替换落盘，同时保留用户禁用态与行为偏好；
+ *      - 只要插件已开启 `autoUpdate`，普通新增权限（如 `store`）仍静默下载、自动授予并替换落盘；
+ *      - 新增 `critical` 权限（如 `backend.spawn`）或 `scope:*` 时不落盘，只登记
+ *        `pendingUpgrade` + 更新角标，等用户确认（不得静默提权）；
  *      - 关闭 `autoUpdate` 的插件仅更新 `updateAvailable` 角标，绝不自动下载安装；
  *   5. UI 接线契约：`PanelGeneral.vue` 无全局自动更新插件开关，`PluginInstallDialog.vue`、
  *      `PanelPlugins.vue` 与 `search/App.vue` 闭环接线完整。
@@ -58,6 +59,7 @@ const {
   hasAnyAutoUpdatePlugin,
   runPluginAutoUpdate,
 } = await import("../src/lib/plugins/auto-update.ts");
+const { readCatalogWithIntegrity } = await import("../src/lib/plugins/index-signature.ts");
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 let passed = 0;
@@ -464,6 +466,7 @@ function pass(label) {
       downloadedPkgUrls.push(url);
       return new TextEncoder().encode(url);
     },
+    readCatalog: (raw) => readCatalogWithIntegrity(raw, { requireSignature: false }),
     unpack: async (bytes) => {
       const url = new TextDecoder("utf-8").decode(bytes);
       const manifest = packageManifests[url];
@@ -491,33 +494,44 @@ function pass(label) {
   });
 
   assert.equal(res.checked, true);
-  assert.deepEqual(res.updated, [
-    { id: "com.example.safe", from: "1.0.0", to: "1.1.0" },
-    { id: "com.example.newperm", from: "1.0.0", to: "1.2.0" },
+  assert.deepEqual(res.updated, [{ id: "com.example.safe", from: "1.0.0", to: "1.1.0" }]);
+  assert.deepEqual(res.blocked, [
+    { id: "com.example.newperm", version: "1.2.0", permissions: ["backend.spawn"] },
   ]);
   assert.deepEqual(res.skippedActive, ["com.example.active"]);
   assert.ok(
     !downloadedPkgUrls.some((u) => u.includes("com.example.manual")),
     "关闭了自动更新的插件不得被后台下载"
   );
-  assert.deepEqual(writtenPackages, ["com.example.safe", "com.example.newperm"]);
+  assert.deepEqual(writtenPackages, ["com.example.safe"], "高危新增权限的版本不得落盘");
 
   const safeAfter = regState.plugins.find((p) => p.id === "com.example.safe");
   assert.equal(safeAfter.version, "1.1.0");
   assert.equal(safeAfter.enabled, false, "保留用户原本禁用态");
 
   const newPermAfter = regState.plugins.find((p) => p.id === "com.example.newperm");
-  assert.equal(newPermAfter.version, "1.2.0", "已开启自动更新的插件即使新增权限也直接静默升级");
+  assert.equal(newPermAfter.version, "1.0.0", "新增 critical 权限不得静默升级");
   assert.ok(
-    newPermAfter.grants.some((g) => g.permission === "backend.spawn"),
-    "静默升级后自动授予新清单声明的权限"
+    !newPermAfter.grants.some((g) => g.permission === "backend.spawn"),
+    "待确认期间不得预先授予 backend.spawn"
   );
-  assert.equal(newPermAfter.updateAvailable, null);
+  assert.equal(newPermAfter.updateAvailable, "1.2.0", "角标指向新版本，提示用户去确认");
+  assert.deepEqual(
+    newPermAfter.pendingUpgrade?.blockedPermissions,
+    ["backend.spawn"],
+    "登记待确认权限清单"
+  );
+  assert.equal(newPermAfter.pendingUpgrade?.version, "1.2.0");
+  assert.equal(
+    newPermAfter.pendingUpgrade?.sha256,
+    sha,
+    "记录包摘要，用户确认后仍按该摘要复核"
+  );
 
   const manualAfter = regState.plugins.find((p) => p.id === "com.example.manual");
   assert.equal(manualAfter.version, "1.0.0", "手动关闭自动更新的插件保持原版本");
   assert.equal(manualAfter.updateAvailable, "1.1.0", "手动更新插件仍显示可更新角标");
-  pass("runPluginAutoUpdate 授权即全静默升级（含新增权限版本）与跳过关闭项全部通过");
+  pass("runPluginAutoUpdate 静默升级普通权限、拦截 critical 权限并可回退确认，跳过关闭项");
 }
 
 /* ============ 5. UI 闭环接线校验 ============ */

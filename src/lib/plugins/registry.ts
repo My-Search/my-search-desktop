@@ -33,6 +33,7 @@ import {
   parsePluginManifest,
 } from "./manifest.ts";
 import { hasPermission, permissionBaseId, permissionCovers } from "./permissions.ts";
+import type { PluginPermissionRequest } from "./permission-requests.ts";
 import { storageRemove, storageSet } from "../util.ts";
 
 /** 注册表持久化键（与既有缓存键命名风格一致：大写下划线 + _CACHE_KEY） */
@@ -158,15 +159,66 @@ export interface PluginRecord {
   builtinFingerprint?: string | null;
   /** 待授权的权限请求（运行时被拒时登记，面板可一键授予） */
   pendingPermission?: string | null;
+  /**
+   * 运行时注册的命令（`ms.commands.register`）。
+   *
+   * 与清单 `contributes.command` 的关系：清单是「安装即生效」的声明，
+   * 这里是「运行时才确定」的命令（如按同步下来的仓库列表动态生成）。
+   * 两者按 `id` 合并，运行时优先；**必须落盘**，否则重启后命令消失，
+   * 搜索入口与插件实际能力就不一致了。
+   */
+  runtimeCommands?: RuntimeCommand[] | null;
+  /**
+   * 权限申请历史（`ms.permissions.request` 每次尝试都记一条）。
+   *
+   * 用途有二：24h 频率限制的计数依据；面板「申请历史」的展示来源。
+   * 只保留最近 50 条（见 permission-requests.ts），不会无限增长。
+   */
+  permissionRequests?: PluginPermissionRequest[] | null;
   /** legacy 脚本项的引用信息（仅 source.kind === "legacy"） */
   legacyRef?: { title: string; subscribe: string };
   /** 更新检查：市场里的最新版本（由市场模块写入） */
   updateAvailable?: string | null;
+  /**
+   * 自动更新被「高危新增权限」拦下时留下的待确认记录。
+   *
+   * 背景：`autoUpdate` 的语义是「静默升级」，但静默授予 `backend.spawn`
+   * 这类 critical 权限等于让插件靠发版给自己提权。因此自动更新遇到这类
+   * 新增权限时**不落盘**，只登记本字段；用户确认后再走常规安装确认链路。
+   * 常规安装/更新提交成功时由 `upsertPlugin` 清空。
+   */
+  pendingUpgrade?: PendingUpgrade | null;
+}
+
+/** 自动更新待确认的升级（见 `PluginRecord.pendingUpgrade`） */
+export interface PendingUpgrade {
+  /** 新版本号 */
+  version: string;
+  /** 包地址（用户确认后按此下载；不复用旧包，避免确认的是 A、装的是 B） */
+  downloadUrl: string;
+  /** 包摘要（确认后仍要复核） */
+  sha256: string;
+  /** 需要用户逐条确认的新增权限（critical / scope 全通配） */
+  blockedPermissions: string[];
+  /** 登记时间 */
+  at: number;
 }
 
 export interface PluginRegistryFile {
   version: number;
   plugins: PluginRecord[];
+}
+
+/** 运行时注册的搜索命令（见 `PluginRecord.runtimeCommands`） */
+export interface RuntimeCommand {
+  /** 插件内唯一（与清单 command.id 同一命名空间） */
+  id: string;
+  /** 关键词前缀，必须含 `" : "` 边界（如 `"翻译 : "`） */
+  prefix: string;
+  title: string;
+  desc?: string;
+  /** 注册时间（面板展示 / 排重用） */
+  at: number;
 }
 
 /** 空运行态 */
@@ -594,6 +646,12 @@ export function upsertPlugin(
     grants: mergeGrants(prev.grants, incoming.grants),
     denied: prev.denied,
     pendingPermission: prev.pendingPermission ?? null,
+    // 运行时命令是插件自己声明的能力，升级时保留（新清单若同名同 id，合成时运行时优先）。
+    runtimeCommands: prev.runtimeCommands ?? null,
+    // 申请历史跨版本保留（否则升级就能重置 24h 频率限制）
+    permissionRequests: prev.permissionRequests ?? null,
+    // 走到 upsert 说明这次升级已经提交（用户确认过或无需确认），待确认记录作废。
+    pendingUpgrade: null,
     legacyRef: prev.legacyRef,
     updateAvailable: null,
     // 内置内容指纹：安装方（install-builtin）显式给出时以它为准（重装场景），
@@ -729,6 +787,184 @@ export function planUpgrade(prev: PluginRecord, next: PluginManifest): UpgradePl
     newPermissions,
     newOptional,
   };
+}
+
+/** 登记「自动更新被高危权限拦下」的待确认记录（就地修改） */
+export function markPendingUpgrade(
+  reg: PluginRegistryFile,
+  id: string,
+  pending: PendingUpgrade
+): PluginRecord | null {
+  const rec = reg.plugins.find((p) => p.id === id);
+  if (!rec) return null;
+  rec.pendingUpgrade = pending;
+  // 角标同步指向新版本：用户点「更新」时就能看到待确认的权限。
+  rec.updateAvailable = pending.version;
+  return rec;
+}
+
+/** 清空待确认记录（用户确认/取消，或插件被卸载时调用） */
+export function clearPendingUpgrade(reg: PluginRegistryFile, id: string): void {
+  const rec = reg.plugins.find((p) => p.id === id);
+  if (rec && rec.pendingUpgrade != null) rec.pendingUpgrade = null;
+}
+
+/** 该插件的待确认升级（没有则 null） */
+export function pendingUpgradeOf(record: PluginRecord | null | undefined): PendingUpgrade | null {
+  return record?.pendingUpgrade ?? null;
+}
+
+/* ============================================================
+ * 运行时命令（ms.commands.*）
+ * ============================================================ */
+
+/** 单插件可注册的运行时命令上限（防止插件把搜索框塞满） */
+export const MAX_RUNTIME_COMMANDS = 20;
+
+/** 运行时命令 id 的合法字符（与清单 command.id 同一套约定） */
+const RUNTIME_COMMAND_ID_RE = /^[a-zA-Z0-9._-]{1,64}$/;
+
+/** 取该插件当前的运行时命令（无则空数组，绝不返回 null） */
+export function runtimeCommandsOf(record: PluginRecord | null | undefined): RuntimeCommand[] {
+  return record?.runtimeCommands ?? [];
+}
+
+/**
+ * 规范化命令前缀：补上 `" : "` 边界并返回「父关键词」。
+ *
+ * 为什么允许自动补：作者写 `"翻译"` 时意图明确（就是「翻译 : 子词」），
+ * 让他因为少写两个空格而运行时失败没有意义；但落盘与展示统一用规范形态，
+ * 避免出现「同一命令两种前缀」。
+ */
+export function normalizeCommandPrefix(raw: string): { prefix: string; keyword: string } | null {
+  const text = String(raw ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!text) return null;
+  let keyword = text;
+  const sep = text.indexOf(" : ");
+  if (sep >= 0) {
+    keyword = text.slice(0, sep).trim();
+  } else {
+    // 容忍作者只写「问AI :」「问AI:」这类缺尾空格的形态
+    const tail = text.search(/\s*:\s*$/);
+    if (tail >= 0) keyword = text.slice(0, tail).trim();
+  }
+  if (!keyword) return null;
+  return { prefix: `${keyword} : `, keyword };
+}
+
+/**
+ * 合并「清单命令」与「运行时命令」（同 id 以运行时为准）。
+ *
+ * 清单命令是作者写死的静态入口；运行时命令是插件根据当前数据动态生成的。
+ * 合并后按 `id` 去重，顺序保持：清单在前（稳定的静态入口优先展示），
+ * 运行时在后（新生成的排后面，不挤占老入口的位置）。
+ */
+export function listAllCommands(record: PluginRecord): Array<{
+  id: string;
+  prefix: string;
+  title: string;
+  desc?: string;
+  source: "manifest" | "runtime";
+}> {
+  const manifest = record.manifest.contributes?.command ?? [];
+  const runtime = runtimeCommandsOf(record);
+  const byId = new Map<string, {
+    id: string;
+    prefix: string;
+    title: string;
+    desc?: string;
+    source: "manifest" | "runtime";
+  }>();
+  for (const c of manifest) {
+    if (!c?.id) continue;
+    byId.set(c.id, {
+      id: c.id,
+      prefix: c.prefix,
+      title: c.title,
+      desc: c.desc,
+      source: "manifest",
+    });
+  }
+  for (const c of runtime) {
+    if (!c?.id) continue;
+    byId.set(c.id, {
+      id: c.id,
+      prefix: c.prefix,
+      title: c.title,
+      desc: c.desc,
+      source: "runtime",
+    });
+  }
+  return [...byId.values()];
+}
+
+/** 注册/更新一条运行时命令（就地修改；返回可读错误） */
+export function upsertRuntimeCommand(
+  reg: PluginRegistryFile,
+  pluginId: string,
+  input: { id: string; prefix: string; title: string; desc?: string }
+): { ok: true; command: RuntimeCommand } | { ok: false; error: string } {
+  const rec = reg.plugins.find((p) => p.id === pluginId);
+  if (!rec) return { ok: false, error: "插件不存在" };
+  const id = String(input?.id ?? "").trim();
+  if (!RUNTIME_COMMAND_ID_RE.test(id)) {
+    return { ok: false, error: "命令 id 只能是 1–64 位字母、数字、点、下划线或连字符" };
+  }
+  const title = String(input?.title ?? "").trim();
+  if (!title) return { ok: false, error: "命令标题不能为空" };
+  if (title.length > 40) return { ok: false, error: "命令标题不能超过 40 个字符" };
+  const desc = input?.desc == null ? undefined : String(input.desc).trim().slice(0, 80);
+  const normalized = normalizeCommandPrefix(input?.prefix);
+  if (!normalized) return { ok: false, error: "命令前缀不能为空" };
+  // 前缀与 id 都不能和已有命令/搜索项冲突（否则搜索框里会出现两个一样的入口）
+  const existing = runtimeCommandsOf(rec);
+  if (!existing.some((c) => c.id === id) && existing.length >= MAX_RUNTIME_COMMANDS) {
+    return { ok: false, error: `单插件最多注册 ${MAX_RUNTIME_COMMANDS} 条运行时命令` };
+  }
+  const conflict = listAllCommands(rec).find(
+    (c) =>
+      c.id !== id &&
+      normalizeCommandPrefix(c.prefix)?.keyword === normalized.keyword
+  );
+  if (conflict) {
+    return { ok: false, error: `前缀「${normalized.keyword}」已被命令「${conflict.title}」占用` };
+  }
+  const command: RuntimeCommand = {
+    id,
+    prefix: normalized.prefix,
+    title,
+    desc,
+    at: Date.now(),
+  };
+  const next = existing.filter((c) => c.id !== id).concat(command);
+  rec.runtimeCommands = next;
+  return { ok: true, command };
+}
+
+/** 移除一条运行时命令（就地修改） */
+export function removeRuntimeCommand(
+  reg: PluginRegistryFile,
+  pluginId: string,
+  commandId: string
+): boolean {
+  const rec = reg.plugins.find((p) => p.id === pluginId);
+  if (!rec) return false;
+  const existing = runtimeCommandsOf(rec);
+  const next = existing.filter((c) => c.id !== String(commandId ?? ""));
+  if (next.length === existing.length) return false;
+  rec.runtimeCommands = next;
+  return true;
+}
+
+/** 清空某插件的运行时命令（卸载 / 禁用时调用，避免残留入口） */
+export function clearRuntimeCommands(reg: PluginRegistryFile, pluginId: string): number {
+  const rec = reg.plugins.find((p) => p.id === pluginId);
+  if (!rec || !rec.runtimeCommands?.length) return 0;
+  const n = rec.runtimeCommands.length;
+  rec.runtimeCommands = null;
+  return n;
 }
 
 /** 从 JSON 恢复清单（读安装目录里的 plugin.json 时用） */

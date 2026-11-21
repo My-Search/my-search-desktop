@@ -46,11 +46,17 @@ export async function updatePluginFromMarket(
   confirmPluginInstall: NonNullable<PluginHostContext["confirmPluginInstall"]>
 ): Promise<{ ok: true; version: string } | { ok: false; error?: string; cancelled?: boolean }> {
   const { marketFetchRaw, installPluginPackage } = await import("../ipc.ts");
-  const { parseCatalog } = await import("../market-types.ts");
+  const { readCatalogWithIntegrity, describeCatalogSignatureError } = await import("../index-signature.ts");
   const { clearUpdateAvailable } = await import("../market.ts");
   const catalogRaw = await marketFetchRaw(MARKET_PLUGIN_ID, MARKET_CATALOG_URL, "");
-  const parsed = parseCatalog(new TextDecoder("utf-8").decode(catalogRaw));
-  const entry = parsed.ok ? parsed.catalog.plugins.find((e) => e.id === id) : null;
+  const verified = await readCatalogWithIntegrity(catalogRaw);
+  if (!verified.ok) {
+    return {
+      ok: false as const,
+      error: `市场目录校验失败：${describeCatalogSignatureError(verified.errors).join("；")}`,
+    };
+  }
+  const entry = verified.catalog.plugins.find((e) => e.id === id);
   if (!entry) return { ok: false as const, error: `市场中未找到插件: ${id}` };
 
   const pkgUrl = entry.downloadUrl;
@@ -109,7 +115,7 @@ export async function updatePluginFromMarket(
     source: { kind: "market", ref: pkgUrl },
     grants: allPerms,
     autoUpdate: chosenAutoUpdate,
-    integrity: { sha256: prepared.sha256, signed: false },
+    integrity: { sha256: prepared.sha256, signed: true },
   });
   upsertPlugin(reg, record, {
     preserveUserChoices: action === "update",
@@ -155,20 +161,23 @@ export function createMarketApi(
 
   async function catalogFetch() {
     const { marketFetchRaw } = await import("../ipc.ts");
-    const { compatibleEntries, parseCatalog } = await import("../market-types.ts");
+    const { compatibleEntries } = await import("../market-types.ts");
+    const { readCatalogWithIntegrity, describeCatalogSignatureError } = await import("../index-signature.ts");
     const { diffCatalog, applyUpdateAvailable } = await import("../market.ts");
     const reg = loadRegistry();
     const raw = await marketFetchRaw(pluginId, MARKET_CATALOG_URL, "");
-    const text = new TextDecoder("utf-8").decode(raw);
-    const parsed = parseCatalog(text);
-    if (!parsed.ok) return null;
+    const verified = await readCatalogWithIntegrity(raw);
+    if (!verified.ok) {
+      console.warn("[插件市场] 目录验签失败：", describeCatalogSignatureError(verified.errors).join("；"));
+      return null;
+    }
     const compat = compatibleEntries(
-      parsed.catalog,
+      verified.catalog,
       typeof __APP_VERSION__ !== "undefined" ? __APP_VERSION__ : ""
     );
     const diff = diffCatalog(reg, compat);
     applyUpdateAvailable(reg, diff);
-    return { reg, catalog: parsed.catalog, diff };
+    return { reg, catalog: verified.catalog, diff };
   }
 
   async function buildMarketView(result: NonNullable<Awaited<ReturnType<typeof catalogFetch>>>) {

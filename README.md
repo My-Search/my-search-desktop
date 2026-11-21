@@ -80,7 +80,7 @@ sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file \
 | `↑` / `↓` | 在结果中上下移动 |
 | `Enter` | 打开当前选中项（URL 跳转 / 查看简述内容） |
 | `Ctrl+Enter` | 查看当前项的「附加内容」并定位关键词 |
-| `Esc` | 从详情视图返回 / 收起「最近添加」条带 / 隐藏窗口（**输入框失焦时同样生效**，不依赖输入框焦点；详情返回优先于条带） |
+| `Esc` | 从详情视图返回 / 收起「最近添加」条带 / 隐藏窗口（**输入框失焦时同样生效**，不依赖输入框焦点；详情返回优先于条带；**从插件界面返回后焦点自动回到搜索框**，可直接继续输入） |
 | `Tab` / `Shift+Tab` | 进入 / 退出子搜索模式（**有文件/文件夹处理插件时**进入会自动展开下方「最近添加」条带） |
 | 鼠标左键点击 logo | 打开设置（也可 `Ctrl+,` 或托盘菜单）；**已下载好更新时改为打开安装程序** |
 | 鼠标右键点击 logo | 切换搜索 `[系统项]`（系统项内含使用说明） |
@@ -214,14 +214,17 @@ my-search-desktop/
 - **怎么实现**：失焦事件在 Rust 侧（`on_window_event`）才会收到，前端无法阻止；判定直接放在 Rust——收到 `Focused(false)` 就无条件 `hide()`，并顺手把窗口收回到搜索框高度（避免下次呼出残留高窗口）。前端**不再**按状态同步任何「是否允许隐藏」标志（旧的 `set_hide_on_blur` 命令 + `BlurHideState` 已移除）。
   - 前端已彻底移除分状态判定：没有 `syncBlurHide` / `resolveViewMode` / `shouldHideOnBlur`，也不再读取 DOM 可见性来同步隐藏标志。
   - 唤醒还原由 `App.vue` 的 `resumeDetailViewIfAny()` 完成：`state.mode === SHOW_ITEM_DETAIL && detailVisible` 时不清视图，只重贴窗口高度。
+- **`Focused(false)` 可能不到达，所以还有一条「点窗口外就收起」的兜底**（Windows）：窗口是置顶 + 跳任务栏的，一旦焦点事件丢了就会一直浮在别的应用上面。已有的低级鼠标钩子（Alt+点击那个，启动即常驻）在**左键按下**时只记一个坐标（纯原子写，回调里不做窗口查询，否则会被系统判定超时并静默卸载钩子），后台线程消费后判定：**点击落在主窗口矩形外 + 落点窗口不属于本进程 ⇒ 收起**（`src-tauri/src/outside_click.rs`）。两个限定条件缺一不可——点在窗口内部（含 WebView 自己的右键菜单）不算「点外面」；原生「选择文件夹」对话框、设置窗、托盘菜单都属于本进程，点它们时不该把呼出框收掉。兜底与失焦隐藏共用同一个抑制期（`SUPPRESS_BLUR_UNTIL_MS`）和同一份收起实现（`collapse_and_hide`），**不是新的状态门控**。
+  - 为什么需要它：焦点事件在两种情况下确定会丢——① 呼出时被 Windows 前台锁定拒绝（`show()` 了但从未拿到前台焦点，此后再点窗口外不会产生失焦）；② WebView2 在插件界面的焦点元素被关闭/停靠后偶发不再上报窗口失焦。两者表现为同一句话：「点窗口外也收不起呼出框」。
 - **与油猴版的差别**：原版 `showView()` 的 input.blur 判定里，`isDebuging` / `isSearching` / 非等待搜索状态都会 `return` 而不隐藏；桌面版浮窗按用户规则统一为「失焦即隐藏」，是对原版的明确调整。
 - **怎么主动收起**：按 `Esc`（详情视图下按一次先返回结果列表，再按一次收起窗口）、全局呼出快捷键、托盘菜单/左键点击。
   - Esc 由页面上的**全局 keydown 监听**处理（捕获阶段），因此**不依赖输入框焦点**：点过详情正文让输入框失焦后，Esc 依然能返回。
+  - **返回后焦点自动回到搜索框**：详情视图（文本项 / 脚本应用 / 插件界面）关闭时统一走 `hideTextView()`，它会把焦点交回 `#my_search_input`。插件界面的输入框会随会话被**停靠 / 卸载**，浏览器只会把焦点丢给 `body`——不主动交回，返回后键盘就是哑的（用户反馈：插件前端按 Esc 后输入框没聚焦）。用 `focus()` 而不是 `focusEnd()`，不重置用户已有的光标位置；有宿主的弹窗（安装确认 / 提示确认 / 环境选择）开着时不抢焦点。
   - **分层顺序：安装确认弹窗 → 详情返回 → 收「最近添加」条带 → 隐藏窗口**。详情返回**优先于条带**：查看文本项（简述/附加）时若条带正展开（子搜索模式 `关键词 : ` 会自动展开），按 Esc 仍先返回结果列表（顺带收起条带），再按一次才隐藏窗口——即两次 Esc 完成「文本项 → 结果列表 → 隐藏」。焦点只是表象，真正决定表现的是条带是否可见：早期实现把条带判断排在详情之前，条带可见时会吃掉这次 Esc、详情反而回不去。
-  - 前提是**窗口本身仍是前台窗口**。如果先点了其它应用/桌面，窗口会按上面的规则直接隐藏；要用全局快捷键重新唤出。
+  - 前提是**窗口本身仍是前台窗口**。如果先点了其它应用/桌面，窗口会按上面的规则直接隐藏；要用全局快捷键重新唤出。即便失焦事件本身丢了，「点窗口外就收起」的兜底仍会把窗口收掉（见上）。
 - **点结果打开链接仍然会收起**：原版点击 URL 项是显式 `viewVisibilityController(false)` 后再 `window.open(url)`（简述/附加内容/脚本项在那边都是 `return`，不收起），桌面版同步移植了这个行为（`openItem()` 里先 `resetToInitialView()` + `hideWindow()` 再打开外链）。
 - **与旧行为的差别**：点 logo 右键 / 托盘打开设置时，桌面版的设置是独立窗口（主窗口置顶会盖住它），所以 `open_config_window` 会先把主窗口收起——观感与原版一致。
-- 相关测试：`node test/blur-hide.test.mjs`（源码契约：Rust 失焦即隐藏、无任何门控，前端已移除分状态判定与同步机制）；`node test/blur-hide-ui.test.mjs`（真实浏览器走交互路径，验证详情视图/脚本应用下前端不再发送旧的 `set_hide_on_blur` 门控）；`node test/summon-keep-input.test.mjs`（真实浏览器验证唤醒还原：详情视图原样保留、其它状态复位）；`node test/esc-return-ui.test.mjs`（真实浏览器验证详情视图下 Esc 返回：输入框聚焦 / 失焦都生效，且只返回、不隐藏窗口；含「条带可见时文本项 Esc 仍先返回、返回时顺手收条带」的回归用例）。
+- 相关测试：`node test/blur-hide.test.mjs`（源码契约：Rust 失焦即隐藏、无任何门控，前端已移除分状态判定与同步机制；另含「点窗口外就收起」兜底的契约：钩子记录点击、矩形外 + 非本进程判定、与失焦共用抑制期与收起实现）；`node test/blur-hide-ui.test.mjs`（真实浏览器走交互路径，验证详情视图/脚本应用下前端不再发送旧的 `set_hide_on_blur` 门控）；`node test/summon-keep-input.test.mjs`（真实浏览器验证唤醒还原：详情视图原样保留、其它状态复位）；`node test/esc-return-ui.test.mjs`（真实浏览器验证详情视图下 Esc 返回：输入框聚焦 / 失焦都生效，返回后焦点自动回到搜索框，且只返回、不隐藏窗口；含「条带可见时文本项 Esc 仍先返回、返回时顺手收条带」的回归用例）；`node test/plugin-view-searchbox-fixed.test.mjs`（含插件界面按 Esc 返回后焦点回到搜索框的回归用例）。
 
 ### 图标（分平台，各自符合本平台审美）
 
@@ -508,7 +511,7 @@ https://github.com/My-Search/my-search-plugin-market/blob/main/index.error.json
 
 **开机自启与「关闭界面时」的关系**：`autostart=always` 意味着**进程**常驻，与「关闭界面即停进程」互相矛盾，此时**进程侧以开机自启为准**（清单同时声明会得到安装警告 `backend.closeBehavior.conflictsWithAlways`，面板上显示一行说明）。但**界面侧不受影响**：「退出」的插件即使进程常驻，界面照样卸载——界面要不要保留与进程是否常驻是两件事。进程判定集中在纯函数 `shouldStopBackendOnClose()`，界面保活判定集中在 `shouldKeepFrontendOnClose()`，关闭动作由搜索窗在 `usePluginViewHost.clear()` 这个唯一收口发出。
 
-> 「关闭」指**关掉插件界面**（Esc / 开始新搜索 / 点开别的结果 / 打开别的插件）。插件界面是内嵌在搜索窗里的（独立窗口 `ui.window` 尚未实现）。
+> 「关闭」指**关掉插件界面**（Esc / 开始新搜索 / 点开别的结果 / 打开别的插件）。插件界面默认内嵌在搜索窗里；需要独立窗口的插件可申请 `ui.window` 后调用 `ms.ui.openWindow({ entry, title })`——独立窗口默认运行在 sandbox iframe（无 `allow-same-origin`）里，通过 `postMessage` 白名单桥访问 `ms`，与宿主不是同一 JS 上下文。`isolated:false` / `mode=legacy` 仅用于排障回退。
 
 ### 插件界面的保活（最小化）
 
@@ -537,7 +540,7 @@ https://github.com/My-Search/my-search-plugin-market/blob/main/index.error.json
 
 ### 插件 API（`ms.*`）
 
-插件的入口脚本拿到注入了宿主能力的 `ms` 对象（以及 `plugin` / `host` / `keyword` / `inputValue` / `onSubKeyword` / `env`）：
+插件的入口脚本拿到注入了宿主能力的 `ms` 对象（以及 `plugin` / `host` / `keyword` / `inputValue` / `onSubKeyword` / `env`）。第 11 个注入参数是 `action`（本轮新增，老脚本忽略多余参数即可，行为不变，形如 `{ type, code, keyword, payload?, from, at }`）：它和 `ms.lifecycle.onEnter` 收到的是同一个对象，区别是入口脚本只在首次执行时拿到一次，`onEnter` 在每次恢复/重新进入时都会收到。
 
 ```js
 ms.log("info", "视图已打开");
@@ -550,6 +553,46 @@ ms.ui.theme;                              // 当前生效主题 "light" / "dark"
 ms.ui.onThemeChanged(theme => { … });     // 订阅主题切换（返回退订函数；保活会话继续收到，卸载时自动清理）
 ms.ui.registerThemeProvider(() => pref);  // 上报「本插件界面想用哪套主题」（inherit | dark | light）；宿主在打开/恢复视图时询问
 ms.ui.applyTheme();                       // provider 值变化后，让宿主立即重算并应用（如插件界面内切换主题）
+
+// 生命周期与进入参数（插件平台 P0）
+ms.lifecycle.onShow(() => { /* 视图重新可见（含从停车场恢复） */ });
+ms.lifecycle.onEnter(action => { /* action.type: text/files/folders/subKeyword/shortcut/command/restore/result */ });
+ms.lifecycle.onHide(() => { /* 被停靠到停车场，脚本不重跑 */ });
+ms.lifecycle.onDispose(() => { /* 即将释放，做最后清理 */ });
+ms.lifecycle.current();                   // → 最近一次 action 或 null
+
+// 贡献型能力（都要先在 plugin.json 的 contributes 里声明）
+ms.commands.register({ id: "convert", prefix: "格式转换", title: "格式转换", desc: "图片/文档互转" });
+ms.commands.unregister("convert");
+ms.results.provide(async keyword => [{ title: "直接结果", desc: keyword, action: "open" }]);
+ms.results.clear();
+
+// 权限申请（只能申请清单里已声明、尚未授予的权限；24h 内被拒/限流 ≤3 次）
+const outcome = await ms.permissions.request(["clipboard.read"], "读取剪贴板里的图片做 OCR");
+// → { ok, granted, denied, throttled, error? }
+
+// 集合存储（逐条 JSON，适合列表/台账；单集合 ≤1000 条）
+const notes = ms.store.collection("notes");
+const id = await notes.add({ text: "第一条" });
+await notes.update(id, { text: "改过" });
+const page = await notes.list({ prefix: "", limit: 20 });
+
+// 宿主子输入框（渲染在插件视图上方，键盘事件不会冒泡到宿主搜索框）
+ms.ui.subInput.set({ placeholder: "输入二级关键词", focus: true, onChange: v => { /* … */ } });
+ms.ui.subInput.remove();
+
+// 插件私钥（值只在 Rust DPAPI 库里，插件只能读写自己命名空间的条目）
+await ms.system.setSecret("api-token", token);
+const saved = await ms.system.getSecret("api-token");
+await ms.system.listSecrets();
+
+// 网络凭据：值不经过插件后续代码，ms.net.fetch 时由 Rust 按 origin 注入
+await ms.net.credentials.set("github", token, { scheme: "bearer", origin: "https://api.github.com" });
+await ms.net.fetch("https://api.github.com/user", { credential: "github" });
+await ms.net.credentials.list();          // → [{ name, origin, scheme, header?, username? }]，不含 value
+
+ms.ui.openWindow({ entry: "ui/detail.html", title: "详情" }); // 默认 sandbox iframe 隔离形态
+ms.ui.openWindow({ entry: "ui/detail.html", isolated: false }); // 仅排障：回退旧的同上下文形态
 
 // 环境变量（宿主集中配置；只能看到用户逐项授权的那些）
 ms.env.granted();                         // → ["OPENAI_API_KEY", …]（只含已授权，且不含值）
@@ -577,6 +620,7 @@ Chrome 的 `chrome.storage.sync` 好用，是因为它把「插件本体」和�
 |------|-----|------|----------|------|
 | 本地 KV（同步返回） | `ms.store.get/set/remove/keys` | localStorage `PLUGIN_DATA:*` | 是 | 随 localStorage |
 | 本地文件 KV | `ms.store.readJson/writeJson/removeJson` | `plugin-data/<id>/kv/*.json` | 是 | 单文件 64MB |
+| 集合（逐条 JSON） | `ms.store.collection(name).*` | `plugin-data/<id>/collections/<name>/<id>.json` | 是（按条） | 单集合 1000 条 |
 | 插件私有文件/数据 | 插件自己写（后端 / 界面） | `plugin-data/<id>/...` | **默认否**（清单可声明） | 无（留在本机） |
 | **云数据 store** | `ms.store.sync.*` | `sync-store/<id>.json` | 是 | 单键 64KB / 单插件 512KB / 合计 8MB / 单插件 500 键 |
 
@@ -637,10 +681,12 @@ await ms.store.sync.usage();                  // → { bytes, keys, pluginQuotaB
 
 **值怎么存（诚实说明）**：
 
-- 值与 GitHub Token、WebDAV 密码同一存储级别——**明文存在本地**，并且**随「备份与同步」一起走**（跨机统一配置；这是「统一配置」的必然代价）；
-- 授权是**使用授权 / 知情同意层，不是沙箱边界**：内嵌插件与宿主同 window、同 localStorage（见下方「已知边界」），恶意插件仍可直接读走变量。好处是**值的暴露面被收敛到 `src/lib/plugins/env-store.ts` 一个文件**，将来换成 Rust 侧钥匙串只需改这一处；
-- **选择器绝不渲染变量的值**：插件界面里弹的选择器只显示「名字 + 用途说明 + 授权状态」，值一律以固定掩码代替——这样即使插件脚本去翻 DOM 也读不到明文（值只在 Rust `spawn` 时被读给进程环境）；
-- 网关镜像 `plugin-gateway.json` 会**明文包含注入的 env**：这是「开机自启的插件也能拿到变量」的必要代价（启动时前端还没加载，只能读回快照）。所以不要在这里放你无法接受落盘的东西。
+- **桌面端（Tauri）**：值写在 Rust 应用数据目录的 `host-env.json`，Windows 用 DPAPI 加密（`{"v":2,"cipher":"dpapi"}`），与插件私钥、WebDAV 密码同一套 `credential_store`；前端只在内存里持有解密后的值，用于给**已授权**插件的后台进程注入。**不再进 localStorage**。
+- **升级迁移**：旧版本把整张表明文存在 localStorage（`ENV_VARS_CACHE_KEY`）。启动时若 Rust 侧没有 `host-env.json`、而 localStorage 有旧值，会先写 Rust、成功后删除旧键；写入失败则保留旧值，不丢配置。迁移逻辑是幂等的。
+- **非 Tauri 调试环境**仍退回 localStorage，仅用于本地开发；不要把真实密钥放进调试环境。
+- **授权仍是使用授权 / 知情同意层，不是沙箱边界**：内嵌插件与宿主同 window、同 DOM；它拿不到「变量表」的值（值不在前端存储里），但插件自己的后台进程被注入后，进程内当然能读到。恶意插件还可以调 `ms.env.pick` 诱导用户授权，因此面板上的用途说明要写清楚。
+- **选择器绝不渲染变量的值**：插件界面里弹的选择器只显示「名字 + 用途说明 + 授权状态」，值一律以固定掩码代替。
+- **网关快照也做了密封**：为让「开机自启」的插件在应用启动、前端尚未加载时也能拿到 env，`plugin-gateway.json` 会包含已解析的注入值；该文件由 Rust **整份密封**（Windows DPAPI，非 Windows `cipher:"plain"` + 0600），前端不读取。数据库里仍能看到密文字段，但不再是明文 JSON。
 
 ### 主题兼容（深/浅）
 
@@ -690,7 +736,7 @@ ms.ui.applyTheme();                                           // 让宿主立即
 
 ### 权限（Android 式）
 
-权限目录见 `src/lib/plugins/permissions.ts`（`search.read` / `search.write` / `ui.inlay` / `ui.window` / `ui.command` / `ui.notify` / `store` / `env.read:<变量名>` / `clipboard.read|write` / `selection.read` / `net.fetch:<scope>` / `system.openExternal` / `backend.spawn` / `secret.read:<name>`）。
+权限目录见 `src/lib/plugins/permissions.ts`（`search.read` / `search.write` / `ui.inlay` / `ui.window` / `ui.command` / `ui.notify` / `store` / `store.sync` / `env.read:<变量名>` / `clipboard.read|write|history` / `selection.read` / `screenshot.capture` / `net.fetch:<scope>` / `system.openExternal` / `backend.spawn` / `secret.read:<name>` / `secret.write:<name>`）。
 
 - 清单里写的只是**请求**，只有用户确认后的 `grants` 才生效；
 - 极高风险权限（`backend.spawn`、`secret.read`、`scope: "*"`）在安装时**逐条强提示**「该插件可在你的电脑上运行程序」；
@@ -708,7 +754,7 @@ ms.ui.applyTheme();                                           // 让宿主立即
 
 ### 已知边界（诚实说明）
 
-- **inlay 不是沙箱**：插件界面与宿主运行在同一个 `window` / 同一份 `localStorage` 里，和现有 `[脚本]` 项是同一信任级别。CSS 会被限到 `#text_show .plugin-view` 作用域内，但脚本本身能碰宿主 DOM——真正的边界在 `ms.*`（插件拿不到裸 Tauri IPC）。需要强隔离请等独立窗口形态（`ui.window`，v1 未实现）。
+- **inlay 不是沙箱**：内嵌插件界面与宿主运行在同一个 `window` / 同一份 `localStorage` 里，和现有 `[脚本]` 项是同一信任级别。CSS 会被限到 `#text_show .plugin-view` 作用域内，但脚本本身能碰宿主 DOM——真正的边界在 `ms.*`（插件拿不到裸 Tauri IPC）。需要强隔离请用独立窗口（`ui.window`，默认 sandbox iframe + 白名单桥；它拿不到宿主 DOM / localStorage / Tauri internals，但也只支持请求-响应型 `ms` 子集）。
 - 宿主挂载点刻意用 `#ms-app` 而不是最通用的 `#app`：同文档下插件脚本一个 `getElementById("app")` 就会命中宿主根节点并覆盖整个界面（这个坑在开发中真实踩到过）。
 - 插件贡献的搜索项**不写入 `SEARCH_DATA_KEY` 缓存**（缓存带订阅指纹、且是网络数据的落盘副本），改由挂载时重新合成；加载完成→挂载→索引在引擎里是一条链（`_attachExtraItems`）。
 - 插件项要进「二次搜索候选」（输入 `父关键词 : 子词` 后出现在结果里）必须显式声明 `contributes.searchItem.subSearch: true`；不声明的项不进该候选，普通搜索与附件模式照常可搜、可打开。宿主只给声明了 `subSearch` 的项补 `[可搜索]` 标记——这就是候选的判定依据。判定必须是声明式的：插件脚本要等视图打开才执行，晚于结果列表渲染，无法在搜索时探测它是否真的消费子关键词。

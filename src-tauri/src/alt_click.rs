@@ -111,6 +111,15 @@ pub fn install(app: tauri::AppHandle) {
 /// 后续按「唯一选中项」读取路径才可靠；混按 Ctrl/Shift 属于
 /// 多选手势，选中集不等于点击项，直接放弃。
 unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code >= 0 {
+        // 「点窗口外就收起」的兜底要**所有**左键按下，与 Alt+点击开关无关：
+        // 这里只做一次原子写（低级钩子回调超时会被系统静默卸载，不能做任何
+        // 窗口查询），判定与收起在 outside_click.rs 的后台线程里做。
+        if wparam.0 as u32 == WM_LBUTTONDOWN {
+            let msg = &*(lparam.0 as *const MSLLHOOKSTRUCT);
+            crate::outside_click::record_click(msg.pt.x, msg.pt.y);
+        }
+    }
     if code >= 0 && ENABLED.load(Ordering::Relaxed) {
         match wparam.0 as u32 {
             WM_LBUTTONDOWN => {
