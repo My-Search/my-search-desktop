@@ -2425,7 +2425,8 @@ html.theme-dark #ms-config-view .sub-item .sub-op.danger:hover {
   border-color: var(--accent);
 }
 
-/* 「快速过滤」的常用头输入：输入框 + 自动追加的分隔符后缀（视觉上连成一体） */
+/* 「快捷子搜索」的常用头输入：只有输入框本身（右侧不再显示「 : 」后缀，
+   分隔符由宿主在触发时自动补） */
 #ms-config-view .shortcut-header {
   display: inline-flex;
   align-items: center;
@@ -2438,8 +2439,7 @@ html.theme-dark #ms-config-view .sub-item .sub-op.danger:hover {
   max-width: 160px;
   padding: 4px 8px;
   border: 1px solid var(--line);
-  border-radius: 6px 0 0 6px;
-  border-right: none;
+  border-radius: 6px;
   background: var(--card);
   color: var(--text);
   font-family: inherit;
@@ -2458,32 +2458,6 @@ html.theme-dark #ms-config-view .sub-item .sub-op.danger:hover {
 #ms-config-view .shortcut-input:focus {
   outline: none;
   border-color: var(--accent);
-}
-
-/* 无分隔符后缀的输入框（快捷打开项）：四角圆角 + 补齐右边框 */
-#ms-config-view .shortcut-input.solo {
-  border-radius: 6px;
-  border-right: 1px solid var(--line);
-}
-
-#ms-config-view .shortcut-input.solo:hover {
-  border-color: var(--hover-border);
-}
-
-#ms-config-view .shortcut-input.solo:focus {
-  border-color: var(--accent);
-}
-
-/* 分隔符后缀：显示触发时会自动追加的「 : 」，点击不参与输入 */
-#ms-config-view .shortcut-header-suffix {
-  padding: 4px 8px;
-  border: 1px solid var(--line);
-  border-radius: 0 6px 6px 0;
-  background: var(--field);
-  color: var(--muted);
-  font-size: 12.5px;
-  line-height: 1.5;
-  user-select: none;
 }
 
 /* 新增一行快捷键 */
@@ -3741,6 +3715,12 @@ html.theme-dark #ms-config-view .sub-item .sub-op.danger:hover {
   margin-bottom: 14px;
 }
 
+/* 「检查更新」是行内唯一非筛选动作：推到整行最右（左侧留给筛选组）。
+   用 margin-left:auto 而不是把按钮挪进额外容器，窄宽度换行时它也能靠右对齐。 */
+#ms-config-view .plugins-filter > .plugins-filter-update {
+  margin-left: auto;
+}
+
 #ms-config-view .btn-filter {
   border: 1px solid var(--line);
   background: var(--card);
@@ -4461,6 +4441,192 @@ html.theme-dark #ms-config-view .btn-warn:hover {
   flex-wrap: wrap;
 }
 
+/* 云端对象卡头：刷新按钮靠右，提示图标紧跟标题 */
+#ms-config-view .page.sync .sync-cloud-refresh {
+  margin-left: auto;
+  flex: none;
+}
+
+/* ---- 插件云数据占用（备份与同步 → 云端对象卡片） ---- */
+#ms-config-view .page.sync .sync-cloud-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0 4px;
+  /* 窄窗口：表格在自己的容器里横滚，不撑破整个页面 */
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 2px;
+}
+#ms-config-view .page.sync .sync-cloud-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  font-size: 12px;
+  /* 列宽合计的下限：低于此值就交给外层横滚，避免把名字/数字压成省略号 */
+  min-width: 604px;
+}
+/* 插件列：名字一行、id 一行（不抢宽度，窄面板下名字也不会被 id 挤成一两个字） */
+#ms-config-view .page.sync .sync-cloud-id {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  color: var(--text);
+}
+#ms-config-view .page.sync .sync-cloud-size {
+  width: 64px;
+  flex: none;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+#ms-config-view .page.sync .sync-cloud-local {
+  width: 64px;
+  flex: none;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+/* v2：云端占用表的「配额剩余 / 状态 / 操作」列 */
+#ms-config-view .page.sync .sync-cloud-quota {
+  width: 76px;
+  flex: none;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+#ms-config-view .page.sync .sync-cloud-status {
+  width: 96px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  color: var(--muted);
+  line-height: 1.25;
+}
+#ms-config-view .page.sync .sync-cloud-status-main {
+  white-space: nowrap;
+}
+#ms-config-view .page.sync .sync-cloud-status-sub {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+#ms-config-view .page.sync .sync-cloud-status.pending {
+  color: var(--accent);
+}
+#ms-config-view .page.sync .sync-cloud-actions {
+  min-width: 84px;
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+  flex-wrap: nowrap;
+}
+#ms-config-view .page.sync .sync-cloud-head {
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+  font-weight: 500;
+}
+#ms-config-view .page.sync .sync-cloud-head .sync-cloud-size,
+#ms-config-view .page.sync .sync-cloud-head .sync-cloud-local,
+#ms-config-view .page.sync .sync-cloud-head .sync-cloud-quota,
+#ms-config-view .page.sync .sync-cloud-head .sync-cloud-status,
+#ms-config-view .page.sync .sync-cloud-head .sync-cloud-actions {
+  color: var(--muted);
+}
+#ms-config-view .page.sync .sync-cloud-actions .cfg-btn {
+  padding: 2px 8px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* 插件名（id）：名字占一行、id 在下一行；两者都按列宽截断，互不挤压 */
+#ms-config-view .page.sync .sync-cloud-name {
+  max-width: 100%;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#ms-config-view .page.sync .sync-cloud-pid {
+  max-width: 100%;
+  color: var(--muted);
+  font-style: normal;
+  font-size: 11px;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 未安装（云端有、本机没有）：名字就是 id，弱化显示 */
+#ms-config-view .page.sync .sync-cloud-name.as-id {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+/* ---- 查看某插件云端具体内容（分片文件清单） ---- */
+#ms-config-view .page.sync .sync-cloud-detail {
+  margin: -2px 0 4px 10px;
+  padding: 8px 10px 10px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--card) 70%, transparent);
+  font-size: 12px;
+  min-width: 520px;
+}
+#ms-config-view .page.sync .sync-cloud-group + .sync-cloud-group {
+  margin-top: 10px;
+}
+#ms-config-view .page.sync .sync-cloud-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding-bottom: 4px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--line);
+  color: var(--text);
+  font-weight: 500;
+}
+#ms-config-view .page.sync .sync-cloud-entry {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 2px 0 2px 4px;
+}
+#ms-config-view .page.sync .sync-cloud-entry-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+}
+#ms-config-view .page.sync .sync-cloud-entry-size {
+  flex: none;
+  width: 72px;
+  text-align: right;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+#ms-config-view .page.sync .sync-cloud-detail-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
 /* ---- 同步开关行 ---- */
 #ms-config-view .page.sync .sync-toggle-row {
   display: flex;
@@ -4640,6 +4806,80 @@ html.theme-dark #ms-config-view .page.sync .cfg-select option {
   line-height: 1.55;
   color: var(--muted);
   margin-bottom: 10px;
+}
+
+/* ---- 冲突明细（按插件一行，互不牵连） ---- */
+#ms-config-view .page.sync .sync-conflict-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+#ms-config-view .page.sync .sync-conflict-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--card);
+}
+#ms-config-view .page.sync .sync-conflict-main {
+  flex: 1;
+  min-width: 0;
+}
+#ms-config-view .page.sync .sync-conflict-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#ms-config-view .page.sync .sync-conflict-meta {
+  margin-top: 3px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+#ms-config-view .page.sync .sync-conflict-kind {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--field);
+  border: 1px solid var(--line);
+  color: var(--text);
+}
+#ms-config-view .page.sync .sync-conflict-actions {
+  display: flex;
+  gap: 6px;
+  flex: none;
+}
+#ms-config-view .page.sync .sync-conflict-actions .cfg-btn {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+/* 覆盖前的本机快照提示：低干扰、可操作 */
+#ms-config-view .page.sync .sync-backup-note {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-soft);
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+#ms-config-view .page.sync .sync-backup-note-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ---- 状态色 ---- */

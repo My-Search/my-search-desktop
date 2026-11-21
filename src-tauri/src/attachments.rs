@@ -959,6 +959,11 @@ fn encode_png(rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>, String> {
 mod tests {
     use super::*;
 
+    /// Shell 图标提取（SHGetFileInfo）依赖进程级 Shell 状态，并发测试下会瞬时失败
+    /// （见 icon_cache_serves_repeat_requests 的注释：那是被测代码之外的变量）。
+    /// 触 Shell 的测试用这把锁串行化，消除并行干扰。
+    static ICON_SHELL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn norm_and_under_matching() {
         assert!(is_under("C:/a/b", "C:\\a\\b\\c.txt"));
@@ -1045,6 +1050,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn file_icon_png_renders_for_known_extension() {
+        let _shell = ICON_SHELL_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         const MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";
 
         // 1. 真实文件：主查询路径
@@ -1079,6 +1085,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn icon_cache_serves_repeat_requests() {
+        let _shell = ICON_SHELL_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         use std::io::Write;
 
         let dir = std::env::temp_dir().join(format!("ms-icon-cache-{}", std::process::id()));

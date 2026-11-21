@@ -349,7 +349,9 @@ await evalJs(`
   (() => {
     const el = document.getElementById('my_search_input');
     el.focus();
-    el.value = '文件搜索 : ';
+    // v1.4 起插件为「无关键词待命态」：粘贴文件夹后不自动全量列举，等关键词才扫描。
+    // 夹具条目的 relPath 都含 "."，用它作关键词可全量命中（边扫边出的第一批即达）。
+    el.value = '文件搜索 : .';
     el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
   })(); 1`);

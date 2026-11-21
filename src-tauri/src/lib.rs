@@ -41,12 +41,15 @@ mod backup;
 mod builtin;
 mod clipboard_history;
 mod cloud;
+mod cloud_sync;
+mod credential_store;
 mod favicon;
 mod file_assoc;
 mod market;
 mod mouse_gesture;
 mod plugin_files;
 mod plugin_host;
+mod plugin_sync_store;
 mod plugin_watch;
 mod pin_image;
 mod proxy_rules;
@@ -104,6 +107,10 @@ const SHORTCUT_ACTION_QUICK_FILTER: &str = "quick-filter";
 /// 快捷键作用类型：快捷打开项（作用对象 = 匹配文本，如「百度翻译」；
 /// 前端按文本精确匹配数据项并直接打开，等价于点击结果项）
 const SHORTCUT_ACTION_QUICK_OPEN: &str = "quick-open";
+/// 快捷键作用类型：快捷搜索（作用对象 = 搜索词，如「周报模板」；
+/// 前端把文本填入搜索框并立即搜索、列出结果，**不自动打开任何项**——
+/// 与「快捷打开项」只差最后一步「不打开」）
+const SHORTCUT_ACTION_QUICK_SEARCH: &str = "quick-search";
 /// 快捷键作用类型：截图（抓屏 + 全屏框选，无需作用对象）。
 ///
 /// 这是**插件动作**：由「截图」插件在清单里用 `contributes.shortcut` 声明，
@@ -134,6 +141,8 @@ const EVENT_SHORTCUT_OPEN_PLUGIN: &str = "my-search://shortcut-open-plugin";
 const EVENT_SHORTCUT_QUICK_FILTER: &str = "my-search://shortcut-quick-filter";
 /// 快捷键（quick-open）触发时向主窗口广播的事件名，payload = { text }
 const EVENT_SHORTCUT_QUICK_OPEN: &str = "my-search://shortcut-quick-open";
+/// 快捷键（quick-search）触发时向主窗口广播的事件名，payload = { text }
+const EVENT_SHORTCUT_QUICK_SEARCH: &str = "my-search://shortcut-quick-search";
 /// 快捷键（clipboard）触发时向主窗口广播的事件名，payload = { pluginId }
 /// （前端据此打开剪贴板历史插件的详情视图）
 const EVENT_SHORTCUT_CLIPBOARD: &str = "my-search://shortcut-clipboard";
@@ -800,6 +809,29 @@ fn quick_open_by_shortcut(app: &tauri::AppHandle, text: &str) {
     );
 }
 
+/// 「快捷搜索」快捷键的落地：确保主窗口可见，然后广播搜索词由前端填入搜索框并立即搜索。
+///
+/// 与 `quick_open_by_shortcut` 同构，只是前端**不会**自动打开匹配到的项——
+/// 只展示搜索结果列表，由用户自己挑。Rust 侧同样只管带窗口到前台 + 投递事件。
+fn quick_search_by_shortcut(app: &tauri::AppHandle, text: &str) {
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        if !window.is_visible().unwrap_or(false) {
+            // 隐藏状态下按快捷搜索快捷键：先按呼出逻辑显示窗口（含窗口已显示事件的复位）
+            show_main_window(app);
+        } else {
+            let _ = window.set_focus();
+        }
+    }
+    let _ = app.emit(
+        EVENT_SHORTCUT_QUICK_SEARCH,
+        serde_json::json!({ "text": text }),
+    );
+}
+
 /// 持有当前已注册的全部快捷键绑定，便于重新设置时先 unregister。
 struct ActiveShortcutState(Mutex<Vec<ShortcutBinding>>);
 
@@ -1054,15 +1086,16 @@ fn apply_autostart_preference(app: &tauri::AppHandle) {
 /// { "shortcut": "ctrl+alt+1", "action": "open-plugin",   "target": "com.x.y" }
 /// { "shortcut": "alt+f",      "action": "quick-filter",  "target": "百度翻译" }
 /// { "shortcut": "alt+o",      "action": "quick-open",    "target": "百度翻译" }
+/// { "shortcut": "alt+s",      "action": "quick-search",  "target": "周报模板" }
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ShortcutBinding {
     /// 组合键字符串（小写、+ 连接、修饰键在前，如 "ctrl+alt+s"）
     pub(crate) shortcut: String,
-    /// 作用类型：toggle-window / open-plugin / quick-filter / quick-open
+    /// 作用类型：toggle-window / open-plugin / quick-filter / quick-open / quick-search
     pub(crate) action: String,
     /// 作用对象：open-plugin 时为插件 id，quick-filter 时为常用头文本，
-    /// quick-open 时为匹配文本，toggle-window 时为 None
+    /// quick-open / quick-search 时为匹配文本，toggle-window 时为 None
     pub(crate) target: Option<String>,
 }
 
@@ -1071,6 +1104,7 @@ fn action_requires_target(action: &str) -> bool {
     action == SHORTCUT_ACTION_OPEN_PLUGIN
         || action == SHORTCUT_ACTION_QUICK_FILTER
         || action == SHORTCUT_ACTION_QUICK_OPEN
+        || action == SHORTCUT_ACTION_QUICK_SEARCH
 }
 impl ShortcutBinding {
     /// 反序列化一条记录；字段缺失 / 作用类型未知时返回 None（跳过该条）。
@@ -1143,6 +1177,7 @@ fn is_known_shortcut_action(action: &str) -> bool {
         || action == SHORTCUT_ACTION_OPEN_PLUGIN
         || action == SHORTCUT_ACTION_QUICK_FILTER
         || action == SHORTCUT_ACTION_QUICK_OPEN
+        || action == SHORTCUT_ACTION_QUICK_SEARCH
         || action == SHORTCUT_ACTION_SCREENSHOT
         || action == SHORTCUT_ACTION_CLIPBOARD
         || action == SHORTCUT_ACTION_PIN
@@ -1633,8 +1668,8 @@ enum RegisterMode {
 }
 
 /// 按 action 把一次「快捷键按下」分发到对应落地函数：呼出/隐藏窗口、直接打开
-/// 某个插件、呼出并填入常用头进入快速过滤、按文本精确匹配打开、截图、剪贴板
-/// 历史、插件自定义动作。注册闭包与「默认呼出键兜底」（[`ensure_toggle_registered`]）
+/// 某个插件、呼出并填入常用头进入快速过滤、按文本精确匹配打开、按文本直接搜索、
+/// 截图、剪贴板历史、插件自定义动作。注册闭包与「默认呼出键兜底」（[`ensure_toggle_registered`]）
 /// 共用这一处，避免两份分发逻辑漂移。
 fn dispatch_shortcut_action(app: &tauri::AppHandle, action: &str, target: Option<&str>) {
     if action == SHORTCUT_ACTION_OPEN_PLUGIN {
@@ -1648,6 +1683,10 @@ fn dispatch_shortcut_action(app: &tauri::AppHandle, action: &str, target: Option
     } else if action == SHORTCUT_ACTION_QUICK_OPEN {
         if let Some(text) = target {
             quick_open_by_shortcut(app, text);
+        }
+    } else if action == SHORTCUT_ACTION_QUICK_SEARCH {
+        if let Some(text) = target {
+            quick_search_by_shortcut(app, text);
         }
     } else if action == SHORTCUT_ACTION_SCREENSHOT {
         // 截图是唯一在 Rust 里就地完成的动作：遮罩必须是独立全屏窗口，
@@ -3687,7 +3726,7 @@ fn apply_shortcut_bindings(
 // 复用宿主既有的严格校验 / 注册回滚 / 落盘链路，两边永远一致。
 //
 // **必须原样携带 target**：绑定列表里可能同时存在 open-plugin / quick-filter /
-// quick-open 这些「需要作用对象」的条目。桥接若把它们的作用对象丢掉（统一写成
+// quick-open / quick-search 这些「需要作用对象」的条目。桥接若把它们的作用对象丢掉（统一写成
 // null），严格解析会因为「缺作用对象」整体报错——用户只是改一个自己的键，
 // 却因为列表里别的绑定而失败（真实踩到过的故障）。因此这里用完整的
 // `ShortcutBinding` 往返，不降级成 (action, shortcut) 二元组。
@@ -3724,11 +3763,23 @@ pub(crate) fn apply_shortcut_bindings_for_plugin(
 ///
 /// 白名单而非黑名单：settings.json 里出现新键时，「要不要跨设备同步」
 /// 应当由写这个键的人显式决定。
+/// 会随备份 / 云同步（core 分片）走的 **Rust 侧用户配置**。
+///
+/// 这里的每一项都必须满足：**跨设备可迁移**、还原后能立即生效。机器相关的
+/// OS 状态（`autostart_enabled` 开机自启、文件关联 `file_assoc_mspp`）与一次性
+/// 迁移标记（`pin_shortcut_migrated_v2`）不在此列；插件私有开关
+/// （`gesture_enabled`）属于插件自己的 `sync-store`。
 const BACKUP_SETTINGS_KEYS: &[&str] = &[
     SETTINGS_KEY_SHORTCUT_BINDINGS,
-    SETTINGS_KEY_AUTOSTART_ENABLED,
     SETTINGS_KEY_ALT_CLICK,
     crate::proxy_rules::SETTINGS_KEY_PROXY,
+    // 外观：主题偏好（light / dark / system）
+    SETTINGS_KEY_THEME,
+    // 行为：主窗口呼出键、各动作「用户主动解绑」标记
+    SETTINGS_KEY_TOGGLE_SHORTCUT,
+    SETTINGS_KEY_SCREENSHOT_UNBOUND,
+    SETTINGS_KEY_CLIPBOARD_UNBOUND,
+    SETTINGS_KEY_PLUGIN_ACTION_UNBOUND,
 ];
 
 /// 读取可备份的设置项（返回一个 JSON 对象）
@@ -3746,8 +3797,12 @@ pub(crate) fn read_backup_settings(app: &tauri::AppHandle) -> serde_json::Value 
 
 /// 写回可备份的设置项（**合并式**：只覆盖传入对象里出现的键）。
 ///
-/// 快捷键与自启动都需要「立即生效」：写完 store 后立刻重新注册快捷键、
-/// 应用自启动偏好，否则用户会看到「设置里已经是备份里的键，但按下去没反应」。
+/// 快捷键需要「立即生效」：写完 store 后立刻重新注册，否则用户会看到
+/// 「设置里已经是备份里的键，但按下去没反应」。
+///
+/// 注意：开机自启是**设备专属**设置（`BACKUP_SETTINGS_KEYS` 不含它），
+/// 即使旧归档里带了 `autostart_enabled` 也不写、不应用——换机后是否自启
+/// 应由这台机器自己决定。
 pub(crate) fn write_backup_settings(
     app: &tauri::AppHandle,
     values: &serde_json::Map<String, serde_json::Value>,
@@ -3771,21 +3826,29 @@ pub(crate) fn write_backup_settings(
             eprintln!("还原后重新注册快捷键失败（重启应用生效）: {e}");
         }
     }
-    // 开机自启动：把系统启动项对齐到还原后的偏好
-    if let Some(enabled) = values
-        .get(SETTINGS_KEY_AUTOSTART_ENABLED)
-        .and_then(|v| v.as_bool())
-    {
-        if let Err(e) = set_autostart_enabled(app, enabled) {
-            eprintln!("还原后应用开机自启动失败: {e}");
-        }
-    }
     // Alt+点击带入：同步内存开关（落盘已在上面的循环里完成）
     if let Some(enabled) = values
         .get(SETTINGS_KEY_ALT_CLICK)
         .and_then(|v| v.as_bool())
     {
         alt_click::set_enabled(enabled);
+    }
+    // 主题偏好：立即应用到所有窗口并广播（否则「设置里已是深色、界面还是浅色」）
+    if let Some(pref) = values
+        .get(SETTINGS_KEY_THEME)
+        .and_then(|v| v.as_str())
+        .and_then(parse_theme_pref)
+    {
+        let resolved_dark = resolve_is_dark(pref);
+        {
+            let mut guard = APP_THEME
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.pref = Some(pref);
+            guard.resolved_dark = Some(resolved_dark);
+        }
+        apply_theme_to_windows(app, pref, resolved_dark);
+        let _ = app.emit(EVENT_THEME_CHANGED, ());
     }
     // 代理配置：重新编译生效规则（落盘已在上面的循环里完成）
     if values.contains_key(crate::proxy_rules::SETTINGS_KEY_PROXY) {
@@ -3989,6 +4052,43 @@ async fn backup_restore(
             serde_json::json!({ "batch": true, "reason": "restore" }),
         );
     }
+    Ok(value)
+}
+
+/// 还原**单个插件主体分片**（云同步 v2）：只替换 `plugins/<id>/`，不动其它插件。
+#[tauri::command]
+async fn backup_restore_plugin_shard(
+    app: tauri::AppHandle,
+    path: String,
+    plugin_id: String,
+) -> Result<serde_json::Value, String> {
+    // 运行中的插件会锁住 exe/dll，必须先停后台进程（与整包还原同一条路径）
+    let restart: Vec<String> = plugin_host::plugin_backend_list()
+        .into_iter()
+        .filter(|s| s.status != "stopped")
+        .map(|s| s.plugin_id)
+        .collect();
+    if let Err(e) = plugin_host::plugin_backend_stop(app.clone(), plugin_id.clone()).await {
+        eprintln!("停用插件后台进程失败（继续还原）: {e}");
+    }
+    plugin_watch::unwatch_all();
+
+    let app2 = app.clone();
+    let id = plugin_id.clone();
+    let joined = tauri::async_runtime::spawn_blocking(move || {
+        backup::restore_plugin_shard(&app2, &path, &id)
+    })
+    .await;
+    let result = match joined {
+        Ok(inner) => inner,
+        Err(e) => Err(format!("还原插件分片失败: {e}")),
+    };
+    restart_plugin_backends(&app, &restart).await;
+    let value = result?;
+    let _ = app.emit(
+        plugin_host::EVENT_REGISTRY_CHANGED,
+        serde_json::json!({ "batch": true, "reason": "cloud-shard" }),
+    );
     Ok(value)
 }
 
@@ -4211,6 +4311,14 @@ pub fn run() {
             plugin_host::plugin_storage_read,
             plugin_host::plugin_storage_write,
             plugin_host::plugin_storage_delete,
+            // ---------- 插件云数据 store（ms.store.sync.*，带配额、随云备份） ----------
+            plugin_sync_store::plugin_sync_store_get_all,
+            plugin_sync_store::plugin_sync_store_get,
+            plugin_sync_store::plugin_sync_store_set,
+            plugin_sync_store::plugin_sync_store_remove,
+            plugin_sync_store::plugin_sync_store_clear,
+            plugin_sync_store::plugin_sync_store_usage,
+            plugin_sync_store::plugin_sync_store_stats,
             plugin_host::plugin_open_window,
             plugin_host::plugin_net_fetch,
             plugin_host::plugin_backend_start,
@@ -4295,6 +4403,7 @@ pub fn run() {
             backup_snapshot,
             backup_inspect,
             backup_restore,
+            backup_restore_plugin_shard,
             backup_dir,
             backup_open_dir,
             // ---------- 云同步（WebDAV / Google Drive / OneDrive） ----------
@@ -4305,6 +4414,24 @@ pub fn run() {
             cloud::sync_upload,
             cloud::sync_download,
             cloud::sync_clear_credentials,
+            // ---------- 云同步 v2：分片对象 + manifest 提交点 ----------
+            cloud_sync::cloud_manifest_get,
+            cloud_sync::cloud_manifest_put,
+            cloud_sync::cloud_digests,
+            cloud_sync::cloud_shard_put,
+            cloud_sync::cloud_shard_get,
+            cloud_sync::cloud_object_delete,
+            cloud_sync::cloud_shard_inspect,
+            cloud_sync::cloud_quota,
+            // ---------- 云同步 v3：manifest-v3 + 每文件对象 + blob ----------
+            cloud_sync::cloud_manifest_v3_get,
+            cloud_sync::cloud_manifest_v3_put,
+            cloud_sync::cloud_v3_scan,
+            cloud_sync::cloud_v3_file_put,
+            cloud_sync::cloud_v3_file_get,
+            cloud_sync::cloud_v3_file_delete,
+            cloud_sync::cloud_v3_blob_put,
+            cloud_sync::cloud_v3_blob_get,
             // ---------- 同步持久化状态 / 跨窗口协调 ----------
             sync_state::sync_state_get,
             sync_state::sync_state_patch,
@@ -4480,6 +4607,41 @@ mod tests {
     };
     use tauri_plugin_global_shortcut::Shortcut;
 
+    /// 软件主体的用户配置必须随备份 / 云同步走（core 分片）。
+    ///
+    /// 这些键一旦从白名单里漏掉，表现就是「换设备后主题 / 解绑标记 / 呼出键
+    /// 没跟过来」，而且不会有任何报错——所以用测试钉住。
+    #[test]
+    fn backup_settings_cover_user_config() {
+        use super::BACKUP_SETTINGS_KEYS;
+        for key in [
+            "theme",
+            "toggle_shortcut",
+            "shortcut_bindings",
+            "alt_click_attach",
+            "screenshot_unbound",
+            "clipboard_unbound",
+            "plugin_action_unbound",
+        ] {
+            assert!(
+                BACKUP_SETTINGS_KEYS.contains(&key),
+                "BACKUP_SETTINGS_KEYS 缺少 {key}（用户配置会漏同步）"
+            );
+        }
+        // 机器相关状态 / 一次性迁移标记 / 设备专属偏好：绝不能进备份，否则换机后行为错乱
+        for key in [
+            "pin_shortcut_migrated_v1",
+            "pin_shortcut_migrated_v2",
+            "file_assoc_mspp",
+            "autostart_enabled",
+        ] {
+            assert!(
+                !BACKUP_SETTINGS_KEYS.contains(&key),
+                "BACKUP_SETTINGS_KEYS 不应包含 {key}"
+            );
+        }
+    }
+
     #[test]
     fn installer_kind_by_extension() {
         // 大小写不敏感：下载落盘的文件名后缀可能来自 URL，大小写不定
@@ -4567,7 +4729,7 @@ mod tests {
     #[test]
     fn parse_bindings_round_trips() {
         use super::{
-            parse_shortcut_bindings, parse_shortcut_bindings_strict, ShortcutBinding,
+            parse_shortcut_bindings, parse_shortcut_bindings_strict,
             SHORTCUT_ACTION_OPEN_PLUGIN, SHORTCUT_ACTION_TOGGLE_WINDOW,
         };
         let raw = serde_json::json!([
@@ -5114,6 +5276,57 @@ mod tests {
                 "shortcut": "alt+o",
                 "action": "quick-open",
                 "target": "百度翻译",
+            })
+        );
+    }
+
+    /// 「快捷搜索」绑定必须带搜索词（只搜索、不打开），并原样保留（含空格 AND 的多个词）。
+    #[test]
+    fn quick_search_binding_requires_target() {
+        use super::{
+            action_requires_target, is_known_shortcut_action, parse_shortcut_bindings,
+            parse_shortcut_bindings_strict, ShortcutBinding, SHORTCUT_ACTION_QUICK_SEARCH,
+            SHORTCUT_ACTION_TOGGLE_WINDOW,
+        };
+
+        // 新类型必须被识别、且属于「需要作用对象」的一类
+        assert!(is_known_shortcut_action(SHORTCUT_ACTION_QUICK_SEARCH));
+        assert!(action_requires_target(SHORTCUT_ACTION_QUICK_SEARCH));
+
+        // 缺搜索词 → 拒绝（否则按下去不知道该搜什么）
+        assert!(parse_shortcut_bindings_strict(&serde_json::json!([
+            { "shortcut": "alt+s", "action": SHORTCUT_ACTION_QUICK_SEARCH }
+        ]))
+        .is_err());
+
+        // 带搜索词 → 通过；两侧空白裁掉，内部空格保留
+        let raw = serde_json::json!([
+            { "shortcut": "ctrl+alt+s", "action": SHORTCUT_ACTION_TOGGLE_WINDOW },
+            { "shortcut": "alt+s", "action": SHORTCUT_ACTION_QUICK_SEARCH, "target": "  周报 模板 " }
+        ]);
+        let parsed = parse_shortcut_bindings_strict(&raw).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[1].target.as_deref(), Some("周报 模板"));
+
+        // 序列化往返一致
+        let values: Vec<serde_json::Value> = parsed.iter().map(|b| b.to_value()).collect();
+        assert_eq!(
+            parse_shortcut_bindings(&serde_json::Value::Array(values)),
+            parsed
+        );
+
+        // to_value 的字段形态
+        let b = ShortcutBinding {
+            shortcut: "alt+s".into(),
+            action: SHORTCUT_ACTION_QUICK_SEARCH.into(),
+            target: Some("周报模板".into()),
+        };
+        assert_eq!(
+            b.to_value(),
+            serde_json::json!({
+                "shortcut": "alt+s",
+                "action": "quick-search",
+                "target": "周报模板",
             })
         );
     }

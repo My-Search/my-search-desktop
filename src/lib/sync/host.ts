@@ -18,18 +18,11 @@
  */
 
 import { syncDataDigest, syncGetConfig, syncRequest, syncResolveChoice, syncStateGet, syncStatePatch, type SyncConfig, type SyncPersistedState } from "./bridge";
-import { intervalMsOf, ON_CHANGE_THROTTLE_MS, runSyncRound, type SyncRunState } from "./engine";
+import { intervalMsOf, ON_CHANGE_THROTTLE_MS, type SyncRunState } from "./engine";
+import { runCloudRound } from "./cloud";
 import { shouldSyncKey } from "./snapshot";
-import { setOnStorageChange, storageGet } from "../util";
-import {
-  getAltClickEnabled,
-  getAutostartEnabled,
-  getProxySettings,
-  getShortcutBindings,
-  isTauri,
-  onSyncConfigChanged,
-  type UnlistenFn,
-} from "../tauri-bridge";
+import { setOnStorageChange } from "../util";
+import { isTauri, onSyncConfigChanged, type UnlistenFn } from "../tauri-bridge";
 import { debug, warn } from "../logger";
 import type { PluginSyncState } from "../plugins/host.ts";
 
@@ -46,6 +39,7 @@ function emptyState(persisted?: SyncPersistedState): SyncRunState {
     remoteRev: persisted?.remoteRev ?? "",
     needsChoice: false,
     choiceReason: "",
+    conflicts: persisted?.conflicts ?? [],
     epoch: persisted?.epoch ?? 1,
   };
 }
@@ -64,6 +58,8 @@ class SyncHost {
   private lastDataDigest = "";
   /** 已排队/执行中的轮次数（心跳据此避免在慢网络下堆叠轮次） */
   private pendingRounds = 0;
+  /** 插件级裁决（只在对应插件仍是冲突时保留；core 用 `""`） */
+  private choices: Record<string, "local" | "remote"> = {};
   private emitEvent: ((name: string, payload?: unknown) => Promise<void>) | null = null;
   private storageListener: ((e: StorageEvent) => void) | null = null;
 
@@ -165,21 +161,37 @@ class SyncHost {
   }
 
   /**
-   * 用户对首次连接/冲突做出选择，并立即继续同步。
+   * 用户做出选择，并立即继续同步。
+   *
+   * - `pluginIds` 省略 = 全局选择（首次连接、或「全部按这个来」）；
+   * - `pluginIds` 给定 = 只对这几个插件生效（`""` 是 core / 软件主体配置），
+   *   其它插件的冲突保持挂起，互不影响。
    *
    * `broadcast=true` 时把选择广播给其它窗口（设置窗口点按钮走 Rust 命令 →
    * `sync://choice`，主窗口只执行本地轮次，不会再广播一次，否则会自激）。
    */
-  async resolveChoice(choice: "local" | "remote", broadcast = true): Promise<SyncRunState> {
+  async resolveChoice(
+    choice: "local" | "remote",
+    pluginIds?: string[],
+    broadcast = true
+  ): Promise<SyncRunState> {
     await this.start();
+    if (pluginIds) {
+      for (const id of pluginIds) this.choices[id] = choice;
+    } else {
+      // 全局裁决：清掉旧的逐插件决定，否则它们优先级更高会盖掉本次选择
+      this.choices = {};
+    }
     if (broadcast && isTauri) {
       try {
-        await syncResolveChoice(choice);
+        await syncResolveChoice(choice, pluginIds);
       } catch {
         /* 本窗口没有 Tauri 事件总线时直接走下面的 request */
       }
     }
-    return await this.request(choice === "remote" ? "choice-remote" : "choice-local", choice);
+    // 插件级裁决绝不下传全局 `choice`，否则等于「这一片冲突 → 全部插件都按这边覆盖」
+    const trigger = choice === "remote" ? "choice-remote" : "choice-local";
+    return await this.request(trigger, pluginIds ? undefined : choice);
   }
 
   /** 重新读配置（设置窗口保存后广播触发） */
@@ -212,66 +224,26 @@ class SyncHost {
         return this.state;
       }
     }
-    const next = await runSyncRound(
+    const next = await runCloudRound(
       {
         getConfig: () => this.config as SyncConfig,
         getState: () => syncStateGet(),
-        patchState: (p) => syncStatePatch(p),
-        // 设置存在 Rust 的 settings.json，必须真正读出来纳入摘要：
-        // 否则「只改了快捷键 / 自启动」会被判成「本机没变」而永远不同步。
-        // 读取失败时退化为中性值，不能让一次 IPC 抖动阻断整轮同步。
-        getShortcutBindings: async () => {
-          try {
-            return await getShortcutBindings();
-          } catch {
-            return storageGet("shortcut_bindings", []);
-          }
-        },
-        getAutostartEnabled: async () => {
-          try {
-            return await getAutostartEnabled();
-          } catch {
-            return false;
-          }
-        },
-        // 代理 / Alt+点击都属于「可备份设置」：纳入摘要，改了就应触发上传
-        getProxySettings: async () => {
-          try {
-            const s = (await getProxySettings())?.settings;
-            if (!s) return null;
-            // 只取**用户可编辑项**：lastUpdatedMs / libraryRuleCount 会随规则库
-            // 自动刷新而变化，纳入摘要会造成「规则库更新 → 误判本机改动 → 上传」噪音。
-            return {
-              enabled: s.enabled,
-              rules: s.rules,
-              ruleSources: s.ruleSources,
-              updateIntervalHours: s.updateIntervalHours,
-            };
-          } catch {
-            return null;
-          }
-        },
-        getAltClickEnabled: async () => {
-          try {
-            return await getAltClickEnabled();
-          } catch {
-            return true;
-          }
-        },
-        // 落盘数据（插件文件 / 插件私有数据 / 内部状态）的指纹
-        getDataDigest: async () => {
-          try {
-            return await syncDataDigest();
-          } catch {
-            return "";
-          }
-        },
+        // v2 的分片基线字段（cloudFormat / manifestEtag / shards / pending / conflicts）也在白名单内
+        patchState: (p) => syncStatePatch(p as Parameters<typeof syncStatePatch>[0]),
+        // 设置存在 Rust 的 settings.json，由内核分片的摘要覆盖（不再单独读）
         onState: (st) => this.publish(st),
         choice,
+        choices: { ...this.choices },
+        coreChoice: this.choices[""],
       },
       trigger,
       this.state
     );
+    // 只保留仍然是冲突的裁决，避免「上次冲突的选择」以后误伤已恢复的插件
+    const alive = new Set(next.conflicts.map((c) => c.pluginId));
+    for (const id of Object.keys(this.choices)) {
+      if (!alive.has(id)) delete this.choices[id];
+    }
     this.state = next;
     this.publish(next);
     return next;
@@ -330,9 +302,10 @@ class SyncHost {
       });
       this.unlisteners.push(unRequest);
 
-      const unChoice = await listen<{ choice?: string }>("sync://choice", (e) => {
+      const unChoice = await listen<{ choice?: string; pluginIds?: string[] | null }>("sync://choice", (e) => {
         const choice = e.payload?.choice === "remote" ? "remote" : "local";
-        void this.resolveChoice(choice, false);
+        const ids = Array.isArray(e.payload?.pluginIds) ? e.payload!.pluginIds! : undefined;
+        void this.resolveChoice(choice, ids, false);
       });
       this.unlisteners.push(unChoice);
 
@@ -345,6 +318,11 @@ class SyncHost {
       const unPluginData = await listen("plugin-data://changed", () => this.scheduleOnChange());
       this.unlisteners.push(unPluginData);
 
+      // 插件的**云数据 store**（`sync-store/<id>.json`，`ms.store.sync.*`）：
+      // 这份数据的唯一用途就是跨设备同步，写完必须立刻安排一轮上传。
+      const unPluginSync = await listen("plugin-sync://changed", () => this.scheduleOnChange());
+      this.unlisteners.push(unPluginSync);
+
       // Rust 侧写入的其它「可同步数据」变化（settings.json 落盘、剪贴板历史索引等）：
       // 这些写入不经过前端 `storageSet`，没有这条监听就要等 30 分钟兜底轮询才上传。
       const unDataChanged = await listen("sync://data-changed", () => this.scheduleOnChange());
@@ -353,7 +331,11 @@ class SyncHost {
       // 浏览器调试环境没有 Tauri 事件总线；插件文件 KV 写入口会派发同窗事件。
       const onDevPluginData = (): void => this.scheduleOnChange();
       window.addEventListener("plugin-data://changed-dev", onDevPluginData);
-      this.unlisteners.push(() => window.removeEventListener("plugin-data://changed-dev", onDevPluginData));
+      window.addEventListener("plugin-sync://changed-dev", onDevPluginData);
+      this.unlisteners.push(() => {
+        window.removeEventListener("plugin-data://changed-dev", onDevPluginData);
+        window.removeEventListener("plugin-sync://changed-dev", onDevPluginData);
+      });
     } catch (e) {
       warn("[同步] 绑定 Tauri 事件失败:", e);
     }

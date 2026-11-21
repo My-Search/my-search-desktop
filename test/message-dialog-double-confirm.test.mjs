@@ -112,18 +112,25 @@ check(
 );
 
 /* ============================================================
- * 1.6 卸载的第二次确认：左侧按钮文案为「保留」（用户诉求）
- *   弹窗是「是否同时删除插件保存的数据？」——左=保留（cancel，不动数据），
- *   右=确定（删数据）。用户要求把原来的「取消」改成「保留」，语义更直白。
- *   两处卸载（内置 / 普通）都要带上这个文案。
+ * 1.6 卸载的删除数据确认：单弹窗 + 显式勾选框（现行设计）
+ *   早期方案是两步确认（第二弹「是否同时删除插件保存的数据？」cancelText=保留），
+ *   后来改为**一个弹窗**：底部勾选框显式选择「是否一并清理 plugin-data」——
+ *   两步确认的第二个框焦点落在「删数据」上易误触，已废弃。这里钉住现行设计：
+ *   - 勾选框（v-model=clearDataChecked）存在且唯一；
+ *   - 旧的两步确认文案已不复存在（防止悄悄回退）。
  * ============================================================ */
 {
-  const re = /props\.confirm\("是否同时删除插件保存的数据？",\s*\{\s*cancelText:\s*"保留"\s*\}\)/g;
-  const hits = panelVue.match(re) || [];
+  const checkboxHits = panelVue.match(/v-model="clearDataChecked"/g) || [];
   check(
-    "PanelPlugins：卸载的「是否删除数据」二次确认带 cancelText: 保留",
-    hits.length === 2,
-    `命中 ${hits.length} 处（内置 + 普通各一）`,
+    "PanelPlugins：卸载弹窗带显式的「清理数据」勾选框",
+    checkboxHits.length === 1,
+    `命中 ${checkboxHits.length} 处`,
+  );
+  const legacyHits = panelVue.match(/是否同时删除插件保存的数据/g) || [];
+  check(
+    "PanelPlugins：旧两步确认文案已废弃（不再出现在卸载流程）",
+    legacyHits.length === 0,
+    `命中 ${legacyHits.length} 处`,
   );
 }
 

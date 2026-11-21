@@ -3,74 +3,119 @@
  * 汇集为一个 JSON 对象，交给 Rust 侧打包成 .msbackup 归档。
  *
  * 职责边界：
- *   - 采集：读 localStorage 里的所有用户键（**包含** `PLUGIN_DATA:*`）
- *   - 还原：把归档里的 localStorage 快照静默写回（跳过凭据与可重建缓存）
+ *   - 采集：读 localStorage 里的 **account 作用域** 键（**包含** `PLUGIN_DATA:*`）
+ *   - 还原：把归档里的 localStorage 快照静默写回（跳过凭据、可重建缓存与设备专属键）
  *   - 摘要：给同步决策判断「本机到底变没变」
+ *
+ * 作用域口径统一在 `scope.ts`：
+ *   - `account`：跨设备同步（订阅、插件数据、主题…）
+ *   - `device`：只在本机生效（最近附件路径、插件窗口尺寸、更新下载偏好…）
+ *   - `never`：凭据 / 可重建缓存 / 一次性信号
  *
  * 为什么包含 `PLUGIN_DATA:*`
  * --------------------------
  * 插件私有数据有两套存储：无后端插件写在 localStorage 的 `PLUGIN_DATA:*`，
  * 有后端插件写在 Rust 侧 `plugin-data/`。旧实现把前端这套排除在同步之外，
  * 导致换机/重装后无后端插件的数据全部丢失。现在两套都进备份、都能触发同步。
- *
- * 什么键跳过：
- *   - 凭据（`USER_GITHUB_TOKEN_CACHE_KEY`、`SYNC_CONFIG_CACHE_KEY`、
- *     `SYNC_STATE_CACHE_KEY`）——跨机还原不应该带 B 机器的 Token 去覆盖
- *   - 可重建的大缓存（`SEARCH_DATA_KEY`、`OLD_SEARCH_DATAS_KEY`、
- *     `SUBSCRIBE_FINGERPRINT_CACHE_KEY`）——还原后主窗口会自己重新拉
  */
 
 import { storageGet, storageSet, storageRemove } from "../util";
 import { PLUGIN_REGISTRY_KEY, keepLocalRecordsAfterRestore } from "../plugins/registry";
+import {
+  devicePluginIdsOfRegistry,
+  registryForSync,
+  registryWithLocalDevicePlugins,
+  scopeOfKey,
+  shouldSyncKey as scopeShouldSyncKey,
+} from "./scope";
 
-/** 备份时**排除**的 localStorage 键（不跨机携带、不写回） */
-const SKIP_KEYS = new Set([
-  "USER_GITHUB_TOKEN_CACHE_KEY",
-  "SYNC_CONFIG_CACHE_KEY",
-  "SYNC_STATE_CACHE_KEY",
-  // 搜索数据与订阅指纹都可由订阅重建；名称以 search-keys.ts 为准。
-  "SEARCH_DATA_KEY",
-  "OLD_SEARCH_DATAS_KEY",
-  "SUBSCRIBE_FINGERPRINT_CACHE_KEY",
-  // 插件重启标记只是一次性跨窗口信号，不是用户数据。
-  "PLUGIN_RESTART_MARKS_CACHE_KEY",
-]);
+const STORAGE_PREFIX = "my-search-desktop:";
 
-/** 永远不碰的运行时缓存前缀 */
-const SKIP_PREFIXES = ["script:"];
+/** 从 `PLUGIN_DATA:<id>:<key>` 取出插件 id（不是插件数据键时返回空串） */
+function pluginIdOfDataKey(key: string): string {
+  if (!key.startsWith("PLUGIN_DATA:")) return "";
+  const rest = key.slice("PLUGIN_DATA:".length);
+  const sep = rest.indexOf(":");
+  return sep > 0 ? rest.slice(0, sep) : "";
+}
 
-function isSkippedKey(key: string): boolean {
-  return SKIP_KEYS.has(key) || SKIP_PREFIXES.some((p) => key.startsWith(p));
+/** 读取本机注册表（解析失败按空表处理） */
+function localRegistry(): unknown {
+  try {
+    const raw = localStorage.getItem(STORAGE_PREFIX + PLUGIN_REGISTRY_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
  * 这个 localStorage 键变化是否需要触发云同步。
  *
- * 同步宿主用它过滤 `storageSet` 钩子：内部缓存/凭据变化不该造成网络请求，
- * 也不该让「还原时写回」被误判成本机改动（还原本身走 silent）。
+ * 同步宿主用它过滤 `storageSet` 钩子：内部缓存/凭据/设备专属键变化不该造成
+ * 网络请求，也不该让「还原时写回」被误判成本机改动（还原本身走 silent）。
  */
 export function shouldSyncKey(key: string): boolean {
-  return !isSkippedKey(key);
+  return scopeShouldSyncKey(key);
+}
+
+/** 这个键是否应进入快照（account 作用域） */
+function isAccountKey(key: string): boolean {
+  return scopeOfKey(key) === "account";
 }
 
 /** 采集本地 localStorage 快照（返回一个扁平键值对对象） */
 export function collectState(): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   try {
-    const prefix = "my-search-desktop:";
+    const prefix = STORAGE_PREFIX;
+    const registry = localRegistry();
+    // 开发挂载插件的私有数据跟着「本机源目录」走，跨设备没有意义
+    const devicePluginIds = devicePluginIdsOfRegistry(registry);
     for (let i = 0; i < localStorage.length; i++) {
       const full = localStorage.key(i);
       if (!full || !full.startsWith(prefix)) continue;
       const key = full.slice(prefix.length);
-      if (isSkippedKey(key)) continue;
+      if (!isAccountKey(key)) continue;
+      const dataPluginId = pluginIdOfDataKey(key);
+      if (dataPluginId && devicePluginIds.has(dataPluginId)) continue;
       try {
-        out[key] = JSON.parse(localStorage.getItem(full)!);
+        const parsed = JSON.parse(localStorage.getItem(full)!);
+        out[key] = key === PLUGIN_REGISTRY_KEY ? registryForSync(parsed) : parsed;
       } catch {
         out[key] = localStorage.getItem(full); // fallback to raw string
       }
     }
   } catch (e) {
     console.warn("[同步] 采集本地状态失败:", e);
+  }
+  return out;
+}
+
+/**
+ * 采集**本机完整**快照：给「覆盖前留底」用。
+ *
+ * 与 `collectState` 的区别：设备专属键（最近附件、窗口尺寸…）与注册表原始
+ * dev 记录都保留——这份归档只用于本机回滚，不参与跨设备同步；把 dev 记录
+ * 改写成普通副本反而会让回滚后的本机开发挂载失效。
+ */
+export function collectBackupState(): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  try {
+    const prefix = STORAGE_PREFIX;
+    for (let i = 0; i < localStorage.length; i++) {
+      const full = localStorage.key(i);
+      if (!full || !full.startsWith(prefix)) continue;
+      const key = full.slice(prefix.length);
+      if (scopeOfKey(key) === "never") continue;
+      try {
+        out[key] = JSON.parse(localStorage.getItem(full)!);
+      } catch {
+        out[key] = localStorage.getItem(full);
+      }
+    }
+  } catch (e) {
+    console.warn("[同步] 采集本机快照失败:", e);
   }
   return out;
 }
@@ -106,9 +151,15 @@ export function restoreState(
     };
   }
   let count = 0;
+  const local = localRegistry();
+  const devicePluginIds = devicePluginIdsOfRegistry(local);
   for (const [key, value] of Object.entries(payload)) {
-    if (isSkippedKey(key)) continue;
-    storageSet(key, value, { silent });
+    if (!isAccountKey(key)) continue;
+    const dataPluginId = pluginIdOfDataKey(key);
+    if (dataPluginId && devicePluginIds.has(dataPluginId)) continue;
+    const next =
+      key === PLUGIN_REGISTRY_KEY ? registryWithLocalDevicePlugins(value, local) : value;
+    storageSet(key, next, { silent });
     count++;
   }
   return count;
@@ -124,12 +175,15 @@ export function pruneState(data: Record<string, unknown>): number {
   const keep = new Set(Object.keys(data));
   const remove: string[] = [];
   try {
-    const prefix = "my-search-desktop:";
+    const prefix = STORAGE_PREFIX;
+    const devicePluginIds = devicePluginIdsOfRegistry(localRegistry());
     for (let i = 0; i < localStorage.length; i++) {
       const full = localStorage.key(i);
       if (!full || !full.startsWith(prefix)) continue;
       const key = full.slice(prefix.length);
-      if (isSkippedKey(key) || keep.has(key)) continue;
+      if (!isAccountKey(key) || keep.has(key)) continue;
+      // 开发挂载插件的私有数据是设备数据：云端没有不代表要删
+      if (devicePluginIds.has(pluginIdOfDataKey(key))) continue;
       remove.push(key);
     }
   } catch {
@@ -180,6 +234,37 @@ export function stateDigest(extra?: unknown): string {
     }
   }
   return hash.toString(16).padStart(16, "0");
+}
+
+/**
+ * 把 localStorage 快照按 v2 分片切开。
+ *
+ * - `PLUGIN_DATA:<id>:<key>` → 该插件的「数据分片」
+ * - 其它键（含插件注册表）→ 「内核分片」
+ *
+ * 为什么要切：v2 云端是「按插件分片 + manifest 提交点」，同步只为变脏的分片
+ * 付带宽。切片放在前端，是因为只有前端知道「哪些键属于哪个插件」；Rust 只按
+ * 给定的子集算摘要、打包、上传。
+ */
+export function splitStateByShard(state: Record<string, unknown> = collectState()): {
+  core: Record<string, unknown>;
+  plugins: Record<string, Record<string, unknown>>;
+} {
+  const core: Record<string, unknown> = {};
+  const plugins: Record<string, Record<string, unknown>> = {};
+  for (const [key, value] of Object.entries(state)) {
+    if (key.startsWith("PLUGIN_DATA:")) {
+      const rest = key.slice("PLUGIN_DATA:".length);
+      const sep = rest.indexOf(":");
+      if (sep > 0) {
+        const id = rest.slice(0, sep);
+        (plugins[id] ??= {})[key] = value;
+        continue;
+      }
+    }
+    core[key] = value;
+  }
+  return { core, plugins };
 }
 
 /**

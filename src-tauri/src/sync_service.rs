@@ -95,8 +95,16 @@ pub fn sync_request(app: AppHandle, trigger: Option<String>) -> Value {
 ///
 /// 设置窗口不执行同步，只把选择广播给常驻主窗口；主窗口的 SyncHost 收到后
 /// 继续本轮同步。
+///
+/// `plugin_ids`：省略 = 全局选择（首次连接 / 「全部按这边来」）；给定则只对这几个
+/// 插件生效（`""` 表示 core / 软件主体配置）。冲突按插件隔离，其它插件的冲突
+/// 继续挂起，本轮照常同步其余分片。
 #[tauri::command]
-pub fn sync_resolve_choice(app: AppHandle, choice: String) -> Result<Value, String> {
+pub fn sync_resolve_choice(
+    app: AppHandle,
+    choice: String,
+    plugin_ids: Option<Vec<String>>,
+) -> Result<Value, String> {
     let choice = match choice.as_str() {
         "remote" => "remote",
         "local" => "local",
@@ -104,7 +112,7 @@ pub fn sync_resolve_choice(app: AppHandle, choice: String) -> Result<Value, Stri
     };
     app.emit(
         EVENT_SYNC_CHOICE,
-        json!({ "choice": choice, "at": now_ms() }),
+        json!({ "choice": choice, "pluginIds": plugin_ids, "at": now_ms() }),
     )
     .map_err(|e| format!("广播同步选择失败: {e}"))?;
     Ok(json!({ "choice": choice }))

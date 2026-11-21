@@ -31,6 +31,12 @@ import {
   pluginStorageDelete,
   pluginStorageRead,
   pluginStorageWrite,
+  pluginSyncStoreClear,
+  pluginSyncStoreGet,
+  pluginSyncStoreGetAll,
+  pluginSyncStoreRemove,
+  pluginSyncStoreSet,
+  pluginSyncStoreUsage,
 } from "../ipc.ts";
 import {
   defineRpcNamespace,
@@ -619,6 +625,65 @@ export function createUiDataApis(
       },
     },
   });
+
+  /**
+   * 5b. 云数据 store（`ms.store.sync.*`）——`chrome.storage.sync` 的等价物。
+   *
+   * 与上面 `ms.store` / `readJson` / `writeJson` 的区别：
+   *   - 这份数据**专为跨设备同步**而存在，随云备份上传（`sync-store/<id>.json`）；
+   *   - 有**硬配额**：单键 64KB、单插件 512KB、所有插件合计 8MB、单插件最多 500 键；
+   *   - 写入成功即广播 `plugin-sync://changed`，常驻主窗口的同步宿主会立刻安排一轮
+   *     上传，不需要插件自己调 `ms.sync.trigger()`。
+   *
+   * 典型用法：只放「换设备后必须还原」的小状态（用户的筛选偏好、订阅列表、
+   * 上次打开的文件路径…）。图片、索引、录屏、下载的工具请留在插件本地目录。
+   *
+   * 权限沿用 `store`（与 `ms.store` 同一语义），不给已安装插件新增授权负担。
+   */
+  const syncStore = defineRpcNamespace("store.sync", pluginId, call, {
+    /** 读取全部云数据（键值对象） */
+    getAll: {
+      permission: "store",
+      handler: async ({ pluginId: pid }) => await pluginSyncStoreGetAll(pid),
+    },
+    /** 读取一个键；不存在时返回 `fallback` */
+    get: {
+      permission: "store",
+      detail: (key: string) => String(key ?? "").slice(0, 64),
+      handler: async ({ pluginId: pid }, key: string, fallback: unknown = null) => {
+        const v = await pluginSyncStoreGet(pid, String(key ?? ""));
+        return v === null || v === undefined ? fallback : v;
+      },
+    },
+    /** 写入一个键；超配额抛错（错误文案可直接 toast 给用户） */
+    set: {
+      permission: "store",
+      detail: (key: string) => String(key ?? "").slice(0, 64),
+      handler: async ({ pluginId: pid }, key: string, value: unknown) =>
+        await pluginSyncStoreSet(pid, String(key ?? ""), value),
+    },
+    /** 删除一个键；返回原本是否存在 */
+    remove: {
+      permission: "store",
+      detail: (key: string) => String(key ?? "").slice(0, 64),
+      handler: async ({ pluginId: pid }, key: string) =>
+        await pluginSyncStoreRemove(pid, String(key ?? "")),
+    },
+    /** 清空该插件的全部云数据 */
+    clear: {
+      permission: "store",
+      handler: async ({ pluginId: pid }) => {
+        await pluginSyncStoreClear(pid);
+        return true;
+      },
+    },
+    /** 查询用量（字节数 / 键数 / 配额），用于插件自检或面板提示 */
+    usage: {
+      permission: "store",
+      handler: async ({ pluginId: pid }) => await pluginSyncStoreUsage(pid),
+    },
+  });
+  (store as Record<string, unknown>).sync = syncStore;
 
   /* ---------------- 6. 环境变量 ---------------- */
   const env = defineRpcNamespace(

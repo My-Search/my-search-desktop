@@ -2,10 +2,11 @@
  * 回归测试：快捷键绑定的纯函数逻辑（src/lib/shortcut-bindings.ts）
  *
  * 「设置 → 快捷键」现在每条配置由三部分组成：**快捷键 / 作用类型 / 作用对象**
- * （作用类型 = 呼出隐藏窗口 / 打开插件 / 快速过滤 / 快捷打开项；打开插件时作用对象 =
- * 插件 id，快速过滤时作用对象 = 常用头文本，快捷打开项时作用对象 = 匹配文本）。
+ * （作用类型 = 呼出隐藏窗口 / 打开插件 / 快捷子搜索 / 快捷打开项 / 快捷搜索；打开插件时
+ * 作用对象 = 插件 id，快捷子搜索时作用对象 = 常用头文本，快捷打开项 / 快捷搜索时作用
+ * 对象 = 匹配文本）。
  * 这里覆盖：
- *  1. parseBinding(s)：字段校验（作用类型未知 / 打开插件缺插件 id / 快速过滤缺常用头 /
+ *  1. parseBinding(s)：字段校验（作用类型未知 / 打开插件缺插件 id / 快捷子搜索缺常用头 /
  *     快捷打开项缺匹配文本 都判非法）
  *  2. parseBindings：脏数据跳过 + 去重 + 兜底默认呼出键
  *  3. validateBindings：空列表 / 重复键 / 多条呼出 / 缺插件 / 缺常用头 / 缺匹配文本 都要拦下来
@@ -77,20 +78,20 @@ check(
   { shortcut: "ctrl+alt+1", action: "open-plugin", target: "com.a.b" }
 );
 
-// ---- parseBinding：快速过滤 ----
+// ---- parseBinding：快捷子搜索 ----
 check(
-  "解析快速过滤绑定（含常用头）",
+  "解析快捷子搜索绑定（含常用头）",
   parseBinding({ shortcut: "alt+f", action: "quick-filter", target: "百度翻译" }),
   { shortcut: "alt+f", action: "quick-filter", target: "百度翻译" }
 );
-check("快速过滤缺常用头 -> 非法", parseBinding({ shortcut: "alt+f", action: "quick-filter" }), null);
+check("快捷子搜索缺常用头 -> 非法", parseBinding({ shortcut: "alt+f", action: "quick-filter" }), null);
 check(
-  "快速过滤空常用头 -> 非法",
+  "快捷子搜索空常用头 -> 非法",
   parseBinding({ shortcut: "alt+f", action: "quick-filter", target: "   " }),
   null
 );
 check(
-  "快速过滤常用头尾部「 : 」被归一化掉",
+  "快捷子搜索常用头尾部「 : 」被归一化掉",
   parseBinding({ shortcut: "alt+f", action: "quick-filter", target: "百度翻译 : " }),
   { shortcut: "alt+f", action: "quick-filter", target: "百度翻译" }
 );
@@ -118,6 +119,24 @@ check(
   { shortcut: "alt+o", action: "quick-open", target: "百度 翻译" }
 );
 
+// ---- parseBinding：快捷搜索（只搜索、不打开） ----
+check(
+  "解析快捷搜索绑定（含搜索词）",
+  parseBinding({ shortcut: "alt+s", action: "quick-search", target: "周报模板" }),
+  { shortcut: "alt+s", action: "quick-search", target: "周报模板" }
+);
+check("快捷搜索缺搜索词 -> 非法", parseBinding({ shortcut: "alt+s", action: "quick-search" }), null);
+check(
+  "快捷搜索空搜索词 -> 非法",
+  parseBinding({ shortcut: "alt+s", action: "quick-search", target: "   " }),
+  null
+);
+check(
+  "快捷搜索只 trim，不吞冒号",
+  parseBinding({ shortcut: "alt+s", action: "quick-search", target: "  周报 : 模板  " }),
+  { shortcut: "alt+s", action: "quick-search", target: "周报 : 模板" }
+);
+
 // ---- normalizeQuickFilterHeader ----
 check("归一化：去首尾空白", normalizeQuickFilterHeader("  百度翻译  "), "百度翻译");
 check("归一化：去尾部「 : 」", normalizeQuickFilterHeader("百度翻译 : "), "百度翻译");
@@ -129,8 +148,9 @@ check("归一化：保留中间冒号", normalizeQuickFilterHeader("A:B"), "A:B"
 
 // ---- actionRequiresTarget ----
 check("打开插件需要作用对象", actionRequiresTarget("open-plugin"), true);
-check("快速过滤需要作用对象", actionRequiresTarget("quick-filter"), true);
+check("快捷子搜索需要作用对象", actionRequiresTarget("quick-filter"), true);
 check("快捷打开项需要作用对象", actionRequiresTarget("quick-open"), true);
+check("快捷搜索需要作用对象", actionRequiresTarget("quick-search"), true);
 check("呼出/隐藏不需要作用对象", actionRequiresTarget("toggle-window"), false);
 check("截图不需要作用对象", actionRequiresTarget("screenshot"), false);
 
@@ -259,7 +279,7 @@ check(
   true
 );
 check(
-  "快速过滤缺常用头被拒",
+  "快捷子搜索缺常用头被拒",
   validateBindings([
     { shortcut: "ctrl+alt+s", action: "toggle-window", target: null },
     { shortcut: "alt+f", action: "quick-filter", target: null },
@@ -267,7 +287,7 @@ check(
   false
 );
 check(
-  "快速过滤只有空白/分隔符被拒",
+  "快捷子搜索只有空白/分隔符被拒",
   validateBindings([
     { shortcut: "ctrl+alt+s", action: "toggle-window", target: null },
     { shortcut: "alt+f", action: "quick-filter", target: " : " },
@@ -275,7 +295,7 @@ check(
   false
 );
 check(
-  "快速过滤填了常用头即通过",
+  "快捷子搜索填了常用头即通过",
   validateBindings([
     { shortcut: "ctrl+alt+s", action: "toggle-window", target: null },
     { shortcut: "alt+f", action: "quick-filter", target: "百度翻译" },
@@ -306,6 +326,30 @@ check(
   ]).ok,
   true
 );
+check(
+  "快捷搜索缺搜索词被拒",
+  validateBindings([
+    { shortcut: "ctrl+alt+s", action: "toggle-window", target: null },
+    { shortcut: "alt+s", action: "quick-search", target: null },
+  ]).ok,
+  false
+);
+check(
+  "快捷搜索只有空白被拒",
+  validateBindings([
+    { shortcut: "ctrl+alt+s", action: "toggle-window", target: null },
+    { shortcut: "alt+s", action: "quick-search", target: "   " },
+  ]).ok,
+  false
+);
+check(
+  "快捷搜索填了搜索词即通过",
+  validateBindings([
+    { shortcut: "ctrl+alt+s", action: "toggle-window", target: null },
+    { shortcut: "alt+s", action: "quick-search", target: "周报模板" },
+  ]).ok,
+  true
+);
 
 // ---- isBindingComplete（草稿判定：新增/切换后填完才校验、才提交） ----
 check("呼出/隐藏视为填完", isBindingComplete({ shortcut: "ctrl+alt+s", action: "toggle-window", target: null }), true);
@@ -320,17 +364,17 @@ check(
   true
 );
 check(
-  "快速过滤未填常用头 -> 草稿",
+  "快捷子搜索未填常用头 -> 草稿",
   isBindingComplete({ shortcut: "alt+f", action: "quick-filter", target: null }),
   false
 );
 check(
-  "快速过滤只有分隔符 -> 草稿",
+  "快捷子搜索只有分隔符 -> 草稿",
   isBindingComplete({ shortcut: "alt+f", action: "quick-filter", target: " : " }),
   false
 );
 check(
-  "快速过滤填了常用头 -> 填完",
+  "快捷子搜索填了常用头 -> 填完",
   isBindingComplete({ shortcut: "alt+f", action: "quick-filter", target: "百度翻译" }),
   true
 );
@@ -342,6 +386,16 @@ check(
 check(
   "快捷打开项填了匹配文本 -> 填完",
   isBindingComplete({ shortcut: "alt+o", action: "quick-open", target: "百度翻译" }),
+  true
+);
+check(
+  "快捷搜索只有空白 -> 草稿",
+  isBindingComplete({ shortcut: "alt+s", action: "quick-search", target: "   " }),
+  false
+);
+check(
+  "快捷搜索填了搜索词 -> 填完",
+  isBindingComplete({ shortcut: "alt+s", action: "quick-search", target: "周报模板" }),
   true
 );
 check("缺快捷键 -> 草稿", isBindingComplete({ shortcut: "  ", action: "toggle-window", target: null }), false);
@@ -380,7 +434,7 @@ check(
   ]
 );
 check(
-  "序列化时快速过滤常用头归一化（去尾部「 : 」）",
+  "序列化时快捷子搜索常用头归一化（去尾部「 : 」）",
   serializeBindings([{ shortcut: "alt+f", action: "quick-filter", target: "百度翻译 : " }]),
   [{ shortcut: "alt+f", action: "quick-filter", target: "百度翻译" }]
 );
@@ -388,6 +442,11 @@ check(
   "序列化时快捷打开项只 trim（保留冒号）",
   serializeBindings([{ shortcut: "alt+o", action: "quick-open", target: " 百度翻译 : " }]),
   [{ shortcut: "alt+o", action: "quick-open", target: "百度翻译 :" }]
+);
+check(
+  "序列化时快捷搜索只 trim（保留冒号）",
+  serializeBindings([{ shortcut: "alt+s", action: "quick-search", target: " 周报 : " }]),
+  [{ shortcut: "alt+s", action: "quick-search", target: "周报 :" }]
 );
 
 // ---- nextFreeShortcut ----
@@ -432,14 +491,14 @@ check(
   "打开插件「com.a.b」"
 );
 check(
-  "快速过滤文案带上自动补的分隔符",
+  "快捷子搜索文案只带常用头（不显示右侧分隔符）",
   describeBinding({ shortcut: "alt+f", action: "quick-filter", target: "百度翻译" }),
-  `快速过滤「百度翻译${SEARCH_BOUNDARY}」`
+  "快捷子搜索「百度翻译」"
 );
 check(
-  "快速过滤常用头为空时退化为类型名",
+  "快捷子搜索常用头为空时退化为类型名",
   describeBinding({ shortcut: "alt+f", action: "quick-filter", target: null }),
-  "快速过滤"
+  "快捷子搜索"
 );
 check(
   "快捷打开项文案带上匹配文本",
@@ -451,6 +510,16 @@ check(
   describeBinding({ shortcut: "alt+o", action: "quick-open", target: null }),
   "快捷打开项"
 );
+check(
+  "快捷搜索文案带上搜索词",
+  describeBinding({ shortcut: "alt+s", action: "quick-search", target: "周报模板" }),
+  "快捷搜索「周报模板」"
+);
+check(
+  "快捷搜索搜索词为空时退化为类型名",
+  describeBinding({ shortcut: "alt+s", action: "quick-search", target: null }),
+  "快捷搜索"
+);
 
 // ---- canRemoveBinding ----
 check("呼出/隐藏不可删除", canRemoveBinding(defaultToggleBinding()), false);
@@ -460,13 +529,18 @@ check(
   true
 );
 check(
-  "快速过滤绑定可删除",
+  "快捷子搜索绑定可删除",
   canRemoveBinding({ shortcut: "alt+f", action: "quick-filter", target: "百度翻译" }),
   true
 );
 check(
   "快捷打开项绑定可删除",
   canRemoveBinding({ shortcut: "alt+o", action: "quick-open", target: "百度翻译" }),
+  true
+);
+check(
+  "快捷搜索绑定可删除",
+  canRemoveBinding({ shortcut: "alt+s", action: "quick-search", target: "周报模板" }),
   true
 );
 

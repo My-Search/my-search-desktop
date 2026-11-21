@@ -61,10 +61,11 @@ check(
 );
 
 /* ---------- 2. 卸载路径用 forgetIconCache（不再手写循环） ---------- */
-const uninstall = bodyOf("uninstallPlugin");
-check("uninstallPlugin：调用 forgetIconCache", /forgetIconCache\(rec\.id\)/.test(uninstall));
+// 卸载确认改为单弹窗后，落卸载的函数由 uninstallPlugin 更名为 confirmUninstall。
+const uninstall = bodyOf("confirmUninstall");
+check("confirmUninstall：调用 forgetIconCache", /forgetIconCache\(rec\.id\)/.test(uninstall));
 check(
-  "uninstallPlugin：不再手写 for 循环清 iconMap（统一走 forgetIconCache）",
+  "confirmUninstall：不再手写 for 循环清 iconMap（统一走 forgetIconCache）",
   !/for \(const k of Object\.keys\(iconMap\.value\)\)/.test(uninstall)
 );
 

@@ -207,7 +207,7 @@ const ok = (cond, name, extra = "") => {
   ok(e5 instanceof InstallPrepError && /net\.evil/.test(e5.message), "未知权限被拦下且点名", e5?.message);
 }
 
-/* ============ 5. 保留前缀降级为警告（官方示例插件要能装） ============ */
+/* ============ 5. 保留前缀：不拦截，也不向用户提示 ============ */
 {
   const reserved = await writeZip([
     {
@@ -224,17 +224,12 @@ const ok = (cond, name, extra = "") => {
     },
   ]);
   const prepared = await preparePackage(reserved, { checkPermissions: isKnownPermission });
-  ok(prepared.manifest.id === "com.mysearch.official-demo", "保留前缀不再硬拦截（降级为警告）");
-  // 警告必须是**已翻译**的可读文案：它会被原样拼进安装确认弹窗，
-  // 透传 `id.reservedPrefix:com.mysearch.official-demo` 就是给用户看天书。
+  ok(prepared.manifest.id === "com.mysearch.official-demo", "保留前缀不再硬拦截");
+  // 安装确认弹窗只展示用户需要知道的信息；id 前缀属于作者的发布规范，
+  // 对安装者既改不了也不影响使用，因此不再产生任何警告。
   ok(
-    prepared.warnings.some((w) => w.includes("官方保留前缀")),
-    "保留前缀产生可读警告（不再是内部错误码）",
-    prepared.warnings.join(",")
-  );
-  ok(
-    !prepared.warnings.some((w) => w.includes("reservedPrefix:")),
-    "警告里不再出现内部错误码原文",
+    prepared.warnings.length === 0,
+    "保留前缀不再产生安装提示",
     prepared.warnings.join(",")
   );
 }

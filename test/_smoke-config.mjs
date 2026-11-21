@@ -260,7 +260,7 @@ check(
     '["Ctrl","Shift","F9"]'
 );
 
-// 3b. 没有可打开插件时：新增一条「快速过滤」草稿（填常用头前不校验、不提交、不报错）
+// 3b. 没有可打开插件时：新增一条「快捷子搜索」草稿（填常用头前不校验、不提交、不报错）
 await evalJs(`document.querySelector('.shortcut-add').click()`);
 await sleep(200);
 const draftRows = await evalJs(`document.querySelectorAll('.shortcut-row').length`);
@@ -268,7 +268,7 @@ const draftAction = await evalJs(
   `document.querySelectorAll('.shortcut-row')[1]?.querySelector('[data-act="action"]')?.value ?? 'null'`
 );
 check(
-  "无可用插件时新增快速过滤草稿（行保留）",
+  "无可用插件时新增快捷子搜索草稿（行保留）",
   draftRows === 2 && draftAction === "quick-filter",
   `rows=${draftRows} action=${draftAction}`
 );

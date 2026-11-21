@@ -5,12 +5,13 @@
  * 每条快捷键由三部分组成（新）：
  *   1. **快捷键**：录入组合键（点击 → 按下 → 完成；Esc 取消 / Backspace 清空）
  *   2. **作用类型**：下拉按来源分为「系统」与「插件」两个分区（<optgroup>）——
- *        系统：呼出 / 隐藏搜索框（必有且仅一条） | 打开插件 | 快速过滤 | 快捷打开项；
+ *        系统：呼出 / 隐藏搜索框（必有且仅一条） | 打开插件 | 快捷子搜索 | 快捷打开项 | 快捷搜索；
  *        插件：由已安装插件声明 / 提供的动作（截图、剪贴板历史、plugin:<id>:<name>）
  *   3. **作用对象**：
  *        - 打开插件 → 下拉选择某个已安装插件
- *        - 快速过滤 → 填写常用头文本（按下后填入「常用头 + ` : `」并立即搜索）
+ *        - 快捷子搜索 → 填写常用头文本（按下后填入「常用头 + ` : `」并立即搜索）
  *        - 快捷打开项 → 填写匹配文本（按下后精确匹配数据项并直接打开）
+ *        - 快捷搜索 → 填写搜索词（按下后填入搜索框并立即搜索，只列结果、不自动打开）
  *
  * 保存策略：作用对象已填完整的行，任何改动（录入、切换类型、切换插件/改文本、删除）
  * 都会立即提交给 Rust 端整体重新注册并持久化；注册失败（被占用等）时回滚到上次生效值
@@ -33,7 +34,6 @@ import {
   nextFreeShortcut,
   normalizeQuickFilterHeader,
   parseBindings,
-  SEARCH_BOUNDARY,
   validateBindings,
   type ShortcutAction,
   type ShortcutBinding,
@@ -135,7 +135,7 @@ async function loadPlugins(): Promise<void> {
 /**
  * 作用类型下拉的候选：按**来源**分成「系统」与「插件」两个分区（`<optgroup>`）。
  *
- * - **系统**：宿主内置的四项（呼出/隐藏、打开插件、快速过滤、快捷打开项），永远可用；
+ * - **系统**：宿主内置的五项（呼出/隐藏、打开插件、快捷子搜索、快捷打开项、快捷搜索），永远可用；
  * - **插件**：由已安装插件提供的动作（截图 / 剪贴板历史这类宿主原生动作，以及插件
  *   自定义的 `plugin:<id>:<name>`）。只列**已安装**的（`pluginActions`）；若某条绑定
  *   引用了刚被卸载的动作（宿主同步尚未跑完），把绑定自身的动作补进「插件」分区并标注
@@ -154,12 +154,13 @@ interface ActionOptionGroup {
 }
 
 function actionOptionsFor(row: ShortcutBinding | null): ActionOptionGroup[] {
-  // 系统内置四项：单独一类，永远排在最前
+  // 系统内置五项：单独一类，永远排在最前
   const systemOptions: ActionOption[] = [
     { value: "toggle-window", label: "呼出 / 隐藏搜索框" },
     { value: "open-plugin", label: "打开插件" },
-    { value: "quick-filter", label: "快速过滤" },
+    { value: "quick-filter", label: "快捷子搜索" },
     { value: "quick-open", label: "快捷打开项" },
+    { value: "quick-search", label: "快捷搜索" },
   ];
   const pluginOptions: ActionOption[] = [];
   const seen = new Set<string>(systemOptions.map((o) => o.value));
@@ -173,7 +174,7 @@ function actionOptionsFor(row: ShortcutBinding | null): ActionOptionGroup[] {
     const title = actionTitleOf(row.action) || describeBinding(row);
     pluginOptions.push({ value: row.action, label: `${title}（插件已卸载）` });
   }
-  // 只保留有内容的分区：「系统」恒有四项，「插件」为空时整组不渲染（不留空标题）
+  // 只保留有内容的分区：「系统」恒有五项，「插件」为空时整组不渲染（不留空标题）
   return [
     { label: "系统", options: systemOptions },
     { label: "插件", options: pluginOptions },
@@ -197,7 +198,7 @@ function currentBindings(): ShortcutBinding[] {
     let target: string | null;
     if (r.action === "quick-filter") {
       target = normalizeQuickFilterHeader(r.target) || null;
-    } else if (r.action === "quick-open") {
+    } else if (r.action === "quick-open" || r.action === "quick-search") {
       target = String(r.target ?? "").trim() || null;
     } else {
       target = r.target;
@@ -341,7 +342,7 @@ async function persist(opts: { revert?: () => void; errorKey?: number; successTe
 /**
  * 作用类型切换。
  *
- * 文本型作用对象（quick-filter / quick-open）切换时**不**清空旧 target：
+ * 文本型作用对象（quick-filter / quick-open / quick-search）切换时**不**清空旧 target：
  * 保留原值（哪怕它不适合新类型）让用户在输入框里手动覆盖即可；原值为空时
  * 该行只是暂存为草稿——不校验、不提交，填完再随下一次保存生效。
  * 「打开插件」切换后默认不选中插件，等用户手动选择（期间同样是草稿）。
@@ -353,7 +354,11 @@ function onActionChange(row: Row, value: string): void {
     // 呼出/隐藏只能一条：切回去时清掉作用对象
     row.action = "toggle-window";
     row.target = null;
-  } else if (action === "quick-filter" || action === "quick-open") {
+  } else if (
+    action === "quick-filter" ||
+    action === "quick-open" ||
+    action === "quick-search"
+  ) {
     // 文本型：保留原值（空值等用户填写，非空值等用户修改），避免切完就报校验错误
     row.action = action;
   } else if (action === "open-plugin") {
@@ -374,13 +379,13 @@ function onTargetChange(row: Row, value: string): void {
   void persist({ errorKey: row.key });
 }
 
-/** 该作用类型的文本型作用对象是否就是「匹配文本」（quick-open）而非「常用头」（quick-filter） */
+/** 该作用类型的文本型作用对象是否就是「匹配文本」（quick-open / quick-search）而非「常用头」（quick-filter） */
 function isOpenText(row: Row): boolean {
-  return row.action === "quick-open";
+  return row.action === "quick-open" || row.action === "quick-search";
 }
 
 /**
- * 文本型作用对象（快速过滤的常用头 / 快捷打开项的匹配文本）输入：本地实时更新
+ * 文本型作用对象（快捷子搜索的常用头 / 快捷打开项、快捷搜索的搜索文本）输入：本地实时更新
  * （受控 input），失焦时才提交。不在每次按键都提交——输入过程中必然出现空串/半成品，
  * 会反复触发校验报错与重注册。
  */
@@ -392,8 +397,8 @@ function onTextInput(row: Row, value: string): void {
  * 文本型作用对象失焦：按作用类型归一化后提交。
  * 填了内容 → 行变完整，立即校验并保存；清空 → 行退回草稿（不校验、不提交），
  * 重新填完后的下一次失焦再保存。与上次生效值一致时 persist 内部会跳过重注册。
- * - 快速过滤：去掉手打的尾部「 : 」，避免拼成「百度翻译 :  : 」；
- * - 快捷打开项：只 trim（冒号可能是标题本身的一部分）。
+ * - 快捷子搜索：去掉手打的尾部「 : 」，避免拼成「百度翻译 :  : 」；
+ * - 快捷打开项 / 快捷搜索：只 trim（冒号可能是标题本身的一部分）。
  */
 function onTextCommit(row: Row): void {
   const previous = row.target;
@@ -433,7 +438,7 @@ function removeBinding(row: Row): void {
 
 /**
  * 新增一条：默认「打开插件」（作用对象留空，等用户手动选择）+ 一个没被占用的组合键。
- * 没有可打开的插件时退而新增一条「快速过滤」（常用头留空，等用户填写）。
+ * 没有可打开的插件时退而新增一条「快捷子搜索」（常用头留空，等用户填写）。
  * 新增行此时是草稿——不校验、不提交；用户选完插件 / 填完常用头后才随保存生效。
  */
 function addBinding(): void {
@@ -443,9 +448,9 @@ function addBinding(): void {
     return;
   }
   if (!hasOpenablePlugin.value) {
-    // 没有可打开的插件：给一条快速过滤（常用头留空，等用户填写）
+    // 没有可打开的插件：给一条快捷子搜索（常用头留空，等用户填写）
     rows.value.push({ key: nextKey++, shortcut, action: "quick-filter", target: null });
-    props.notify(`已添加快捷键 ${shortcutToCaps(shortcut).join(" + ")}（快速过滤，请填写常用头）。`, "ok");
+    props.notify(`已添加快捷键 ${shortcutToCaps(shortcut).join(" + ")}（快捷子搜索，请填写常用头）。`, "ok");
     return;
   }
   rows.value.push({
@@ -495,8 +500,9 @@ const ACTION_TYPES_HELP = computed(() => {
   const lines = [
     "呼出 / 隐藏搜索框：全局呼出或收起搜索窗（必需，只能一条）。",
     "打开插件：直接打开指定插件的界面，无需先搜关键词。",
-    "快速过滤：把「常用头 + 空格冒号空格」填入搜索框并立即搜索，光标停在末尾，接着输入子关键词即可（如常用头「百度翻译」→ 填入「百度翻译 : 」）。",
+    "快捷子搜索：把「常用头 + 空格冒号空格」填入搜索框并立即搜索，光标停在末尾，接着输入子关键词即可（如常用头「百度翻译」→ 填入「百度翻译 : 」）。",
     "快捷打开项：按填写的文本精确匹配数据项（标题 / 描述 / 内容，多个词用空格分隔、都要命中；不用模糊搜索），匹配到一项就直接打开，多项则列出结果，没有则提示。",
+    "快捷搜索：把填写的搜索词填入搜索框并立即搜索（走常规搜索，和手输回车一样），只列出结果列表，不会自动打开任何项。",
   ];
   for (const a of pluginActions.value) {
     if (a.action === "screenshot") {
@@ -518,11 +524,11 @@ const ACTION_TYPES_HELP = computed(() => {
   return lines.join("\n");
 });
 
-/** 没有可打开插件时的引导文案（此时「+ 添加快捷键」会新增一条「快速过滤」） */
+/** 没有可打开插件时的引导文案（此时「+ 添加快捷键」会新增一条「快捷子搜索」） */
 const emptyPluginHint = computed(() =>
   hasOpenablePlugin.value
     ? ""
-    : "尚未安装可打开的插件：「+ 添加快捷键」将新增一条「快速过滤」；装好插件后即可为它设置快捷键"
+    : "尚未安装可打开的插件：「+ 添加快捷键」将新增一条「快捷子搜索」；装好插件后即可为它设置快捷键"
 );
 </script>
 
@@ -596,7 +602,8 @@ const emptyPluginHint = computed(() =>
               {{ p.openable ? p.name : `${p.name}（${p.note}）` }}
             </option>
           </select>
-          <!-- 作用对象（「快速过滤」）：常用头文本，触发时自动补二次搜索分隔符 -->
+          <!-- 作用对象（「快捷子搜索」）：只填常用头文本（输入框右侧不再显示「:」，
+               触发时由宿主自动补二次搜索分隔符） -->
           <div v-else-if="row.action === 'quick-filter'" class="shortcut-header">
             <input
               class="shortcut-input"
@@ -610,17 +617,31 @@ const emptyPluginHint = computed(() =>
               @input="onTextInput(row, ($event.target as HTMLInputElement).value)"
               @blur="onTextCommit(row)"
             />
-            <span class="shortcut-header-suffix" title="触发时自动追加的二次搜索分隔符">{{ SEARCH_BOUNDARY.trim() }}</span>
           </div>
           <!-- 作用对象（「快捷打开项」）：匹配文本，按下即精确匹配并打开 -->
           <div v-else-if="row.action === 'quick-open'" class="shortcut-header">
             <input
-              class="shortcut-input solo"
+              class="shortcut-input"
               data-act="target"
               type="text"
               :value="row.target ?? ''"
               placeholder="要打开的项，如：百度翻译"
               title="按下该键后，按「标题 / 描述 / 内容」精确匹配该项并直接打开；多个词用空格分隔（都要命中）；多项匹配时列出结果"
+              spellcheck="false"
+              autocomplete="off"
+              @input="onTextInput(row, ($event.target as HTMLInputElement).value)"
+              @blur="onTextCommit(row)"
+            />
+          </div>
+          <!-- 作用对象（「快捷搜索」）：搜索词，按下即填入搜索框并立即搜索（不自动打开） -->
+          <div v-else-if="row.action === 'quick-search'" class="shortcut-header">
+            <input
+              class="shortcut-input"
+              data-act="target"
+              type="text"
+              :value="row.target ?? ''"
+              placeholder="要搜索的词，如：周报模板"
+              title="按下该键后，把搜索词填入搜索框并立即搜索；只列出结果列表，不会自动打开任何项"
               spellcheck="false"
               autocomplete="off"
               @input="onTextInput(row, ($event.target as HTMLInputElement).value)"

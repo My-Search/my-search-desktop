@@ -31,9 +31,10 @@ import {
   syncUpload,
   type RemoteMeta,
   type SyncConfig,
+  type SyncConflictShard,
   type SyncPersistedState,
 } from "./bridge";
-import { collectState, pruneState, restoreState, stateDigest } from "./snapshot";
+import { collectBackupState, collectState, pruneState, restoreState, stateDigest } from "./snapshot";
 import { debug, warn } from "../../lib/logger";
 
 /** 默认兜底检查间隔（毫秒） */
@@ -46,7 +47,18 @@ export const ON_CHANGE_THROTTLE_MS = 5000;
 export type SyncStatePatch = Partial<
   Pick<
     SyncPersistedState,
-    "initialized" | "remoteRev" | "remoteEtag" | "lastLocalDigest" | "lastSyncAt" | "appliedRev"
+    | "initialized"
+    | "remoteRev"
+    | "remoteEtag"
+    | "lastLocalDigest"
+    | "lastSyncAt"
+    | "appliedRev"
+    | "cloudFormat"
+    | "manifestEtag"
+    | "shards"
+    | "pending"
+    | "conflicts"
+    | "v3"
   >
 >;
 
@@ -141,6 +153,15 @@ export interface SyncRunState {
   needsChoice: boolean;
   /** 为什么需要选择 */
   choiceReason: "" | "first-connect" | "conflict";
+  /** 等待裁决的冲突片（插件级：只有这几片被挂起，其它片照常同步） */
+  conflicts: SyncConflictShard[];
+  /**
+   * 应用远端数据**之前**落下的本机快照（`.msbackup` 绝对路径）。
+   *
+   * 只在「确实要覆盖本机」且本轮有下载时写入：用户在面板上可以据此回滚。
+   * 写入失败不影响同步，但会保持为空。
+   */
+  lastLocalBackupPath?: string;
   /** 还原代次（用于丢弃旧回调） */
   epoch: number;
 }
@@ -172,6 +193,10 @@ export interface SyncRoundOptions {
   onState?: (state: SyncRunState) => void;
   /** 用户本轮对 needs-choice 的选择 */
   choice?: "local" | "remote";
+  /** v3：按插件裁决（插件 id → 保留哪边） */
+  choices?: Record<string, "local" | "remote">;
+  /** v3：core 冲突裁决 */
+  coreChoice?: "local" | "remote";
 }
 
 /** 判断错误是否为条件请求冲突（Rust 侧统一带 `SYNC_CONFLICT:` 前缀） */
@@ -234,6 +259,7 @@ function baseState(prev: Partial<SyncRunState>, persisted?: SyncPersistedState):
     remoteRev: persisted?.remoteRev ?? prev.remoteRev ?? "",
     needsChoice: false,
     choiceReason: "",
+    conflicts: persisted?.conflicts ?? [],
     epoch: persisted?.epoch ?? prev.epoch ?? 1,
   };
 }
@@ -383,7 +409,7 @@ async function doUpload(
   force: boolean
 ): Promise<void> {
   update({ status: "uploading", needsChoice: false, choiceReason: "" });
-  const exported = await backupSnapshot(collectState());
+  const exported = await backupSnapshot(collectBackupState());
 
   // 条件请求：首次创建用 If-None-Match:*，后续用远端原始 ETag；
   // 只有用户明确选择「本机覆盖远端」才允许无条件 PUT。

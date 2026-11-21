@@ -30,7 +30,10 @@ export const PLUGINS_DIR_NAME = "plugins";
 /** 插件分发后缀（安装包本质是 zip） */
 export const PLUGIN_PACKAGE_EXT = ".mspp";
 
-/** 官方保留的 id 前缀（第三方不得占用，避免冒充官方插件） */
+/**
+ * 官方保留的 id 前缀（**发布规范**：第三方不得占用，避免冒充官方插件）。
+ * 安装链路不据此拦截或提示用户；由市场审核 / 发版流程把关。
+ */
 export const RESERVED_ID_PREFIXES = ["com.mysearch.", "mysearch."];
 /** 官方保留的 id（单独占位，防止与内置能力混淆） */
 export const RESERVED_IDS = ["core", "host", "system"];
@@ -785,8 +788,6 @@ export function describeManifestError(code: string): string {
       return "缺少插件 id";
     case "id.invalid":
       return "插件 id 非法（需为反向域名式，如 com.example.my-plugin；只能用小写字母、数字、中划线与点）";
-    case "id.reservedPrefix":
-      return `id 使用了官方保留前缀（${arg}），除非确实是你自己发布的插件，否则建议改名`;
     // 警告码（会拼进安装确认弹窗，同样需要人话）
     case "contributes.command.prefix.no_boundary":
       return `命令「${arg}」的前缀里没有分隔符：仍能用「前缀 + 空格」唤起，但「前缀 : 子词」的子搜索转发会失效`;
@@ -1002,13 +1003,11 @@ export function parsePluginManifest(
   const id = asString(obj.id);
   if (!id) errors.push("id.missing");
   else if (!isValidPluginId(id)) errors.push("id.invalid");
-  else if (RESERVED_ID_PREFIXES.some((p) => id.startsWith(p)) && id !== "com.mysearch.builtin") {
-    // 官方前缀（com.mysearch.* / mysearch.*）声明为保留；但**不做硬拦截**：
-    // 「本地文件安装」是用户主动选择的行为，宿主也没有签名/市场可用来判定谁算官方，
-    // 拦下来只会让官方示例插件（plugins/ 目录里的那些）装不上。
-    // 因此降级为警告，由安装确认弹窗提示用户「这不是官方插件」。
-    warnings.push(`id.reservedPrefix:${id}`);
-  }
+  // 官方前缀（com.mysearch.* / mysearch.*）属于**发布规范**（见 docs/plugin-market-publish.md），
+  // 不在这里做安装拦截，也不向用户弹提示：
+  //   - 本地文件安装是用户主动选择的行为，宿主没有签名/市场凭据判定谁算官方；
+  //   - 对用户而言「id 前缀不合规」既改不了、也不影响使用，只会造成误以为插件有问题。
+  // 前缀规则留给市场审核与发版流程把关。
 
   const name = asString(obj.name);
   if (!name) errors.push("name.missing");

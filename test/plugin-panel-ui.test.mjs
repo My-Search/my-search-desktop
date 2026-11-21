@@ -394,9 +394,9 @@ check("「脚本应用测试项」整块文字都没出现", !listText.includes(
 check("面板里没有「脚本项」筛选按钮", !(await evalJs(`
   [...document.querySelectorAll('.page.plugins .plugins-filter .btn-filter')].some(b => b.textContent.includes('脚本'))
 `)));
-check("筛选按钮只剩 全部/后台运行中/异常", (await evalJs(`
+check("筛选按钮为 全部/后台运行中/异常 + 检查更新（贴右）", (await evalJs(`
   [...document.querySelectorAll('.page.plugins .plugins-filter .btn-filter')].map(b => b.textContent.replace(/\\s+/g,'').replace(/\\d+/, '')).join(',')
-`)) === "全部,后台运行中,异常");
+`)) === "全部,后台运行中,异常,检查更新");
 
 const statsText = await evalJs(`document.querySelector('.page.plugins .plugins-stats')?.textContent || ''`);
 check("「已安装」只数真插件（不含 legacy）", statsText.includes(`已安装 ${PLUGIN_NAMES.length}`), statsText.trim());
@@ -672,26 +672,17 @@ check(
 
 check("全程无页面异常", pageErrors.length === 0, pageErrors.slice(0, 3).join(" | "));
 
-/* ================= 6. 卸载弹窗：**连续两次** confirm 都能正常确认 ================= */
+/* ================= 6. 卸载必须走**可触达**的确认弹窗（旧回归） ================= */
 /**
  * 用户诉求（回归）：点「卸载」后弹窗没反应，必须关掉设置窗口才看得到卸载提示。
  *
- * 卸载是**两次串行** confirm：「确定卸载「X」v1.0.0？」→「是否同时删除插件保存
- * 的数据？」。两个弹窗由同一个 MessageDialog 实例渲染、按钮位置完全重合，
- * 切换时 DOM 被 Vue 原地 patch（不是销毁重建）。
+ * 卸载确认后来改为**单弹窗**（复用安装确认弹窗样式，内含「将数据清理」勾选框）：
+ *   - 点「卸载」立即弹出确认框（旧的两步 MessageDialog 已合并，见 PanelPlugins.vue）；
+ *   - 弹窗及其「卸载」按钮必须能被真实点击命中（不被高 z-index 的插件 UI 盖住）；
+ *   - 点「卸载」完成卸载；点「取消」关闭弹窗且不发起卸载。
  *
- * 本节用**完整链路**担保「第一次确认后第二次一定能弹出、且确认后真能卸载」：
- *   - 用真实的**指针序列**驱动（mousePressed → mouseReleased）点第一次「确定」，
- *     而不是 `element.click()`；
- *   - 第二次故意改用 `element.click()`（无按压态）——两种真实点击路径都要生效；
- *   - 往页面里插一个 z-index:2147483646 的铺满层，断言确定按钮上的
- *     elementFromPoint 就是按钮本身（弹窗没被盖住）。
- *
- * 注：本节的断言是**行为级**的。无头浏览器里 CDP 派发的 click 与真实系统点击的
- * 按压态时序不完全一致，因此不能单靠它钉死“弹窗必须用 top layer”。两条**机制级**
- * 硬约束在 `test/message-dialog-double-confirm.test.mjs` 里（popover 属性、
- * show/hidePopover、两个窗口的 z-index 顶格、[popover] UA 样式清零）。
- * 两者互补，都要跑。
+ * 本节用**真实的指针序列**（mousePressed + mouseReleased）驱动按钮点击，并往页面里
+ * 插一层 z-index:2147483646 的铺满元素，断言按钮上的 elementFromPoint 就是按钮本身。
  */
 await S("Page.navigate", { url: base + "/config.html" }, sessionId);
 await sleep(900);
@@ -726,35 +717,35 @@ const openUninstallDialog = async (pluginName) => {
 
 await openUninstallDialog(BACKEND_NAME);
 
+/** 读取卸载确认弹窗（单弹窗：.plugin-install-overlay + .plugin-install-dialog） */
 const readDialog = async () =>
   JSON.parse(
     await evalJs(`JSON.stringify((() => {
-      const ov = document.querySelector('#msgOverlay');
-      const ok = document.querySelector('#msgOk');
-      const r = ok ? ok.getBoundingClientRect() : null;
+      const ov = document.querySelector('.plugin-install-overlay');
+      if (!ov) {
+        return { visible: false, uninstalled: window.__uninstalled || [] };
+      }
+      const btn = ov.querySelector('.plugin-install-actions .cfg-btn.primary');
+      const r = btn ? btn.getBoundingClientRect() : null;
+      const dr = ov.querySelector('.plugin-install-dialog')?.getBoundingClientRect();
+      const or = ov.getBoundingClientRect();
       return {
-        visible: ov?.classList.contains('show') === true,
-        text: document.querySelector('#msgText')?.textContent || '',
-        hasCancel: !!document.querySelector('#msgCancel'),
+        visible: true,
+        title: ov.querySelector('.plugin-install-title')?.textContent || '',
+        hasCancel: !!ov.querySelector('.plugin-install-actions .cfg-btn.ghost'),
+        checkbox: !!ov.querySelector('input[type="checkbox"]'),
         okRect: r ? { x: r.x, y: r.y, w: r.width, h: r.height } : null,
         // 弹窗按钮上方是否被别的节点盖住（z-index 不够时用户点不到，看起来“没反应”）
         topmostAtOk: r ? (() => {
           const el = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
-          return el ? (el.id || el.className || el.tagName) : null;
+          return el ? (el.className || el.tagName) : null;
         })() : null,
-        // 弹窗是否居中：比较 **.token-dialog**（被 flex 居中的那个盒子）
-        // 的中心与遮罩中心。弹窗被顶出屏幕/被拉伸时都会失败，与浏览器窗口/
-        // 视口换算无关，比拿按钮中心更稳。
+        // 弹窗是否居中：比较 **.plugin-install-dialog**（被 flex 居中的那个盒子）
+        // 的中心与遮罩中心。弹窗被顶出屏幕/被拉伸时都会失败。
         okCenteredX: (() => {
-          const d = document.querySelector('#msgOverlay .token-dialog');
-          const ov = document.querySelector('#msgOverlay');
-          const dr = d?.getBoundingClientRect(), or = ov?.getBoundingClientRect();
           return !!(dr && or && Math.abs((dr.x + dr.width / 2) - (or.x + or.width / 2)) < 4);
         })(),
         okCenteredY: (() => {
-          const d = document.querySelector('#msgOverlay .token-dialog');
-          const ov = document.querySelector('#msgOverlay');
-          const dr = d?.getBoundingClientRect(), or = ov?.getBoundingClientRect();
           return !!(dr && or && Math.abs((dr.y + dr.height / 2) - (or.y + or.height / 2)) < 4);
         })(),
         uninstalled: window.__uninstalled || [],
@@ -762,7 +753,7 @@ const readDialog = async () =>
     })())`),
   );
 
-/** 用真实鼠标事件点「确定」（带按压态） */
+/** 用真实鼠标事件点弹窗「卸载」按钮（带按压态） */
 const clickOkWithMouse = async (rect) => {
   const x = Math.round(rect.x + rect.w / 2);
   const y = Math.round(rect.y + rect.h / 2);
@@ -774,54 +765,34 @@ const clickOkWithMouse = async (rect) => {
 const dlg1 = await readDialog();
 check(
   "点「卸载」立即弹出卸载确认弹窗（不再“没反应”）",
-  dlg1.visible === true && dlg1.text.includes("确定卸载"),
+  dlg1.visible === true && dlg1.title.includes("卸载"),
   JSON.stringify(dlg1),
 );
-check("第一次弹窗有「取消」按钮", dlg1.hasCancel === true, JSON.stringify(dlg1));
-check("弹窗「确定」按钮没有被其它节点遮挡", dlg1.topmostAtOk === "msgOk", String(dlg1.topmostAtOk));
+check("确认弹窗有「取消」按钮与「清理数据」勾选框", dlg1.hasCancel === true && dlg1.checkbox === true, JSON.stringify(dlg1));
+check("弹窗「卸载」按钮没有被其它节点遮挡", String(dlg1.topmostAtOk).includes("primary"), String(dlg1.topmostAtOk));
 
-// 第一次：真实鼠标点击「确定」→ 应立即切到第二次确认
+// 真实鼠标点击「卸载」→ 直接完成卸载（旧的两步确认已合并为单弹窗 + 勾选框）
 await clickOkWithMouse(dlg1.okRect);
-await sleep(600);
-const dlg2 = await readDialog();
-check(
-  "点「确定」后紧接着弹出第二个确认（是否删除数据？）",
-  dlg2.visible === true && dlg2.text.includes("删除"),
-  JSON.stringify(dlg2),
-);
-check(
-  "第二个弹窗显示时插件还没被卸载（等这一次确认）",
-  dlg2.uninstalled.length === 0,
-  JSON.stringify(dlg2.uninstalled),
-);
-check("第二个弹窗的「确定」同样没被遮挡", dlg2.topmostAtOk === "msgOk", String(dlg2.topmostAtOk));
-
-// 第二次：改用 DOM click（无鼠标按压态）——另一种真实点击路径，同样必须生效。
-// `@click.stop` 后事件不再冒泡到遮罩触发多余的 cancel，否则这里会“点不动”。
-await evalJs(`document.querySelector('#msgOk')?.click()`);
 await sleep(800);
 const finalState = await readDialog();
-check("第二次「确定」完成卸载（走到 plugin_remove）",
+check(
+  "点「卸载」完成卸载（走到 plugin_remove）",
   finalState.uninstalled.includes("com.example.backend-exit"),
   JSON.stringify(finalState.uninstalled),
 );
 check("卸载完成后弹窗关闭", finalState.visible === false, JSON.stringify(finalState));
 
-/* ---------- 6.1 【关键】弹窗必须盖过插件自绘 UI ---------- */
+/* ---------- 6.1 【关键】弹窗必须盖过插件自有 UI ---------- */
 /**
- * 用户诉求（回归）：「弹窗被盖住」—— 点卸载后弹窗被插件界面挡在下面，看起来像
- * 没反应。
+ * 用户诉求（回归）：「弹窗被盖住」——点卸载后弹窗被插件界面挡在下面，看起来像没反应。
  *
- * 插件 UI 与宿主弹窗处在**同一个层叠上下文**（插件会话挂在 #text_show
- * .plugin-view 下），插件作者可以写任意大的 z-index：pi-agent 就用了
- * 100 / 9999 和右下角缩放手柄的 2147483647。只靠 CSS z-index 赢不了，
- * 所以 MessageDialog 现在用 HTML **top layer**（popover）——永远压在所有
- * z-index 之上。
+ * 插件 UI 与宿主弹窗处于**同一个层叠上下文**（插件会话挂载在 #text_show
+ * .plugin-view 下），插件作者可以写任意大的 z-index。只有 CSS z-index 赢不了，
+ * 所以卸载确认弹窗要压在所有 z-index 之上（宿主用 top layer / 顶格 z-index）。
  *
  * 这里先往页面里插一个 `z-index: 2147483646` 的铺满元素（只比理论最大值小 1，
- * 任何靠 z-index 的弹窗都会被压住），再打开卸载弹窗，断言：
- *   1. 确定按钮中心点上的**最上层节点就是按钮本身**（elementFromPoint）；
- *   2. 真实鼠标点击能命中它（能弹到第二次确认）。
+ * 任何低 z-index 的弹窗都会被压住），再打开卸载弹窗，断言确定按钮中心点上
+ * 的最上层节点就是按钮本身（elementFromPoint），且真实鼠标点击能命中它。
  */
 await evalJs(`
   (() => {
@@ -838,7 +809,8 @@ await evalJs(`
   })()
 `);
 await sleep(150);
-// 用「开机自启插件」：上一段已经把「建议退出插件」卸掉了。
+
+// 用「开机自启插件」：上一段已经把「建议退出插件」卸载掉了。
 await openUninstallDialog(ALWAYS_NAME);
 
 const layered = await readDialog();
@@ -848,41 +820,27 @@ check(
   JSON.stringify(layered),
 );
 check(
-  "【关键】弹窗按钮盖过 z-index:2147483646 的插件 UI",
-  layered.topmostAtOk === "msgOk",
-  `topmostAtOk=${layered.topmostAtOk}（应为 msgOk；不是就说明弹窗被盖住）`,
+  "【关键】弹窗按钮盖住 z-index:2147483646 的插件 UI",
+  String(layered.topmostAtOk).includes("primary"),
+  `topmostAtOk=${layered.topmostAtOk}（不是按钮本体就说明弹窗被盖住）`,
 );
 
-// 真能点到：用鼠标事件点「确定」→ 走到第二次确认 → 再点「确定」→ 卸载
+// 真能点到：用鼠标事件点「卸载」→ 完成卸载
 await clickOkWithMouse(layered.okRect);
-await sleep(500);
-const layered2 = await readDialog();
-check(
-  "被插件 UI 覆盖时仍能点中第二次「确定」",
-  layered2.visible === true && layered2.text.includes("删除"),
-  JSON.stringify(layered2),
-);
-check(
-  "【关键】第二个弹窗也盖过插件 UI",
-  layered2.topmostAtOk === "msgOk",
-  `topmostAtOk=${layered2.topmostAtOk}`,
-);
-await evalJs(`document.querySelector('#msgOk')?.click()`);
-await sleep(700);
+await sleep(800);
 const layered3 = await readDialog();
 check(
-  "被覆盖时仍能完成卸载",
+  "被插件 UI 覆盖时仍能完成卸载",
   layered3.uninstalled.includes("com.example.backend-always"),
   JSON.stringify(layered3.uninstalled),
 );
 
-
-// 插件 UI 仍在 DOM 时，重开面板后弹窗依旧要赢（防止只修了"首次挂载"场景）。
+// 插件 UI 仍在 DOM 时，重开面板后弹窗依旧要赢（防止只修了“首次挂载”场景）。
 await openUninstallDialog("本地图标插件");
 const reopened = await readDialog();
 check(
   "插件 UI 仍在 DOM 时，重开面板后弹窗依旧置顶",
-  reopened.visible === true && reopened.topmostAtOk === "msgOk",
+  reopened.visible === true && String(reopened.topmostAtOk).includes("primary"),
   JSON.stringify({ visible: reopened.visible, topmostAtOk: reopened.topmostAtOk }),
 );
 check(
@@ -892,7 +850,7 @@ check(
 );
 await evalJs(`
   (() => {
-    const btn = document.querySelector('#msgCancel');
+    const btn = document.querySelector('.plugin-install-overlay .cfg-btn.ghost');
     if (!btn) { window.__cancelRect = null; return 0; }
     const r = btn.getBoundingClientRect();
     window.__cancelRect = { x: r.x + r.width / 2, y: r.y + r.height / 2 };

@@ -7,7 +7,8 @@
 //! ----
 //! 分两个文件存放，不进备份、不上传：
 //!   - `sync-config.json`：地址 / 用户名 / 远端文件名 / 冲突策略等
-//!   - `sync-credentials.json`：WebDAV 密码（明文存于用户目录，Unix chmod 600）
+//!   - `sync-credentials.json`：WebDAV 密码；Windows 为 DPAPI 密文，
+//!     其它平台为 0600 权限的明文文件（详见 `credential_store.rs`）
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -16,8 +17,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tauri::{AppHandle, Manager};
 
+use crate::credential_store::{load_credentials, save_credentials, Credentials};
+
 const SYNC_CONFIG_FILE: &str = "sync-config.json";
-const SYNC_CREDENTIALS_FILE: &str = "sync-credentials.json";
 const DEFAULT_REMOTE_FILE: &str = "my-search-backup.msbackup";
 const ARCHIVE_MIME: &str = "application/zip";
 
@@ -45,6 +47,8 @@ pub struct SyncConfig {
     pub auto_on_change: bool,
     pub interval_minutes: u32,
     pub has_password: bool,
+    /// 云端同步格式：2 = v2 分片；3 = v3 每文件对象（默认 3，旧配置自动升级）
+    pub cloud_format: u32,
 }
 
 impl Default for SyncConfig {
@@ -58,14 +62,9 @@ impl Default for SyncConfig {
             auto_on_change: true,
             interval_minutes: 30,
             has_password: false,
+            cloud_format: 3,
         }
     }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-struct Credentials {
-    password: String,
 }
 
 fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -77,16 +76,7 @@ fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join(SYNC_CONFIG_FILE))
 }
 
-fn credentials_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| err(format!("取应用数据目录失败: {e}")))?;
-    std::fs::create_dir_all(&dir).map_err(|e| err(format!("创建目录失败: {e}")))?;
-    Ok(dir.join(SYNC_CREDENTIALS_FILE))
-}
-
-fn load_config(app: &AppHandle) -> SyncConfig {
+pub(crate) fn load_config(app: &AppHandle) -> SyncConfig {
     config_path(app)
         .ok()
         .and_then(|p| std::fs::read_to_string(p).ok())
@@ -97,26 +87,6 @@ fn load_config(app: &AppHandle) -> SyncConfig {
 fn save_config(app: &AppHandle, cfg: &SyncConfig) -> Result<(), String> {
     std::fs::write(config_path(app)?, serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?)
         .map_err(|e| err(format!("保存同步配置失败: {e}")))
-}
-
-fn load_credentials(app: &AppHandle) -> Credentials {
-    credentials_path(app)
-        .ok()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|t| serde_json::from_str::<Credentials>(&t).ok())
-        .unwrap_or_default()
-}
-
-fn save_credentials(app: &AppHandle, creds: &Credentials) -> Result<(), String> {
-    let path = credentials_path(app)?;
-    std::fs::write(&path, serde_json::to_string_pretty(creds).map_err(|e| e.to_string())?)
-        .map_err(|e| err(format!("保存凭据失败: {e}")))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
-    Ok(())
 }
 
 /// 读配置（附带 has_password 标记）
@@ -145,6 +115,10 @@ pub fn sync_set_config(
                 "conflict" => cfg.conflict = v.as_str().unwrap_or(&cfg.conflict).to_string(),
                 "autoOnChange" => cfg.auto_on_change = v.as_bool().unwrap_or(cfg.auto_on_change),
                 "intervalMinutes" => cfg.interval_minutes = v.as_u64().unwrap_or(cfg.interval_minutes as u64) as u32,
+                "cloudFormat" => {
+                    let n = v.as_u64().unwrap_or(cfg.cloud_format as u64);
+                    cfg.cloud_format = if n == 2 { 2 } else { 3 };
+                }
                 _ => {}
             }
         }
@@ -211,7 +185,7 @@ pub struct DownloadResult {
     pub not_modified: bool,
 }
 
-fn build_client(timeout_secs: u64) -> Result<reqwest::Client, String> {
+pub(crate) fn build_client(timeout_secs: u64) -> Result<reqwest::Client, String> {
     // 按规则走代理：每次构建现场读规则与系统代理（与 lib.rs 的 build_client 同源）。
     let builder = reqwest::Client::builder()
         .user_agent(crate::UA)
@@ -221,7 +195,7 @@ fn build_client(timeout_secs: u64) -> Result<reqwest::Client, String> {
         .map_err(|e| e.to_string())
 }
 
-fn webdav_url(cfg: &SyncConfig) -> Result<String, String> {
+pub(crate) fn webdav_url(cfg: &SyncConfig) -> Result<String, String> {
     if cfg.webdav_url.trim().is_empty() {
         return Err(err("请先填写 WebDAV 地址"));
     }
@@ -230,7 +204,7 @@ fn webdav_url(cfg: &SyncConfig) -> Result<String, String> {
     Ok(format!("{base}/{rel}"))
 }
 
-fn webdav_auth(
+pub(crate) fn webdav_auth(
     req: reqwest::RequestBuilder,
     cfg: &SyncConfig,
     creds: &Credentials,

@@ -116,11 +116,53 @@ await S("Page.addScriptToEvaluateOnNewDocument", {
   source: `
     const STUB_TIME = Date.now();
     const STUB_META = { exists: true, rev: 'stub-rev', etag: '"stub-rev"', modified: STUB_TIME, size: 1572864 }; // 1.5 MB
+    const STUB_V3_MANIFEST = {
+      schema: 'ms.cloud/3',
+      rev: 7,
+      updatedAt: STUB_TIME,
+      updatedBy: 'stub-device',
+      appVersion: '7.9.40',
+      devices: { 'stub-device': { name: '测试机', appVersion: '7.9.40', lastSyncAt: STUB_TIME } },
+      legacyV2: { rev: 3, etag: '"m"', updatedAt: STUB_TIME, migratedAt: STUB_TIME },
+      core: { digest: 'c3', bytes: 4096, updatedAt: STUB_TIME },
+      plugins: {
+        demo: {
+          body: { digest: 'b1', bytes: 1024, updatedAt: STUB_TIME },
+          state: {},
+          files: {
+            'clipboard/items/a.json': { digest: 'fa', bytes: 512, updatedAt: STUB_TIME },
+            'kv/annotations.json': { digest: 'fk', bytes: 78, updatedAt: STUB_TIME },
+          },
+          blobs: {
+            'clipboard/a.png': { digest: 'bl1', bytes: 2048, updatedAt: STUB_TIME },
+            'clipboard/b.png': { digest: 'bl2', bytes: 4096, updatedAt: STUB_TIME },
+          },
+        },
+        'com.zhuanjie.resource-monitor': {
+          body: { digest: 'b2', bytes: 40960, updatedAt: STUB_TIME },
+          state: {},
+          files: {
+            'kv/state.json': { digest: 'f1', bytes: 100, updatedAt: STUB_TIME },
+            'kv/rules.json': { digest: 'f2', bytes: 200, updatedAt: STUB_TIME },
+            'sync/state.json': { digest: 'f3', bytes: 300, updatedAt: STUB_TIME },
+          },
+          blobs: {},
+        },
+      },
+    };
     const STUB_STATE = {
       deviceId: 'stub-device', target: 'stub-target', initialized: true,
       remoteRev: 'stub-rev', remoteEtag: '"stub-rev"',
       lastLocalDigest: 'd-stub', lastSyncAt: STUB_TIME, appliedRev: 'stub-rev', epoch: 1,
     };
+    // 带遗留冲突的状态（?conflict=1 时用）：只挂起这几片，其余插件早已同步完成
+    const STUB_CONFLICT_STATE = Object.assign({}, STUB_STATE, {
+      conflicts: [
+        { pluginId: 'demo', kind: 'body', localBytes: 1024, remoteBytes: 2048, remoteUpdatedAt: STUB_TIME },
+        { pluginId: 'demo', kind: 'data', localBytes: 8192, remoteBytes: 4096, remoteUpdatedAt: STUB_TIME },
+        { pluginId: 'com.zhuanjie.resource-monitor', kind: 'data', localBytes: 512, remoteBytes: 640, remoteUpdatedAt: STUB_TIME },
+      ],
+    });
     window.__TAURI_INTERNALS__ = {
       invoke(cmd, args) {
         if (cmd === 'sync_get_config') return Promise.resolve({
@@ -134,8 +176,39 @@ await S("Page.addScriptToEvaluateOnNewDocument", {
           autoOnChange: true, intervalMinutes: 30, hasPassword: false,
         });
         if (cmd === 'sync_remote_meta') return Promise.resolve(STUB_META);
+        // ?v3=1 时切到 v3 文件级视图；其余（含 v2 回归）明确不存在，面板应回退 v2
+        if (cmd === 'cloud_manifest_v3_get') return Promise.resolve(location.search.includes('v3')
+          ? { exists: true, etag: '"v3"', rev: '7', size: 1000, modified: STUB_TIME, manifest: STUB_V3_MANIFEST }
+          : { exists: false, manifest: null });
+        // v2 云端对象卡（面板「云端对象」卡片）
+        if (cmd === 'cloud_manifest_get') return Promise.resolve({
+          exists: true, etag: '"m"', rev: '3', size: 900, modified: STUB_TIME,
+          manifest: {
+            schema: 'ms.cloud/2', rev: 3, updatedAt: STUB_TIME, updatedBy: 'stub', appVersion: '7.9.40',
+            core: { digest: 'c1', bytes: 4096, updatedAt: STUB_TIME },
+            plugins: {
+              demo: {
+                body: { digest: 'b1', bytes: 1024, updatedAt: STUB_TIME },
+                data: { digest: 'd1', bytes: 2048, updatedAt: STUB_TIME },
+              },
+              'com.zhuanjie.resource-monitor': {
+                body: { digest: 'b2', bytes: 40960, updatedAt: STUB_TIME },
+                data: { digest: 'd2', bytes: 8192, updatedAt: STUB_TIME },
+              },
+            },
+          },
+        });
+        if (cmd === 'cloud_quota') return Promise.resolve({ pluginBytes: 209715200, shardBytes: 209715200 });
+        if (cmd === 'cloud_shard_inspect') return Promise.resolve({
+          rel: args?.rel ?? 'stub', bytes: 1024, totalBytes: 2,
+          entries: [
+            { name: 'plugins/demo/index.js', size: 1 },
+            { name: 'kv/demo/state.json', size: 1 },
+          ],
+          truncated: false,
+        });
         // 面板已是纯 UI：只发请求、读持久化状态；执行同步的是常驻主窗口。
-        if (cmd === 'sync_state_get') return Promise.resolve(STUB_STATE);
+        if (cmd === 'sync_state_get') return Promise.resolve(location.search.includes('conflict') ? STUB_CONFLICT_STATE : STUB_STATE);
         if (cmd === 'sync_state_patch') return Promise.resolve({ ...STUB_STATE, ...(args?.patch || {}) });
         if (cmd === 'sync_state_reset') return Promise.resolve({ ...STUB_STATE, initialized: false });
         if (cmd === 'sync_request') return Promise.resolve({ accepted: true, trigger: args?.trigger ?? 'manual' });
@@ -169,6 +242,14 @@ for (const theme of ["dark", "light"]) {
   }, sessionId);
   await S("Page.navigate", { url: base + "/config.html" }, sessionId);
   await sleep(1500);
+  // 插件注册表缓存（面板据此把插件 id 显示成名字）：含一个超长 id 用于验证截断
+  await evalJs(`localStorage.setItem('my-search-desktop:PLUGIN_REGISTRY_CACHE_KEY', JSON.stringify({
+    version: 1,
+    plugins: [
+      { id: 'demo', name: '剪贴板', manifest: {} },
+      { id: 'com.zhuanjie.resource-monitor', name: '资源监视器', manifest: {} },
+    ],
+  }))`);
   await evalJs(`document.querySelector('.cfg-nav .nav-item[data-pane="sync"]').click()`);
   await sleep(900);
 
@@ -230,11 +311,235 @@ for (const theme of ["dark", "light"]) {
   })()`);
   check(`[${theme}] 显示云端备份大小`, sizeLine === '云端备份：1.5 MB', `got=${sizeLine}`);
 
+  /* ---- 云端对象卡片：位置 / 插件名 + id / 查看内容 ---- */
+  const shardCard = await evalJs(`(() => {
+    const cards = [...document.querySelectorAll('.page.sync .cfg-card')];
+    const idx = cards.findIndex(c => (c.querySelector('h3')?.textContent || '').trim() === '云端对象');
+    const card = cards[idx];
+    if (!card) return { found: false };
+    const rows = [...card.querySelectorAll('.sync-cloud-row:not(.sync-cloud-head)')];
+    const first = rows[0];
+    const all = rows.map(r => {
+      const nameEl = r.querySelector('.sync-cloud-name');
+      const pidEl = r.querySelector('.sync-cloud-pid');
+      const cell = r.querySelector('.sync-cloud-id');
+      return {
+        name: nameEl?.textContent?.trim() ?? null,
+        pid: pidEl?.textContent?.trim() ?? null,
+        nameClipped: nameEl ? nameEl.scrollWidth > nameEl.clientWidth + 1 : null,
+        cellW: cell ? Math.round(cell.getBoundingClientRect().width) : 0,
+        pidClipped: pidEl ? pidEl.scrollWidth > pidEl.clientWidth + 1 : null,
+      };
+    });
+    return {
+      found: true, idx, total: cards.length,
+      inExportPane: !!card.closest('.sync-tab-pane'),
+      top: Math.round(card.getBoundingClientRect().top),
+      rowTop: first ? Math.round(first.getBoundingClientRect().top) : -1,
+      nameText: all[0]?.name ?? null,
+      pidText: all[0]?.pid ?? null,
+      rows: all,
+      hasOpenBtn: !!first?.querySelector('.sync-cloud-actions .cfg-btn'),
+    };
+  })()`);
+  check(`[${theme}] 云端对象卡片渲染`, shardCard.found === true, JSON.stringify(shardCard));
+  check(`[${theme}] 云端对象不在导出 tab 内（常显）`, shardCard.inExportPane === false);
+  check(`[${theme}] 云端对象在 WebDAV 卡片之后`, shardCard.idx === shardCard.total - 1, `idx=${shardCard.idx}/${shardCard.total}`);
+  const demoRow = shardCard.rows?.find((r) => r.pid === 'demo');
+  check(`[${theme}] 主显插件名、灰字附 id`, demoRow?.name === '剪贴板' && demoRow?.pid === 'demo', `name=${demoRow?.name} pid=${demoRow?.pid}`);
+  check(`[${theme}] 两行插件都渲染（含超长 id）`, shardCard.rows?.length === 2, JSON.stringify(shardCard.rows));
+  check(
+    `[${theme}] 名字不被 id 挤掉（未被截断）`,
+    shardCard.rows?.[0]?.nameClipped === false && shardCard.rows?.[1]?.nameClipped === false,
+    JSON.stringify(shardCard.rows?.map(r => r.nameClipped))
+  );
+  check(
+    `[${theme}] 超长 id 不被新列宽挤压`,
+    shardCard.rows?.every(r => r.pidClipped === false),
+    JSON.stringify(shardCard.rows?.map(r => r.pidClipped))
+  );
+  check(
+    `[${theme}] 插件列保有可用宽度`,
+    (shardCard.rows?.[0]?.cellW ?? 0) >= 100 &&
+      (shardCard.rows?.[1]?.cellW ?? 0) >= 100,
+    JSON.stringify(shardCard.rows?.map(r => r.cellW))
+  );
+  check(`[${theme}] 每行有「查看内容」按钮`, shardCard.hasOpenBtn === true);
+
+  // 点开「查看内容」→ 按需读取云端对象并列出条目
+  await evalJs(`(() => {
+    const cards = [...document.querySelectorAll('.page.sync .cfg-card')];
+    const card = cards.find(c => (c.querySelector('h3')?.textContent || '').trim() === '云端对象');
+    card.querySelector('.sync-cloud-row:not(.sync-cloud-head) .sync-cloud-actions .cfg-btn').click();
+  })()`);
+  await sleep(700);
+  const detail = await evalJs(`(() => {
+    const d = document.querySelector('.page.sync .sync-cloud-detail');
+    if (!d) return null;
+    const groups = [...d.querySelectorAll('.sync-cloud-group-head > span:first-child')].map(s => s.textContent.trim());
+    return {
+      entries: d.querySelectorAll('.sync-cloud-entry').length,
+      groups,
+      firstName: d.querySelector('.sync-cloud-entry-name')?.textContent?.trim() ?? null,
+    };
+  })()`);
+  check(`[${theme}] 查看内容列出条目`, detail?.entries === 4, `entries=${detail?.entries}`);
+  check(`[${theme}] 条目按主体/数据分组`, detail?.groups?.length === 2, JSON.stringify(detail?.groups));
+  check(`[${theme}] 条目显示文件名`, detail?.firstName === 'plugins/demo/index.js', `name=${detail?.firstName}`);
+
+  // 滚到云端对象卡片截一张：人工看下名字/配额/内容清单的排版
+  await evalJs(`(() => {
+    const cards = [...document.querySelectorAll('.page.sync .cfg-card')];
+    const card = cards.find(c => (c.querySelector('h3')?.textContent || '').trim() === '云端对象');
+    card?.scrollIntoView({ block: 'end' });
+  })()`);
+  await sleep(300);
+  const shotCloud = await S("Page.captureScreenshot", { format: "png" }, sessionId);
+  await writeFile(path.join(root, "test", `_shot-sync-cloud-${theme}.png`), Buffer.from(shotCloud.result.data, "base64"));
+
   const shot = await S("Page.captureScreenshot", { format: "png" }, sessionId);
   const out = path.join(root, "test", `_shot-sync-panel-${theme}.png`);
   await writeFile(out, Buffer.from(shot.result.data, "base64"));
   console.log(`screenshot → test/_shot-sync-panel-${theme}.png`);
 }
+
+/* ---- v3 文件级视图：真实 manifest-v3 数据下的卡片 / 计数 / 清单 ---- */
+await S("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "dark" }] }, sessionId);
+await S("Page.navigate", { url: base + "/config.html?v3=1" }, sessionId);
+await sleep(1500);
+await evalJs(`localStorage.setItem('my-search-desktop:PLUGIN_REGISTRY_CACHE_KEY', JSON.stringify({
+  version: 1,
+  plugins: [
+    { id: 'demo', name: '剪贴板', manifest: {} },
+    { id: 'com.zhuanjie.resource-monitor', name: '资源监视器', manifest: {} },
+  ],
+}))`);
+await evalJs(`document.querySelector('.cfg-nav .nav-item[data-pane="sync"]').click()`);
+await sleep(900);
+const v3Ui = await evalJs(`(() => {
+  const cards = [...document.querySelectorAll('.page.sync .cfg-card')];
+  const card = cards.find(c => (c.querySelector('h3')?.textContent || '').trim() === '云端对象');
+  if (!card) return { found: false };
+  const rows = [...card.querySelectorAll('.sync-cloud-row:not(.sync-cloud-head)')].map(r => ({
+    name: r.querySelector('.sync-cloud-name')?.textContent?.trim() ?? '',
+    status: r.querySelector('.sync-cloud-status')?.textContent?.replace(/\\s+/g, ' ').trim() ?? '',
+    size: r.querySelector('.sync-cloud-size')?.textContent?.trim() ?? '',
+  }));
+  const header = card.querySelector('.cfg-hint')?.textContent?.replace(/\\s+/g, ' ').trim() ?? '';
+  return { found: true, header, rows, docOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth };
+})()`);
+check("v3 面板渲染云端对象卡片", v3Ui.found === true);
+check("v3 标出「v3 文件级」", String(v3Ui.header || "").includes("v3 文件级"), v3Ui.header);
+check("v3 每行显示文件/图片计数", v3Ui.rows?.some(r => r.status.includes("2 文件 / 2 图片")) && v3Ui.rows?.some(r => r.status.includes("3 文件")), JSON.stringify(v3Ui.rows));
+check("v3 卡片不横向溢出", v3Ui.docOverflow === false);
+
+await evalJs(`(() => {
+  const cards = [...document.querySelectorAll('.page.sync .cfg-card')];
+  const card = cards.find(c => (c.querySelector('h3')?.textContent || '').trim() === '云端对象');
+  const row = [...card.querySelectorAll('.sync-cloud-row:not(.sync-cloud-head)')]
+    .find(r => (r.querySelector('.sync-cloud-name')?.textContent || '').trim() === '剪贴板');
+  row.querySelector('.sync-cloud-actions .cfg-btn').click();
+})()`);
+await sleep(700);
+const v3Detail = await evalJs(`(() => {
+  const d = document.querySelector('.page.sync .sync-cloud-detail');
+  if (!d) return null;
+  return {
+    entries: d.querySelectorAll('.sync-cloud-entry').length,
+    firstName: d.querySelector('.sync-cloud-entry-name')?.textContent?.trim() ?? null,
+  };
+})()`);
+check("v3 查看内容直接列文件/图片", v3Detail?.entries === 4, `entries=${v3Detail?.entries}`);
+check("v3 清单显示虚拟条目路径", v3Detail?.firstName === 'clipboard/items/a.json', `name=${v3Detail?.firstName}`);
+
+await evalJs(`(() => {
+  const cards = [...document.querySelectorAll('.page.sync .cfg-card')];
+  const card = cards.find(c => (c.querySelector('h3')?.textContent || '').trim() === '云端对象');
+  card?.scrollIntoView({ block: 'end' });
+})()`);
+await sleep(300);
+const shotV3 = await S("Page.captureScreenshot", { format: "png" }, sessionId);
+await writeFile(path.join(root, "test", "_shot-sync-panel-v3.png"), Buffer.from(shotV3.result.data, "base64"));
+console.log("screenshot → test/_shot-sync-panel-v3.png");
+
+// 切换导出/导入 tab 后，导入面板的按钮也应保持一行
+await S("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "dark" }] }, sessionId);
+await S("Page.navigate", { url: base + "/config.html?conflict=1" }, sessionId);
+await sleep(1500);
+await evalJs(`localStorage.setItem('my-search-desktop:PLUGIN_REGISTRY_CACHE_KEY', JSON.stringify({
+  version: 1,
+  plugins: [
+    { id: 'demo', name: '剪贴板', manifest: {} },
+    { id: 'com.zhuanjie.resource-monitor', name: '资源监视器', manifest: {} },
+  ],
+}))`);
+await evalJs(`document.querySelector('.cfg-nav .nav-item[data-pane="sync"]').click()`);
+await sleep(900);
+
+/* ---- 冲突按插件隔离：一行一个插件，各自裁决，互不牵连 ---- */
+const conflictUi = await evalJs(`(() => {
+  const box = document.querySelector('.page.sync .sync-choice');
+  const pane = document.querySelector('.page.sync');
+  const dbg = {
+    search: location.search,
+    hasPane: !!pane,
+    hasNow: !!document.querySelector('.page.sync .sync-now-btn'),
+    hasChoice: !!box,
+    choiceHtml: box ? box.innerHTML.slice(0, 200) : null,
+  };
+  if (!box) return { found: false, dbg };
+  const rows = [...box.querySelectorAll('.sync-conflict-row')].map(r => ({
+    name: r.querySelector('.sync-conflict-name')?.textContent?.trim() ?? '',
+    meta: r.querySelector('.sync-conflict-meta')?.textContent?.replace(/\\s+/g, ' ').trim() ?? '',
+    btns: [...r.querySelectorAll('.sync-conflict-actions .cfg-btn')].map(b => b.textContent.trim()),
+  }));
+  const allBtns = [...box.querySelectorAll('.sync-actions-row .cfg-btn')].map(b => b.textContent.trim());
+  const syncBtn = document.querySelector('.page.sync .sync-now-btn');
+  return {
+    found: true, rows, allBtns,
+    title: box.querySelector('.sync-choice-title')?.textContent?.trim() ?? '',
+    desc: box.querySelector('.sync-choice-desc')?.textContent?.trim() ?? '',
+    syncDisabled: !!syncBtn?.disabled,
+    docOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+  };
+})()`);
+check("有遗留冲突时显示冲突面板", conflictUi.found === true, JSON.stringify(conflictUi));
+check(
+  "同一插件的多片合并成一行（3 片 → 2 行）",
+  conflictUi.rows?.length === 2,
+  JSON.stringify(conflictUi.rows?.map(r => r.name))
+);
+check(
+  "冲突行按插件显示名字（而非 id）",
+  conflictUi.rows?.map(r => r.name).sort().join(",") === "剪贴板,资源监视器",
+  JSON.stringify(conflictUi.rows?.map(r => r.name))
+);
+const demoConflictRow = conflictUi.rows?.find(r => r.name === "剪贴板");
+check(
+  "同一插件的 body+data 片合到一行并按类型/体积展示",
+  /插件程序\/插件数据/.test(demoConflictRow?.meta ?? "") &&
+    /本机 9\.0 KB/.test(demoConflictRow?.meta ?? "") &&
+    /云端 6\.0 KB/.test(demoConflictRow?.meta ?? ""),
+  demoConflictRow?.meta
+);
+check(
+  "每行各有「用云端 / 用本机」",
+  conflictUi.rows?.every(r => r.btns.length === 2 && r.btns[0] === "用云端" && r.btns[1] === "用本机"),
+  JSON.stringify(conflictUi.rows?.map(r => r.btns))
+);
+check(
+  "另有「全部用云端 / 全部用本机」兜底",
+  conflictUi.allBtns?.[0] === "全部用云端" && conflictUi.allBtns?.[1] === "全部用本机",
+  JSON.stringify(conflictUi.allBtns)
+);
+check(
+  "有冲突时「立即同步」仍可点（其它插件照常同步）",
+  conflictUi.syncDisabled === false
+);
+check("冲突面板未撑出横向滚动条", conflictUi.docOverflow === false);
+
+const shotConflict = await S("Page.captureScreenshot", { format: "png" }, sessionId);
+await writeFile(path.join(root, "test", "_shot-sync-conflict.png"), Buffer.from(shotConflict.result.data, "base64"));
 
 // 切换导出/导入 tab 后，导入面板的按钮也应保持一行
 await evalJs(`document.querySelectorAll('.page.sync .sync-tab')[1].click()`);

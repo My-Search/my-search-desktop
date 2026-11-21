@@ -4,8 +4,11 @@
 //! --------
 //! 1. **一份归档 = 整个用户态**：前端 localStorage（订阅、标签、历史、权重、
 //!    插件注册表、插件私有数据…）+ Rust 侧落盘数据（`settings.json` 的用户项、
-//!    `plugins/<id>/` 安装文件、`plugin-data/<id>/` 插件数据）。
-//!    日志（`plugin-logs/`）与安装目录的派生文件（`.dev-source`）不进备份。
+//!    `plugins/<id>/` 安装文件、`plugin-data/<id>/` 中**声明为云数据**的小文件、
+//!    `sync-store/<id>.json` 插件云数据 store）。
+//!    日志（`plugin-logs/`）、安装目录的派生文件（`.dev-source`）与插件的大体积
+//!    本机数据（剪贴板图片、历史索引、录屏、运行时下载的工具）不进备份——见
+//!    `cloud_data_allowlist` 与 `is_reconstructible_plugin_data`。
 //! 2. **归档内是「人可读」的明文 JSON**，不用自定义二进制格式：用户拿任何解压
 //!    工具都能看到自己备份了什么，出问题也能手工救回来。
 //! 3. **导入是两段式**：先 `backup_inspect`（只读、只报告），再 `backup_restore`
@@ -21,7 +24,8 @@
 //! state/local-storage.json      前端 localStorage 快照 { "<逻辑键>": <任意 JSON> }
 //! state/settings.json           Rust 侧 settings.json 快照（合并还原，不是整文件覆盖）
 //! plugins/<id>/...              插件安装文件（含 plugin.json）
-//! plugin-data/<id>/...          插件私有数据
+//! plugin-data/<id>/kv/...       插件结构化小数据（`ms.store.readJson/writeJson`）
+//! sync-store/<id>.json          插件云数据 store（`ms.store.sync.*`，带配额）
 //! ```
 
 use std::collections::BTreeMap;
@@ -45,6 +49,8 @@ const PRE_RESTORE_PREFIX: &str = "pre-restore-";
 const PLUGINS_DIR: &str = "plugins";
 /// 插件数据目录名（与 plugin_host.rs 保持一致）
 const PLUGIN_DATA_DIR: &str = "plugin-data";
+/// 插件云数据目录名（与 plugin_sync_store.rs 保持一致）
+const SYNC_STORE_DIR: &str = crate::plugin_sync_store::SYNC_STORE_DIR;
 /// 内置插件状态等内部数据目录名（与 builtin.rs INTERNAL_DIR 一致）
 const INTERNAL_DIR: &str = "internal";
 
@@ -226,6 +232,161 @@ fn collect_files(root: &Path, rel_prefix: &str, out: &mut Vec<(String, PathBuf)>
     Ok(())
 }
 
+/// 收集**插件主体**文件。
+///
+/// `skip_build` 只对**开发挂载**目录生效：那是源码仓库，里面可能有
+/// `node_modules/`、`target/`、`dist/` 这类构建产物（几百 MB ~ 几 GB），
+/// 不是插件运行必需，也不该进云备份。**普通安装**的包里如果作者真的把
+/// `dist/` 当运行时目录用，必须原样带上——所以此时不过滤。
+fn collect_dev_files(
+    root: &Path,
+    rel_prefix: &str,
+    skip_build: bool,
+    out: &mut Vec<(String, PathBuf)>,
+) -> Result<(), String> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(e) => e,
+        Err(e) => return Err(err(format!("读取目录失败 {}: {e}", root.display()))),
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') || (skip_build && is_dev_only_dir(&name)) {
+            continue;
+        }
+        let path = entry.path();
+        let rel = if rel_prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{rel_prefix}/{name}")
+        };
+        let meta = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if meta.is_dir() {
+            collect_dev_files(&path, &rel, skip_build, out)?;
+        } else if meta.is_file() && is_safe_relative(&rel) {
+            out.push((rel, path));
+        }
+    }
+    Ok(())
+}
+
+/// 源码仓库里的派生/依赖目录：不进云备份
+fn is_dev_only_dir(name: &str) -> bool {
+    matches!(
+        name,
+        "node_modules" | "target" | "dist" | "build" | ".venv" | "venv" | "__pycache__"
+    )
+}
+
+/// 开发挂载插件的源目录（从 `plugins/<id>/.dev-source` 的第一行非注释路径读取）。
+fn dev_source_of(plugin_dir: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(plugin_dir.join(".dev-source")).ok()?;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        let p = PathBuf::from(t);
+        if p.is_dir() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// 某个插件的 `plugin-data/` 里**该进云备份**的路径前缀。
+///
+/// 默认只有 `kv`（`ms.store.readJson/writeJson` 的结构化小数据，本来就在备份里）。
+/// 插件可以在 `plugin.json` 里显式声明：
+///
+/// ```json
+/// "backup": { "pluginData": true }                                  // 该插件全部数据上云
+/// "backup": { "pluginData": ["kv", "sync/state.json"] }             // 只上云这些前缀
+/// "backup": { "pluginData": false }                                 // 一个都不上云
+/// ```
+///
+/// 为什么默认收紧：`plugin-data/` 是插件的**本机**运行数据，剪贴板图片、
+/// 历史索引、录屏 mp4 动辄几 MB ~ 几百 MB，全量上云会把一份归档撑到 GB 级，
+/// 且这些数据通常「换设备后本来就该重新积累」。需要跨设备同步的小状态请用
+/// `ms.store.sync`（有配额、有明确的语义）。
+fn cloud_data_allowlist(app: &AppHandle, plugin_id: &str) -> Vec<String> {
+    let allow: Vec<String> = vec!["kv".to_string()];
+    let Ok(root) = data_dir(app) else {
+        return allow;
+    };
+    let manifest = root.join(PLUGINS_DIR).join(plugin_id).join("plugin.json");
+    let Ok(text) = std::fs::read_to_string(&manifest) else {
+        return allow;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return allow;
+    };
+    data_allowlist_from_manifest(&value)
+}
+
+/// 纯函数版白名单解析（便于单测；`cloud_data_allowlist` 只负责读文件）。
+fn data_allowlist_from_manifest(value: &Value) -> Vec<String> {
+    let allow: Vec<String> = vec!["kv".to_string()];
+    let Some(policy) = value.get("backup").and_then(|b| b.get("pluginData")) else {
+        return allow;
+    };
+    match policy {
+        serde_json::Value::Bool(true) => vec!["*".to_string()],
+        serde_json::Value::Bool(false) => Vec::new(),
+        serde_json::Value::Array(items) => {
+            let mut list: Vec<String> = Vec::new();
+            for item in items {
+                if let Some(s) = item.as_str() {
+                    let s = s.trim().trim_matches('/');
+                    if !s.is_empty() && !s.split('/').any(|seg| seg == "..") {
+                        list.push(s.to_string());
+                    }
+                }
+            }
+            // 显式声明了数组：以声明为准（不再隐式带上 kv），避免「声明了却还多传东西」
+            list
+        }
+        _ => allow,
+    }
+}
+
+/// `plugin-data/<id>/` 内的相对路径 `rel` 是否命中允许前缀
+fn path_covered(rel: &str, prefix: &str) -> bool {
+    if prefix == "*" {
+        return true;
+    }
+    let p = prefix.trim_end_matches('/');
+    rel == p || rel.starts_with(&format!("{p}/"))
+}
+
+/// 收集插件云数据 store（`sync-store/<id>.json`）
+fn collect_sync_store_files(app: &AppHandle, out: &mut Vec<(String, PathBuf)>) -> Result<(), String> {
+    let root = data_dir(app)?.join(SYNC_STORE_DIR);
+    if !root.is_dir() {
+        return Ok(());
+    }
+    let entries = std::fs::read_dir(&root)
+        .map_err(|e| err(format!("读取插件云数据目录失败 {}: {e}", root.display())))?;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        // 只收成品的 `<id>.json`（跳过点文件与写入中的 .tmp）
+        if name.starts_with('.') || !name.ends_with(".json") {
+            continue;
+        }
+        let meta = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        out.push((format!("{SYNC_STORE_DIR}/{name}"), entry.path()));
+    }
+    Ok(())
+}
+
 /// 淘汰备份目录里的旧文件，只保留最近 `keep` 份（按修改时间）
 fn prune_backups(dir: &Path, keep: usize) {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -257,33 +418,75 @@ fn prune_backups(dir: &Path, keep: usize) {
 
 // ===================== 各分区数据 =====================
 
-/// 收集插件的安装文件（`plugins/<id>/...`）与私有数据（`plugin-data/<id>/...`）
+/// 收集插件的安装文件（`plugins/<id>/...`）、可上云的插件数据与云数据 store。
+///
+/// ## 插件主体：不管怎么装的都收
+/// 普通安装（市场 / 文件 / 文件夹）目录里就是插件文件，直接收。
+/// **开发挂载**（`plugins/<id>/` 只有一个 `.dev-source` 指针）也收：读指针指向的
+/// 源码目录，把文件按 `plugins/<id>/...` 的相对路径打进去。这样「不管插件是怎么
+/// 装的」，同步到新设备后都能拿到一份可运行的副本（新设备上是普通安装，
+/// 不再依赖那台机器的源码路径）。
+///
+/// ## 插件数据：只带「该上云」的那部分
+/// 见 `cloud_data_allowlist`：默认只有 `kv/`（`ms.store.readJson/writeJson` 的结构化
+/// 小数据）跟着上云，其余（剪贴板图片、历史索引、录屏、运行时下载的工具）留在本机。
 fn collect_plugin_files(app: &AppHandle, out: &mut Vec<(String, PathBuf)>) -> Result<(), String> {
     let root = data_dir(app)?.join(PLUGINS_DIR);
     if root.is_dir() {
-        let mut files = Vec::new();
-        collect_files(&root, "", &mut files)?;
-        for (rel, path) in files {
-            // `.staging` 是安装中转目录，不备份
-            if rel.starts_with(".staging/") || rel == ".staging" {
+        let entries = std::fs::read_dir(&root)
+            .map_err(|e| err(format!("读取插件目录失败 {}: {e}", root.display())))?;
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            // `.staging` 是安装中转目录（点开头统一跳过）
+            if name.starts_with('.') || !entry.path().is_dir() {
                 continue;
             }
-            out.push((format!("{PLUGINS_DIR}/{rel}"), path));
+            let dir = entry.path();
+            // 开发挂载：文件其实在源码目录里，仍按 `<id>/...` 的相对路径收
+            let (source_dir, skip_build) = match dev_source_of(&dir) {
+                Some(src) => (src, true),
+                None => (dir, false),
+            };
+            let mut files = Vec::new();
+            collect_dev_files(&source_dir, "", skip_build, &mut files)?;
+            for (rel, path) in files {
+                out.push((format!("{PLUGINS_DIR}/{name}/{rel}"), path));
+            }
         }
     }
+
     let data = data_dir(app)?.join(PLUGIN_DATA_DIR);
     if data.is_dir() {
         let mut files = Vec::new();
         collect_files(&data, "", &mut files)?;
+        // 按插件分组后再判「该不该上云」：每个插件的清单只读一次
+        let mut by_plugin: BTreeMap<String, Vec<(String, PathBuf)>> = BTreeMap::new();
         for (rel, path) in files {
             // 派生缓存不进备份：ffmpeg 这类运行时下载的工具二进制删了不丢数据，
             // 备份它只会把归档撑大几百 MB（见 is_reconstructible_plugin_data）。
             if is_reconstructible_plugin_data(&rel) {
                 continue;
             }
-            out.push((format!("{PLUGIN_DATA_DIR}/{rel}"), path));
+            let id = rel.split('/').next().unwrap_or("").to_string();
+            if id.is_empty() {
+                continue;
+            }
+            by_plugin.entry(id).or_default().push((rel, path));
+        }
+        for (id, list) in by_plugin {
+            let allow = cloud_data_allowlist(app, &id);
+            for (rel, path) in list {
+                let rest = rel.split_once('/').map(|(_, r)| r).unwrap_or("");
+                if rest.is_empty() || !allow.iter().any(|p| path_covered(rest, p)) {
+                    continue;
+                }
+                out.push((format!("{PLUGIN_DATA_DIR}/{rel}"), path));
+            }
         }
     }
+
+    // 插件云数据 store：体积小、有配额，专为跨设备同步而存在，必须带上
+    collect_sync_store_files(app, out)?;
     Ok(())
 }
 
@@ -298,6 +501,339 @@ fn collect_internal_files(app: &AppHandle, out: &mut Vec<(String, PathBuf)>) -> 
         }
     }
     Ok(())
+}
+
+/* ============================================================
+ * 分片构建（云同步 v2）：core / 插件主体 / 插件数据
+ *
+ * 为什么要拆
+ * ----------
+ * v1 云端只有**一个** `.msbackup`：改一条笔记也要整包 PUT 一次。v2 把用户态
+ * 分成三块可独立传输的分片，云端按分片对象存放，引擎只传「摘要变了」的那些。
+ * 这里只负责「某一分片里有哪些文件」，打包与上传在 `cloud_sync.rs`。
+ * ============================================================ */
+
+/// 插件主体（`plugins/<id>/...`）——普通安装直接收；开发挂载收源码目录
+/// （跳过 `.dev-source` 与 node_modules/target/dist 这类构建产物）。
+pub(crate) fn collect_plugin_body_files(
+    app: &AppHandle,
+    plugin_id: &str,
+) -> Result<Vec<(String, PathBuf)>, String> {
+    let dir = data_dir(app)?.join(PLUGINS_DIR).join(plugin_id);
+    let mut out = Vec::new();
+    if !dir.is_dir() {
+        return Ok(out);
+    }
+    let (source_dir, skip_build) = match dev_source_of(&dir) {
+        Some(src) => (src, true),
+        None => (dir, false),
+    };
+    let mut files = Vec::new();
+    collect_dev_files(&source_dir, "", skip_build, &mut files)?;
+    for (rel, path) in files {
+        out.push((format!("{PLUGINS_DIR}/{plugin_id}/{rel}"), path));
+    }
+    Ok(out)
+}
+
+/// 读插件安装目录里 `plugin.json` 的 `backup` 段（读不到返回空对象）。
+///
+/// v3 的 blob / 按条拆分策略完全以插件声明为准：`plugin.json` 是插件自己的声明，
+/// 同步内核不硬编码插件 id。旧插件没有这些字段时按空策略处理，行为不变——
+/// 需要参与 v3 的插件随自身更新把声明带到用户机上。
+pub(crate) fn plugin_backup_policy(app: &AppHandle, plugin_id: &str) -> Value {
+    let path = data_dir(app)
+        .ok()
+        .map(|root| root.join(PLUGINS_DIR).join(plugin_id).join("plugin.json"));
+    let Some(path) = path else { return json!({}) };
+    let value: Value = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or(Value::Null);
+    value
+        .get("backup")
+        .cloned()
+        .filter(|b| b.is_object())
+        .unwrap_or_else(|| json!({}))
+}
+
+/// 插件数据（`plugin-data/<id>/` 里**该上云**的部分 + `sync-store/<id>.json`）。
+pub(crate) fn collect_plugin_data_files(
+    app: &AppHandle,
+    plugin_id: &str,
+) -> Result<Vec<(String, PathBuf)>, String> {
+    let root = data_dir(app)?;
+    let mut out = Vec::new();
+    let data = root.join(PLUGIN_DATA_DIR).join(plugin_id);
+    if data.is_dir() {
+        let allow = cloud_data_allowlist(app, plugin_id);
+        let mut files = Vec::new();
+        collect_files(&data, "", &mut files)?;
+        for (rel, path) in files {
+            if is_reconstructible_plugin_data(&format!("{plugin_id}/{rel}")) {
+                continue;
+            }
+            if !allow.iter().any(|p| path_covered(&rel, p)) {
+                continue;
+            }
+            out.push((format!("{PLUGIN_DATA_DIR}/{plugin_id}/{rel}"), path));
+        }
+    }
+    let store = root.join(SYNC_STORE_DIR).join(format!("{plugin_id}.json"));
+    if store.is_file() {
+        out.push((format!("{SYNC_STORE_DIR}/{plugin_id}.json"), store));
+    }
+    Ok(out)
+}
+
+/// v3 blobs：`plugin.json` 的 `backup.blobs` 前缀下、**不在** `pluginData`
+/// 白名单里的文件（例如剪贴板 PNG）。
+///
+/// 为什么单独声明：图片可能很大，不能混进常规 data 片；但它们又必须跨设备同步。
+/// 只按显式前缀收集，避免把插件的录屏/工具缓存等本机大文件误上云。
+pub(crate) fn collect_plugin_blob_files(
+    app: &AppHandle,
+    plugin_id: &str,
+    only: Option<&std::collections::HashSet<String>>,
+) -> Result<Vec<(String, PathBuf)>, String> {
+    let root = data_dir(app)?;
+    let data = root.join(PLUGIN_DATA_DIR).join(plugin_id);
+    if !data.is_dir() {
+        return Ok(Vec::new());
+    }
+    let policy = plugin_backup_policy(app, plugin_id);
+    let prefixes: Vec<String> = policy
+        .get("blobs")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && !s.contains("..") && !s.starts_with('/'))
+                .map(|s| s.trim_matches('/').to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    if prefixes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let allow = cloud_data_allowlist(app, plugin_id);
+    let mut files = Vec::new();
+    collect_files(&data, "", &mut files)?;
+    let mut out = Vec::new();
+    for (rel, path) in files {
+        if is_reconstructible_plugin_data(&format!("{plugin_id}/{rel}")) {
+            continue;
+        }
+        if let Some(only) = only {
+            if !only.contains(&rel) {
+                continue;
+            }
+        }
+        if !prefixes.iter().any(|p| path_covered(&rel, p)) {
+            continue;
+        }
+        // 已由 `pluginData` 显式覆盖的文件不重复进 blob（例如 index.json）
+        if allow.iter().any(|p| path_covered(&rel, p)) {
+            continue;
+        }
+        out.push((format!("{PLUGIN_DATA_DIR}/{plugin_id}/{rel}"), path));
+    }
+    Ok(out)
+}
+
+/// 内核分片：内部状态 + 用户配置（localStorage 由前端按「非插件键」切好传入）。
+pub(crate) fn collect_core_files(app: &AppHandle) -> Result<Vec<(String, PathBuf)>, String> {
+    let mut out = Vec::new();
+    collect_internal_files(app, &mut out)?;
+    Ok(out)
+}
+
+/// 本机存在可同步数据的所有插件 id（已安装目录 ∪ plugin-data 目录 ∪ sync-store 文件）
+pub(crate) fn syncable_plugin_ids(app: &AppHandle) -> Result<Vec<String>, String> {
+    let root = data_dir(app)?;
+    let mut ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for (dir, kind) in [
+        (root.join(PLUGINS_DIR), 0u8),
+        (root.join(PLUGIN_DATA_DIR), 1u8),
+        (root.join(SYNC_STORE_DIR), 2u8),
+    ] {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
+                continue;
+            }
+            match kind {
+                0 | 1 => {
+                    if entry.path().is_dir() {
+                        ids.insert(name);
+                    }
+                }
+                _ => {
+                    if let Some(id) = name.strip_suffix(".json") {
+                        ids.insert(id.to_string());
+                    }
+                }
+            }
+        }
+    }
+    Ok(ids.into_iter().collect())
+}
+
+/// 一个分片的内容摘要：文件内容 + 分片自带的 localStorage 子集（+ core 的 Rust 设置）。
+///
+/// 为什么按**文件内容**而不是 mtime：还原会重写文件、改 mtime，按时间做摘要会让
+/// 「刚还原完」立刻被判成「本机有改动」→ 每轮都白传一次。
+pub(crate) fn shard_digest(
+    files: &[(String, PathBuf)],
+    local_storage: Option<&Value>,
+    settings: Option<&Value>,
+) -> Result<(String, u64), String> {
+    use sha2::{Digest, Sha256};
+
+    let mut list: Vec<(String, String, u64)> = Vec::with_capacity(files.len());
+    for (rel, path) in files {
+        let bytes = std::fs::read(path)
+            .map_err(|e| err(format!("读取分片文件失败 {}: {e}", path.display())))?;
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        let file_hash: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        list.push((rel.clone(), file_hash, bytes.len() as u64));
+    }
+    list.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut hasher = Sha256::new();
+    for (rel, hash, size) in &list {
+        hasher.update(rel.as_bytes());
+        hasher.update([0u8]);
+        hasher.update(hash.as_bytes());
+        hasher.update([0u8]);
+        hasher.update(size.to_string().as_bytes());
+        hasher.update([0u8]);
+    }
+    if let Some(ls) = local_storage {
+        hasher.update(canonical_json(ls).as_bytes());
+    }
+    if let Some(st) = settings {
+        hasher.update(canonical_json(st).as_bytes());
+    }
+    let digest = hasher.finalize();
+    let total = list.iter().map(|(_, _, size)| *size).sum::<u64>();
+    Ok((digest.iter().map(|b| format!("{b:02x}")).collect(), total))
+}
+
+/// 稳定序列化（对象键排序），保证同一份数据在不同设备/不同轮次摘要一致。
+pub(crate) fn canonical_json(value: &Value) -> String {
+    fn write(value: &Value, out: &mut String) {
+        match value {
+            Value::Object(map) => {
+                let mut entries: Vec<(&String, &Value)> = map.iter().collect();
+                entries.sort_by(|a, b| a.0.cmp(b.0));
+                out.push('{');
+                for (i, (k, v)) in entries.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(&serde_json::to_string(k).unwrap_or_default());
+                    out.push(':');
+                    write(v, out);
+                }
+                out.push('}');
+            }
+            Value::Array(items) => {
+                out.push('[');
+                for (i, v) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    write(v, out);
+                }
+                out.push(']');
+            }
+            other => out.push_str(&serde_json::to_string(other).unwrap_or_default()),
+        }
+    }
+    let mut out = String::new();
+    write(value, &mut out);
+    out
+}
+
+#[cfg(test)]
+mod shard_tests {
+    use super::{canonical_json, shard_digest};
+    use serde_json::json;
+
+    #[test]
+    fn canonical_json_is_key_order_independent() {
+        let a = json!({"b": 1, "a": {"y": 2, "x": 3}});
+        let b = json!({"a": {"x": 3, "y": 2}, "b": 1});
+        assert_eq!(canonical_json(&a), canonical_json(&b));
+    }
+
+    #[test]
+    fn shard_digest_ignores_mtime_but_tracks_content() {
+        let dir = std::env::temp_dir().join(format!("ms-shard-digest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("a.txt");
+        std::fs::write(&f, b"one").unwrap();
+        let files = vec![("plugins/demo/a.txt".to_string(), f.clone())];
+        let ls = json!({"PLUGIN_DATA:demo:k": 1});
+        let (d1, size1) = shard_digest(&files, Some(&ls), None).unwrap();
+
+        // 内容不变 → 摘要不变（写一次文件会改 mtime，这里验证不依赖 mtime）
+        std::fs::write(&f, b"one").unwrap();
+        let (d2, _) = shard_digest(&files, Some(&ls), None).unwrap();
+        assert_eq!(d1, d2);
+        assert_eq!(size1, 3);
+
+        // 内容变了 → 摘要变
+        std::fs::write(&f, b"two").unwrap();
+        let (d3, _) = shard_digest(&files, Some(&ls), None).unwrap();
+        assert_ne!(d1, d3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 云数据白名单：默认只有 `kv`，声明数组则以声明为准（剪贴板就是这么声明的）。
+    #[test]
+    fn data_allowlist_follows_manifest_declaration() {
+        // 没声明 → 只同步 kv
+        let plain = json!({"id": "demo"});
+        assert_eq!(super::data_allowlist_from_manifest(&plain), vec!["kv"]);
+
+        // 剪贴板式：kv + 历史索引（分类/收藏的注解在 kv 里，条目本体在 index.json）
+        let clipboard = json!({"backup": {"pluginData": ["kv", "clipboard/index.json"]}});
+        assert_eq!(
+            super::data_allowlist_from_manifest(&clipboard),
+            vec!["kv", "clipboard/index.json"],
+            "显式声明必须原样生效"
+        );
+
+        // 全量 / 全禁 / 越权路径
+        assert_eq!(
+            super::data_allowlist_from_manifest(&json!({"backup": {"pluginData": true}})),
+            vec!["*"]
+        );
+        assert!(super::data_allowlist_from_manifest(&json!({"backup": {"pluginData": false}}))
+            .is_empty());
+        assert_eq!(
+            super::data_allowlist_from_manifest(&json!({"backup": {"pluginData": ["../etc", "", "/kv/"]}})),
+            vec!["kv"],
+            "丢弃逃逸路径与空项，允许项去掉首尾斜杠"
+        );
+
+        // 前缀匹配：精确文件、目录前缀都命中，形近名不命中
+        assert!(super::path_covered("clipboard/index.json", "clipboard/index.json"));
+        assert!(!super::path_covered("clipboard/index.json.bak", "clipboard/index.json"));
+        assert!(super::path_covered("clipboard/index.json", "clipboard"));
+        assert!(super::path_covered("kv/annotations.json", "kv"));
+        assert!(!super::path_covered("kvx/a.json", "kv"));
+    }
 }
 
 /// 导出归档的字节流（**内存版**）。
@@ -347,7 +883,15 @@ pub fn build_archive_from_parts(
         .iter()
         .filter(|(rel, _)| rel.starts_with(&format!("{PLUGINS_DIR}/")))
         .count();
-    let plugin_data_count = files.len() - plugin_count;
+    let sync_store_count = files
+        .iter()
+        .filter(|(rel, _)| rel.starts_with(&format!("{SYNC_STORE_DIR}/")))
+        .count();
+    let internal_count = files
+        .iter()
+        .filter(|(rel, _)| rel.starts_with(&format!("{INTERNAL_DIR}/")))
+        .count();
+    let plugin_data_count = files.len() - plugin_count - sync_store_count - internal_count;
     let ls_count = local_storage
         .as_object()
         .map(|m| m.len())
@@ -363,6 +907,8 @@ pub fn build_archive_from_parts(
             "localStorageKeys": ls_count,
             "pluginFiles": plugin_count,
             "pluginDataFiles": plugin_data_count,
+            "syncStoreFiles": sync_store_count,
+            "internalFiles": internal_count,
         },
         "platform": std::env::consts::OS,
     });
@@ -448,7 +994,15 @@ fn write_archive_stream<W: Write + Seek>(
         .iter()
         .filter(|(rel, _)| rel.starts_with(&format!("{PLUGINS_DIR}/")))
         .count();
-    let plugin_data_count = files.len() - plugin_count;
+    let sync_store_count = files
+        .iter()
+        .filter(|(rel, _)| rel.starts_with(&format!("{SYNC_STORE_DIR}/")))
+        .count();
+    let internal_count = files
+        .iter()
+        .filter(|(rel, _)| rel.starts_with(&format!("{INTERNAL_DIR}/")))
+        .count();
+    let plugin_data_count = files.len() - plugin_count - sync_store_count - internal_count;
     let ls_count = local_storage
         .as_object()
         .map(|m| m.len())
@@ -464,6 +1018,8 @@ fn write_archive_stream<W: Write + Seek>(
             "localStorageKeys": ls_count,
             "pluginFiles": plugin_count,
             "pluginDataFiles": plugin_data_count,
+            "syncStoreFiles": sync_store_count,
+            "internalFiles": internal_count,
         },
         "platform": std::env::consts::OS,
     });
@@ -664,6 +1220,7 @@ pub fn inspect_archive(bytes: &[u8]) -> Result<Value, String> {
     let mut plugin_ids: Vec<String> = Vec::new();
     let mut plugin_files = 0usize;
     let mut plugin_data_files = 0usize;
+    let mut sync_store_files = 0usize;
     let mut internal_files = 0usize;
     for name in entries.keys() {
         if let Some(rest) = name.strip_prefix(&format!("{PLUGINS_DIR}/")) {
@@ -675,6 +1232,8 @@ pub fn inspect_archive(bytes: &[u8]) -> Result<Value, String> {
             }
         } else if name.starts_with(&format!("{PLUGIN_DATA_DIR}/")) {
             plugin_data_files += 1;
+        } else if name.starts_with(&format!("{SYNC_STORE_DIR}/")) {
+            sync_store_files += 1;
         } else if name.starts_with(&format!("{INTERNAL_DIR}/")) {
             internal_files += 1;
         }
@@ -692,9 +1251,11 @@ pub fn inspect_archive(bytes: &[u8]) -> Result<Value, String> {
         "pluginIds": plugin_ids_sorted,
         "pluginFiles": plugin_files,
         "pluginDataFiles": plugin_data_files,
+        "syncStoreFiles": sync_store_files,
         "hasSettings": !settings.is_null(),
         "hasPlugins": plugin_files > 0,
         "hasPluginData": plugin_data_files > 0,
+        "hasSyncStore": sync_store_files > 0,
         "hasInternal": internal_files > 0,
         "internalFiles": internal_files,
         "totalBytes": entries.values().map(|v| v.len() as u64).sum::<u64>(),
@@ -1095,9 +1656,98 @@ fn restore_plugins(
     Ok((written.len(), downgrade_skipped.iter().cloned().collect()))
 }
 
+/// 还原**单个插件的主体分片**（`plugins/<id>/`），不动其它插件。
+///
+/// 为什么不能复用 `backup_restore(["plugins"])`：那条路是「整个 `plugins/`
+/// 目录事务交换」，一份只含一个插件的分片会把本机其它插件全部换掉。云同步 v2
+/// 按插件分片传输，必须逐插件落地。
+pub fn restore_plugin_shard(app: &AppHandle, path: &str, plugin_id: &str) -> Result<Value, String> {
+    if plugin_id.is_empty()
+        || plugin_id.len() > 64
+        || !plugin_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        || plugin_id.starts_with('.')
+    {
+        return Err(err("非法插件 id"));
+    }
+    let bytes = read_backup_file(app, path)?;
+    let entries = read_archive(&bytes)?;
+    let prefix = format!("{PLUGINS_DIR}/{plugin_id}/");
+    let shard: BTreeMap<String, Vec<u8>> = entries
+        .into_iter()
+        .filter(|(k, _)| k.starts_with(&prefix))
+        .collect();
+    if shard.is_empty() {
+        return Err(err(format!("分片里没有插件 {plugin_id} 的主体文件")));
+    }
+
+    // 版本守卫：本机已装的版本更高时拒绝降级（保留本机文件）
+    let root = data_dir(app)?;
+    let plugins_root = root.join(PLUGINS_DIR);
+    let target = plugins_root.join(plugin_id);
+    if let (Some(arch_v), Some(local_v)) = (
+        archive_plugin_version(&shard, plugin_id),
+        local_dir_plugin_version(&target),
+    ) {
+        if crate::compare_versions(&local_v, &arch_v) > 0 {
+            return Ok(json!({ "pluginId": plugin_id, "files": 0, "skipped": true, "localVersion": local_v }));
+        }
+    }
+
+    let stamp = restore_stamp();
+    let staging_root = plugins_root.join(format!(".shard-staging-{stamp}"));
+    let staged = staging_root.join(plugin_id);
+    std::fs::create_dir_all(&staged).map_err(|e| err(format!("创建暂存目录失败: {e}")))?;
+
+    let mut files = 0usize;
+    for (name, data) in &shard {
+        let rest = name.strip_prefix(&prefix).unwrap_or("");
+        if rest.is_empty() {
+            continue;
+        }
+        // 开发挂载标记指向本机路径，跨机还原后无意义
+        if rest == ".dev-source" || rest.ends_with("/.dev-source") {
+            continue;
+        }
+        if let Err(e) = write_relative(&staged, rest, data) {
+            let _ = std::fs::remove_dir_all(&staging_root);
+            return Err(e);
+        }
+        files += 1;
+    }
+    if files == 0 {
+        let _ = std::fs::remove_dir_all(&staging_root);
+        return Ok(json!({ "pluginId": plugin_id, "files": 0, "skipped": false }));
+    }
+
+    // 交换：旧目录改名 → 新目录就位 → 删旧目录（失败也不致命）
+    let old = plugins_root.join(format!(".shard-old-{stamp}-{plugin_id}"));
+    if target.exists() {
+        let _ = std::fs::remove_dir_all(&old);
+        if let Err(e) = std::fs::rename(&target, &old) {
+            let _ = std::fs::remove_dir_all(&staging_root);
+            return Err(err(format!(
+                "替换插件目录失败（插件可能仍在运行，请先停用）: {e}"
+            )));
+        }
+    }
+    if let Err(e) = std::fs::rename(&staged, &target) {
+        if old.exists() && !target.exists() {
+            let _ = std::fs::rename(&old, &target);
+        }
+        let _ = std::fs::remove_dir_all(&staging_root);
+        return Err(err(format!("写入插件目录失败: {e}")));
+    }
+    let _ = std::fs::remove_dir_all(&staging_root);
+    if old.exists() {
+        let _ = std::fs::remove_dir_all(&old);
+    }
+    Ok(json!({ "pluginId": plugin_id, "files": files, "skipped": false }))
+}
+
 /// 应用启动时恢复未完成的还原事务（崩溃/断电留下的中转目录与旧目录）。
-pub fn recover_restore(app: &AppHandle) {
-    let Ok(root) = data_dir(app) else {
+pub fn recover_restore(app: &AppHandle) {    let Ok(root) = data_dir(app) else {
         return;
     };
     let journal = journal_path(&root);
@@ -1255,6 +1905,28 @@ pub fn restore_archive(
             write_relative(&root, rest, data)?;
         }
         report.plugin_data = ids.len();
+
+        // 5b) 插件云数据 store（`sync-store/<id>.json`）：**合并**写回，
+        //     同样尊重版本守卫（本机版本更高时不拿旧数据覆盖新版本写的键）。
+        //     与 plugin-data 同一个还原分类：「只还原插件数据」也包含云数据。
+        let sync_root = data_root.join(SYNC_STORE_DIR);
+        if !sync_root.exists() {
+            std::fs::create_dir_all(&sync_root)
+                .map_err(|e| err(format!("创建插件云数据目录失败: {e}")))?;
+        }
+        for (name, data) in &entries {
+            let Some(rest) = name.strip_prefix(&format!("{SYNC_STORE_DIR}/")) else {
+                continue;
+            };
+            if rest.is_empty() || !rest.ends_with(".json") {
+                continue;
+            }
+            let id = rest.strip_suffix(".json").unwrap_or(rest);
+            if downgrade_skipped.contains(id) {
+                continue;
+            }
+            write_relative(&sync_root, rest, data)?;
+        }
     }
 
     // 6) 内部状态（内置插件卸载标记等，增量合并——保留本机既有文件，
@@ -1335,6 +2007,24 @@ pub fn export_to_backups(
     write_archive_to_path(app, &path, local_storage, settings, app_version)?;
     prune_backups(&dir, KEEP_BACKUPS);
     Ok(path.to_string_lossy().to_string())
+}
+
+/// 把一个「指定文件集合」打包写成归档（云同步 v2 的分片构建用）。
+///
+/// 与 `write_archive_to_path` 的区别：文件集合由调用方给（core / 插件主体 /
+/// 插件数据各是一片），并且 localStorage 也只传该分片的子集。
+pub(crate) fn write_archive_file_from_files(
+    path: &Path,
+    local_storage: Value,
+    settings: Value,
+    files: &[(String, PathBuf)],
+    app_version: &str,
+) -> Result<u64, String> {
+    let file = std::fs::File::create(path).map_err(|e| err(format!("写入失败: {e}")))?;
+    let file = write_archive_stream(file, &local_storage, &settings, files, app_version)?;
+    file.metadata()
+        .map(|m| m.len())
+        .map_err(|e| err(format!("读取归档大小失败: {e}")))
 }
 
 /// 读一个归档文件的字节（路径必须位于备份目录内，避免前端传入任意路径）
@@ -1538,5 +2228,59 @@ mod tests {
         assert_eq!(scope_of(&["localStorage"]), "all");
         // 未知分类：保守按全量（宁可多刷新一次）
         assert_eq!(scope_of(&["whatever"]), "all");
+    }
+
+    /// 插件数据「上云白名单」的路径匹配：前缀语义，不能把 `kv2/` 误当 `kv/`。
+    #[test]
+    fn plugin_data_path_coverage() {
+        use super::path_covered;
+        assert!(path_covered("kv/state.json", "kv"));
+        assert!(path_covered("kv", "kv"));
+        assert!(!path_covered("kv2/a.json", "kv"), "相邻同名前缀不算命中");
+        assert!(!path_covered("clipboard/a.png", "kv"), "剪贴板图片不上云");
+        assert!(path_covered("clipboard/a.png", "*"), "清单声明 true 时全部上云");
+        assert!(path_covered("sync/state.json", "sync"), "清单声明的前缀生效");
+        assert!(!path_covered("sync-old/state.json", "sync"));
+    }
+
+    /// 开发挂载插件：源码仓库里的派生目录不进备份；普通安装不做这层过滤。
+    #[test]
+    fn dev_mount_skips_build_outputs() {
+        use super::{collect_dev_files, is_dev_only_dir};
+
+        for name in ["node_modules", "target", "dist", "build", "__pycache__"] {
+            assert!(is_dev_only_dir(name), "{name} 不该进备份");
+        }
+        for name in ["ui", "backend", "plugin.json"] {
+            assert!(!is_dev_only_dir(name), "{name} 是插件文件");
+        }
+
+        let base = std::env::temp_dir().join(format!("ms-dev-mount-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("node_modules/pkg")).unwrap();
+        std::fs::create_dir_all(base.join("ui")).unwrap();
+        std::fs::write(base.join("plugin.json"), b"{}").unwrap();
+        std::fs::write(base.join("ui/index.html"), b"<html/>").unwrap();
+        std::fs::write(base.join("node_modules/pkg/index.js"), b"junk").unwrap();
+
+        let mut files = Vec::new();
+        collect_dev_files(&base, "", true, &mut files).unwrap();
+        let names: Vec<String> = files.iter().map(|(rel, _)| rel.clone()).collect();
+        assert!(names.contains(&"plugin.json".to_string()));
+        assert!(names.contains(&"ui/index.html".to_string()));
+        assert!(
+            !names.iter().any(|n| n.starts_with("node_modules/")),
+            "开发挂载时 node_modules 不进备份: {names:?}"
+        );
+
+        // 普通安装（skip_build=false）：作者把 dist 当运行时目录时不能丢
+        std::fs::create_dir_all(base.join("dist")).unwrap();
+        std::fs::write(base.join("dist/app.js"), b"run").unwrap();
+        let mut files = Vec::new();
+        collect_dev_files(&base, "", false, &mut files).unwrap();
+        let names: Vec<String> = files.iter().map(|(rel, _)| rel.clone()).collect();
+        assert!(names.contains(&"dist/app.js".to_string()), "普通安装保留 dist/");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

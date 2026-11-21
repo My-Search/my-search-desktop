@@ -74,6 +74,7 @@ import {
   onShortcutOpenPlugin,
   onShortcutQuickFilter,
   onShortcutQuickOpen,
+  onShortcutQuickSearch,
   onShortcutClipboard,
   onShortcutPluginAction,
   onPinNoImage,
@@ -142,6 +143,8 @@ const installDialogManifest = ref<PluginManifest | null>(null);
 const installDialogIcon = ref<string | null>(null);
 const installDialogPerms = ref<PermissionGroupBlock[]>([]);
 const installDialogWarnings = ref<string[]>([]);
+/** 本次升级的更新日志（市场目录版本优先；文件安装取清单 changelog） */
+const installDialogChangelog = ref<string | null>(null);
 /** 已安装版本（弹窗按钮据此显示 安装/重新安装/升级；null = 未安装） */
 const installDialogInstalledVersion = ref<string | null>(null);
 /** 该插件当前是否在后台运行（覆盖安装时弹窗提示「会先停止再安装」） */
@@ -198,6 +201,7 @@ function closeFileInstallDialog(): void {
   installDialogInstalledVersion.value = null;
   installDialogRunning.value = false;
   installDialogShowAutoUpdate.value = false;
+  installDialogChangelog.value = null;
   installDialogAutoUpdateCb = null;
   // 关闭后回到内容实测高度（取消时 chip 仍在搜索框、确认时已被摘掉，实测都正确）
   void syncWindowHeightToContent();
@@ -213,6 +217,7 @@ function confirmMarketInstall(req: PluginInstallConfirmRequest): Promise<boolean
   installDialogIcon.value = req.iconUrl;
   installDialogPerms.value = req.permBlocks;
   installDialogWarnings.value = req.warnings;
+  installDialogChangelog.value = req.changelog ?? req.manifest?.changelog ?? null;
   installDialogInstalledVersion.value = req.installedVersion;
   installDialogRunning.value = req.running === true;
   installDialogShowAutoUpdate.value = typeof req.autoUpdate === "boolean";
@@ -243,6 +248,7 @@ function closeMarketInstallDialog(ok: boolean): void {
   installDialogInstalledVersion.value = null;
   installDialogRunning.value = false;
   installDialogShowAutoUpdate.value = false;
+  installDialogChangelog.value = null;
   installDialogAutoUpdateCb = null;
   installDialogMode = "file";
   const needRestoreHeight = marketDialogResizedWindow;
@@ -408,6 +414,7 @@ async function openInstallDialogForPath(path: string, attachIndex: number): Prom
   installDialogIcon.value = iconUrl;
   installDialogPerms.value = groupPermissions(allPerms);
   installDialogWarnings.value = prepared.warnings;
+  installDialogChangelog.value = mf.changelog ?? null;
   // 直读注册表取已安装版本（另一窗口可能刚装过，比共享运行时的内存态更新）
   const prevRec = findPlugin(loadRegistry(), mf.id);
   installDialogInstalledVersion.value = prevRec?.version ?? null;
@@ -1490,7 +1497,7 @@ function syncRecentStripVisibility(): void {
  *
  * 为什么盯 `inputValue` 而不是某个 Tab 处理器：`inputValue` 是所有进入路径的
  * **唯一汇聚点**——手动敲 ` : `、Tab 进 PRO 模式、`::` / `：：` 自动补分隔符、
- * 全局快捷键「快速过滤」填入 `常用头 : `，最终都会反映到它上面。盯它就一处覆盖
+ * 全局快捷键「快捷子搜索」填入 `常用头 : `，最终都会反映到它上面。盯它就一处覆盖
  * 全部入口，不用在每个入口各打一次补丁（那样迟早漏掉新入口）。
  *
  * 只在**进入 / 离开的跃变**上动作：模式内继续打字（子关键词）不该反复触发；
@@ -1832,7 +1839,7 @@ async function runPluginActionByShortcut(pluginId: string, action: string): Prom
 }
 
 /**
- * 全局快捷键触发的「快速过滤」（快捷键作用于 quick-filter 时由 Rust 端广播常用头）。
+ * 全局快捷键触发的「快捷子搜索」（快捷键作用于 quick-filter 时由 Rust 端广播常用头）。
  *
  * 行为：把「常用头 + 二次搜索分隔符」填入输入框 → **立即搜索**（不走 300ms 防抖，
  * 也不走 onInput 的子关键词编辑守卫，避免详情视图里被静默吞掉）→ 光标移到末尾，
@@ -1880,6 +1887,24 @@ async function applyQuickOpen(text: string): Promise<void> {
     return;
   }
   // 多项匹配：展示结果列表让用户自己选（用 doSearch 让结果/高度/模式都走常规路径）
+  await search.doSearch(keyword);
+  await nextTick();
+  searchBoxRef.value?.focusEnd();
+}
+
+/**
+ * 全局快捷键触发的「快捷搜索」（快捷键作用于 quick-search 时由 Rust 端广播搜索词）。
+ *
+ * 与「快捷打开项」只差最后一步：**只搜索、不打开**。把搜索词填入输入框后走
+ * 常规搜索管线（与用户手输回车完全一致：模糊/相关度等全部生效），结果列表交给
+ * 用户自己挑，绝不自动 openItem。
+ */
+async function applyQuickSearch(text: string): Promise<void> {
+  const keyword = String(text ?? "").trim();
+  if (!keyword) return;
+  // 详情视图下先退出，让结果区/窗口高度按普通搜索恢复（与 applyQuickFilter 一致）
+  if (state.mode === MODE.SHOW_ITEM_DETAIL) hideTextView();
+  inputValue.value = keyword;
   await search.doSearch(keyword);
   await nextTick();
   searchBoxRef.value?.focusEnd();
@@ -2099,10 +2124,12 @@ search.bindAfterResultsRendered(() => {
 let unlistenShown: (() => void) | null = null;
 /** 「打开插件」快捷键事件监听器 */
 let unlistenPluginShortcut: (() => void) | null = null;
-/** 「快速过滤」快捷键事件监听器 */
+/** 「快捷子搜索」快捷键事件监听器 */
 let unlistenQuickFilter: (() => void) | null = null;
 /** 「快捷打开项」快捷键事件监听器 */
 let unlistenQuickOpen: (() => void) | null = null;
+/** 「快捷搜索」快捷键事件监听器 */
+let unlistenQuickSearch: (() => void) | null = null;
 /** 「剪贴板历史」快捷键事件监听器 */
 let unlistenClipboardShortcut: (() => void) | null = null;
 
@@ -2307,7 +2334,7 @@ onMounted(async () => {
     void openPluginByShortcut(pluginId);
   });
 
-  // 全局快捷键「快速过滤」（设置 → 快捷键里作用类型为「快速过滤」的键按下时
+  // 全局快捷键「快捷子搜索」（设置 → 快捷键里作用类型为「快捷子搜索」的键按下时
   // Rust 端广播常用头）：窗口已由 Rust 保证可见并聚焦，这里填入并立即搜索。
   unlistenQuickFilter = await onShortcutQuickFilter((filter) => {
     void applyQuickFilter(filter);
@@ -2317,6 +2344,12 @@ onMounted(async () => {
   // Rust 端广播匹配文本）：精确匹配数据项，唯一则直接打开、多项则列出结果。
   unlistenQuickOpen = await onShortcutQuickOpen((text) => {
     void applyQuickOpen(text);
+  });
+
+  // 全局快捷键「快捷搜索」（设置 → 快捷键里作用类型为「快捷搜索」的键按下时
+  // Rust 端广播搜索词）：填入搜索框并立即搜索，只展示结果列表，不自动打开。
+  unlistenQuickSearch = await onShortcutQuickSearch((text) => {
+    void applyQuickSearch(text);
   });
 
   // 全局快捷键「剪贴板历史」（设置 → 快捷键里作用类型为「剪贴板历史」的键按下时
@@ -2520,6 +2553,7 @@ onBeforeUnmount(() => {
   unlistenPluginShortcut?.();
   unlistenQuickFilter?.();
   unlistenQuickOpen?.();
+  unlistenQuickSearch?.();
   unlistenClipboardShortcut?.();
   unlistenPluginActionShortcut?.();
   unlistenPinNoImage?.();
@@ -2689,6 +2723,7 @@ defineExpose({ inputValue });
       :icon-url="installDialogIcon"
       :perm-blocks="installDialogPerms"
       :warnings="installDialogWarnings"
+      :changelog="installDialogChangelog"
       :installed-version="installDialogInstalledVersion"
       :running="installDialogRunning"
       :show-auto-update="installDialogShowAutoUpdate"

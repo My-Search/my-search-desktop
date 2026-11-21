@@ -61,6 +61,7 @@ import { decideViewClose, decideViewRestore } from "../../lib/plugins/dev-reload
 import { consumePluginFrontendRestart } from "../../lib/plugins/restart.ts";
 import type { ScriptEnv } from "../../lib/script-runtime.ts";
 import { openViewChannel, type ViewChannel } from "./plugin-channels.ts";
+import { ensurePluginData } from "../../lib/sync/cloud.ts";
 
 /** 停车场元素 id（隐藏的容器，停靠中的插件会话都挂在这里） */
 export const PLUGIN_PARKING_ID = "ms-plugin-parking";
@@ -505,6 +506,10 @@ export function usePluginViewHost(opts: PluginViewHostOptions) {
     const record = opts.getRecord(pluginId);
     if (!record) return { ok: false, error: "插件不存在（可能已卸载）" };
     if (!record.enabled) return { ok: false, error: "插件已禁用" };
+
+    // 云同步 v2：该插件的「数据分片」若还在云端（懒下载），打开时后台拉一次。
+    // 不阻塞打开：先按本机现有数据渲染，拉完由 `sync://applied` 统一重载。
+    void ensurePluginData(pluginId).catch(() => {});
 
     const detail = record.manifest.contributes?.detailView;
     if (!detail) {

@@ -1,15 +1,38 @@
 {
   "id": "com.mysearch.clipboard",
   "name": "剪贴板历史",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "apiVersion": 1,
   "minAppVersion": "7.9.35",
   "autoUpdate": true,
   "author": "zhuangjie",
   "description": "自动记录你复制过的文本与图片，按快捷键呼出即可搜索、复制、删除、收藏、分类。收藏与已分类的条目永久保留、不会被上限淘汰或清空；「全部」标签下可按分类筛选查看，收藏文本还可就地编辑内容。监听按需挂载，禁用即卸载，不干扰系统剪贴板。",
-  "changelog": "默认快捷键恢复为 Ctrl+Alt+V；架构解耦升级（收藏、分类、文本二次编辑与多维过滤分页回归插件自治存储并自动无损迁移历史数据）；显式声明 clipboardCapture 与默认自动更新。",
+  "changelog": "声明云备份范围（backup）：收藏与分类条目、文本二次编辑随云同步分片上云，图片按引用同步，普通历史留在本机；需主程序 7.9.41+。",
   "repository": "https://github.com/My-Search/my-search-desktop/tree/master/plugins/clipboard",
   "icon": "icon.svg",
+  "backup": {
+    "pluginData": [
+      "kv",
+      "clipboard/index.json"
+    ],
+    "blobs": [
+      "clipboard"
+    ],
+    "itemized": [
+      {
+        "file": "clipboard/index.json",
+        "itemsKey": "items",
+        "idField": "id",
+        "dir": "clipboard/items",
+        "filter": {
+          "retained": true
+        },
+        "blobFields": [
+          "relPath"
+        ]
+      }
+    ]
+  },
   "permissions": [
     "ui.inlay",
     "ui.notify",

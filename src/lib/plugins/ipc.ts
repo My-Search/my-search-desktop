@@ -430,6 +430,162 @@ export async function pluginStorageDelete(pluginId: string, key: string): Promis
 }
 
 /* ============================================================
+ * 插件云数据 store（`sync-store/<pluginId>.json`）
+ *
+ * 与上面的「文件化 KV」的区别：这份数据**专为跨设备同步而存在**，随云备份
+ * 上传（带单键 / 单插件 / 全局三道配额，见 Rust `plugin_sync_store.rs`）。
+ * 大文件、媒体、可重建缓存不要放这里——放 `plugin-data` 就只留在本机。
+ * ============================================================ */
+
+/** 云数据用量（写入返回 / `usage()` 查询共用） */
+export interface PluginSyncUsageIpc {
+  pluginId: string;
+  /** 该插件已用字节 */
+  bytes: number;
+  /** 该插件的键数 */
+  keys: number;
+  /** 单键上限 */
+  itemQuotaBytes: number;
+  /** 单插件上限 */
+  pluginQuotaBytes: number;
+  /** 键数上限 */
+  keysQuota: number;
+  /** 所有插件合计占用 */
+  totalBytes: number;
+  /** 合计上限 */
+  totalQuotaBytes: number;
+}
+
+/** 云数据总览（设置面板展示） */
+export interface PluginSyncStatsIpc {
+  plugins: Array<{ pluginId: string; cloudBytes: number; keys: number; localBytes: number }>;
+  totalBytes: number;
+  totalQuotaBytes: number;
+  pluginQuotaBytes: number;
+  itemQuotaBytes: number;
+}
+
+/** 读取某插件全部云数据 */
+export async function pluginSyncStoreGetAll(pluginId: string): Promise<Record<string, unknown>> {
+  if (!isTauri) return { ...(devSyncStore.get(pluginId) ?? {}) };
+  return await invoke<Record<string, unknown>>("plugin_sync_store_get_all", { pluginId });
+}
+
+/** 读取一个云数据键（不存在返回 null） */
+export async function pluginSyncStoreGet<T = unknown>(
+  pluginId: string,
+  key: string
+): Promise<T | null> {
+  const k = String(key ?? "").trim();
+  if (!isTauri) {
+    const items = devSyncStore.get(pluginId) ?? {};
+    return k in items ? (items[k] as T) : null;
+  }
+  const v = await invoke<T | null>("plugin_sync_store_get", { pluginId, key: k });
+  return v ?? null;
+}
+
+/** 写入一个云数据键（超配额会抛错，错误文案可直接展示给用户） */
+export async function pluginSyncStoreSet(
+  pluginId: string,
+  key: string,
+  value: unknown
+): Promise<PluginSyncUsageIpc> {
+  const k = String(key ?? "").trim();
+  if (!isTauri) {
+    const items = { ...(devSyncStore.get(pluginId) ?? {}), [k]: value };
+    devSyncStore.set(pluginId, items);
+    try {
+      window.dispatchEvent(
+        new CustomEvent("plugin-sync://changed-dev", { detail: { pluginId, key: k } })
+      );
+    } catch { /* ignore */ }
+    return {
+      pluginId,
+      bytes: JSON.stringify(items).length,
+      keys: Object.keys(items).length,
+      itemQuotaBytes: 64 * 1024,
+      pluginQuotaBytes: 512 * 1024,
+      keysQuota: 500,
+      totalBytes: 0,
+      totalQuotaBytes: 8 * 1024 * 1024,
+    };
+  }
+  return await invoke<PluginSyncUsageIpc>("plugin_sync_store_set", { pluginId, key: k, value });
+}
+
+/** 删除一个云数据键；返回它原本是否存在 */
+export async function pluginSyncStoreRemove(pluginId: string, key: string): Promise<boolean> {
+  const k = String(key ?? "").trim();
+  if (!isTauri) {
+    const items = { ...(devSyncStore.get(pluginId) ?? {}) };
+    const existed = k in items;
+    delete items[k];
+    devSyncStore.set(pluginId, items);
+    try {
+      window.dispatchEvent(
+        new CustomEvent("plugin-sync://changed-dev", { detail: { pluginId, key: k, removed: true } })
+      );
+    } catch { /* ignore */ }
+    return existed;
+  }
+  return await invoke<boolean>("plugin_sync_store_remove", { pluginId, key: k });
+}
+
+/** 清空某插件的全部云数据 */
+export async function pluginSyncStoreClear(pluginId: string): Promise<void> {
+  if (!isTauri) {
+    devSyncStore.delete(pluginId);
+    try {
+      window.dispatchEvent(
+        new CustomEvent("plugin-sync://changed-dev", { detail: { pluginId, removed: true } })
+      );
+    } catch { /* ignore */ }
+    return;
+  }
+  await invoke("plugin_sync_store_clear", { pluginId });
+}
+
+/** 查询某插件的云数据用量 */
+export async function pluginSyncStoreUsage(pluginId: string): Promise<PluginSyncUsageIpc> {
+  if (!isTauri) {
+    const items = devSyncStore.get(pluginId) ?? {};
+    const bytes = JSON.stringify(items).length;
+    return {
+      pluginId,
+      bytes,
+      keys: Object.keys(items).length,
+      itemQuotaBytes: 64 * 1024,
+      pluginQuotaBytes: 512 * 1024,
+      keysQuota: 500,
+      totalBytes: bytes,
+      totalQuotaBytes: 8 * 1024 * 1024,
+    };
+  }
+  return await invoke<PluginSyncUsageIpc>("plugin_sync_store_usage", { pluginId });
+}
+
+/** 所有插件的云数据占用总览（不含键值内容） */
+export async function pluginSyncStoreStats(): Promise<PluginSyncStatsIpc> {
+  if (!isTauri) {
+    const plugins = [...devSyncStore.entries()].map(([pluginId, items]) => ({
+      pluginId,
+      cloudBytes: JSON.stringify(items).length,
+      keys: Object.keys(items).length,
+      localBytes: 0,
+    }));
+    return {
+      plugins,
+      totalBytes: plugins.reduce((n, p) => n + p.cloudBytes, 0),
+      totalQuotaBytes: 8 * 1024 * 1024,
+      pluginQuotaBytes: 512 * 1024,
+      itemQuotaBytes: 64 * 1024,
+    };
+  }
+  return await invoke<PluginSyncStatsIpc>("plugin_sync_store_stats", {});
+}
+
+/* ============================================================
  * 插件独立窗口（`ui.window` 权限）
  * ============================================================ */
 
@@ -1114,6 +1270,9 @@ export const devMarketPackages = new Map<string, Uint8Array>();
 
 /** 无 Tauri 时的文件化 KV 镜像（键：`<pluginId>:<key>`） */
 export const devKvStore = new Map<string, string>();
+
+/** 无 Tauri 时的云数据 store 镜像（键：`<pluginId>` → 键值对象） */
+export const devSyncStore = new Map<string, Record<string, unknown>>();
 
 /** 无 Tauri 时的插件快捷键镜像（键：`<pluginId>:<action>`） */
 export const devShortcuts = new Map<string, string>();

@@ -153,7 +153,13 @@ const manifest = JSON.parse(readFileSync(path.join(PLUGIN_DIR, "plugin.json"), "
 const PLUGIN_FILES = {
   [PLUGIN_ID]: {
     "ui/detail.html": readFileSync(path.join(PLUGIN_DIR, "ui", "detail.html"), "utf8"),
-    "ui/detail.css": readFileSync(path.join(PLUGIN_DIR, "ui", "detail.css"), "utf8"),
+    // 测试夹具覆盖：同 view-height 测试——压回矮内容，让起始高度不随插件版本漂移。
+    "ui/detail.css":
+      readFileSync(path.join(PLUGIN_DIR, "ui", "detail.css"), "utf8") +
+      "\n.fs-app { padding: 6px 10px !important; }" +
+      "\n.fs-heading h2 { display: none !important; }" +
+      "\n.fs-search { display: none !important; }" +
+      "\n.fs-header { margin: 0 !important; }",
     "ui/index.js": readFileSync(path.join(PLUGIN_DIR, "ui", "index.js"), "utf8"),
     "icon.svg": readFileSync(path.join(PLUGIN_DIR, "icon.svg"), "utf8"),
   },
@@ -333,6 +339,12 @@ check(
 );
 
 /* ================= 模拟拖拽（mousedown → mousemove → mouseup） ================= */
+/* 起始盒子高度：插件空态高度随版本演进变化，期望值从实测推导，不写死 116 */
+const startBox = JSON.parse(await evalJs(`JSON.stringify((() => {
+  const box = document.getElementById('my_search_box');
+  return { h: box ? +box.getBoundingClientRect().height.toFixed(2) : null };
+})())`));
+const startH = Math.round(startBox.h);
 const drag = JSON.parse(await evalJs(`JSON.stringify((() => {
   const handle = document.querySelector('.plugin-resize-handle');
   if (!handle) return { ok: false, reason: 'no handle' };
@@ -390,7 +402,7 @@ check(
   setSizeOps.length > 0 &&
     setSizeOps[setSizeOps.length - 1].args?.value?.Logical &&
     Math.abs(setSizeOps[setSizeOps.length - 1].args.value.Logical.width - (758 + 120)) < 2 &&
-    Math.abs(setSizeOps[setSizeOps.length - 1].args.value.Logical.height - (116 + 80)) < 2,
+    Math.abs(setSizeOps[setSizeOps.length - 1].args.value.Logical.height - (startH + 80)) < 2,
   `last=${JSON.stringify(setSizeOps[setSizeOps.length - 1]?.args?.value?.Logical)}`
 );
 check(
@@ -398,7 +410,7 @@ check(
   setPosOps.length > 0 &&
     setPosOps[setPosOps.length - 1].args?.value?.Logical &&
     Math.abs(setPosOps[setPosOps.length - 1].args.value.Logical.x - Math.round((1920 - 878) / 2)) < 2 &&
-    Math.abs(setPosOps[setPosOps.length - 1].args.value.Logical.y - Math.round((1080 - 196) / 2)) < 2,
+    Math.abs(setPosOps[setPosOps.length - 1].args.value.Logical.y - Math.round((1080 - (startH + 80)) / 2)) < 2,
   `pos=${JSON.stringify(setPosOps[setPosOps.length - 1]?.args?.value?.Logical)}`
 );
 check("拖拽后写入了尺寸记忆", afterDrag.stored.length > 0, `keys=${JSON.stringify(afterDrag.stored)} val=${afterDrag.storedVal}`);

@@ -54,6 +54,8 @@ export interface PluginInstallConfirmRequest {
   installedVersion: string | null;
   action: "install" | "update";
   running?: boolean;
+  /** 本次升级的更新日志（市场目录里「本版本」的 changelog；用于安装确认弹窗） */
+  changelog?: string;
   /** 安装确认框中「自动更新该插件」开关的初始值（仅市场源传入） */
   autoUpdate?: boolean;
   /** 用户在安装确认框中切换「自动更新该插件」开关时同步回写 */

@@ -90,6 +90,9 @@ export async function updatePluginFromMarket(
     installedVersion,
     action,
     running,
+    // 目录里的 changelog 是「这一版」相对旧版的变更（构建索引时写入），
+    // 比包内清单更贴近市场展示；缺失时回退清单自己的 changelog。
+    changelog: entry.changelog ?? mf.changelog,
     autoUpdate: chosenAutoUpdate,
     onAutoUpdateChange: (next) => {
       chosenAutoUpdate = Boolean(next);

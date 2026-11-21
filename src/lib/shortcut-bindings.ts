@@ -4,9 +4,9 @@
  * 一条绑定回答三个问题：
  *   1. 按什么键：`shortcut`（"ctrl+alt+1"，格式与后端 global-hotkey 一致）
  *   2. 做什么事：`action`（toggle-window = 呼出/隐藏搜索框；open-plugin = 打开插件；
- *      quick-filter = 快速过滤；quick-open = 快捷打开项）
+ *      quick-filter = 快捷子搜索；quick-open = 快捷打开项；quick-search = 快捷搜索）
  *   3. 对谁做：`target`（open-plugin 时是插件 id；quick-filter 时是常用头文本；
- *      quick-open 时是匹配文本；toggle-window 时为 null）
+ *      quick-open / quick-search 时是匹配文本；toggle-window 时为 null）
  *
  * 存储形态（settings.json 的 `shortcut_bindings`）与 Rust 侧
  * `ShortcutBinding`（src-tauri/src/lib.rs）完全一致，读写的字段名不要改：
@@ -14,6 +14,7 @@
  *   { "shortcut": "ctrl+alt+1", "action": "open-plugin",   "target": "com.x.y" }
  *   { "shortcut": "alt+f",      "action": "quick-filter",  "target": "百度翻译" }
  *   { "shortcut": "alt+o",      "action": "quick-open",    "target": "百度翻译" }
+ *   { "shortcut": "alt+s",      "action": "quick-search",  "target": "周报模板" }
  *
  * 本模块只做纯计算（解析 / 校验 / 展示文案），不碰 Vue、不碰 IPC，
  * 便于单测覆盖（见 test/shortcut-bindings.test.mjs）。
@@ -24,7 +25,8 @@ export type BuiltinShortcutAction =
   | "toggle-window"
   | "open-plugin"
   | "quick-filter"
-  | "quick-open";
+  | "quick-open"
+  | "quick-search";
 
 /**
  * **宿主原生的插件动作**：由插件清单声明、但由**宿主**执行。
@@ -119,7 +121,7 @@ export interface ShortcutBinding {
   /** 作用类型 */
   action: ShortcutAction;
   /** 作用对象：open-plugin 时为插件 id，quick-filter 时为常用头文本，
-   *  quick-open 时为匹配文本，插件动作（含宿主原生与自定义）为 null */
+   *  quick-open / quick-search 时为匹配文本，插件动作（含宿主原生与自定义）为 null */
   target: string | null;
 }
 
@@ -140,8 +142,9 @@ export const SHORTCUT_ACTION_LABELS: Record<
 > = {
   "toggle-window": "呼出 / 隐藏搜索框",
   "open-plugin": "打开插件",
-  "quick-filter": "快速过滤",
+  "quick-filter": "快捷子搜索",
   "quick-open": "快捷打开项",
+  "quick-search": "快捷搜索",
   screenshot: "截图（框选 + 标注）",
   clipboard: "剪贴板历史",
   pin: "贴图（钉住剪贴板图片）",
@@ -168,13 +171,22 @@ export function shortcutActionLabel(
 export function isShortcutAction(v: unknown): v is ShortcutAction {
   if (isPluginShortcutAction(v)) return true;
   return (
-    v === "toggle-window" || v === "open-plugin" || v === "quick-filter" || v === "quick-open"
+    v === "toggle-window" ||
+    v === "open-plugin" ||
+    v === "quick-filter" ||
+    v === "quick-open" ||
+    v === "quick-search"
   );
 }
 
 /** 该作用类型是否**需要**作用对象（缺了就不可执行）。与 Rust 端 action_requires_target 一致。 */
 export function actionRequiresTarget(action: ShortcutAction): boolean {
-  return action === "open-plugin" || action === "quick-filter" || action === "quick-open";
+  return (
+    action === "open-plugin" ||
+    action === "quick-filter" ||
+    action === "quick-open" ||
+    action === "quick-search"
+  );
 }
 
 /**
@@ -188,7 +200,9 @@ export function isBindingComplete(binding: ShortcutBinding): boolean {
   if (!isShortcutAction(binding.action)) return false;
   if (binding.action === "open-plugin") return String(binding.target ?? "").trim() !== "";
   if (binding.action === "quick-filter") return normalizeQuickFilterHeader(binding.target) !== "";
-  if (binding.action === "quick-open") return String(binding.target ?? "").trim() !== "";
+  if (binding.action === "quick-open" || binding.action === "quick-search") {
+    return String(binding.target ?? "").trim() !== "";
+  }
   return true;
 }
 
@@ -196,7 +210,7 @@ export function isBindingComplete(binding: ShortcutBinding): boolean {
 export const SEARCH_BOUNDARY = " : ";
 
 /**
- * 归一化「快速过滤」的常用头：去掉首尾空白，并去掉用户可能顺手打上的
+ * 归一化「快捷子搜索」的常用头：去掉首尾空白，并去掉用户可能顺手打上的
  * 二次搜索分隔符（` : ` / `:`），避免触发时拼成「百度翻译 :  : 」。
  * 返回空串表示没有有效内容。
  */
@@ -222,8 +236,8 @@ export function parseBinding(raw: unknown): ShortcutBinding | null {
   if (!isShortcutAction(o.action)) return null;
   const action = o.action;
   const targetRaw = typeof o.target === "string" ? o.target.trim() : "";
-  // 快速过滤存的是常用头文本，读入时归一化抹平手打的尾部「 : 」；
-  // 快捷打开项存的是匹配文本，只 trim（冒号可能是标题本身的一部分）。
+  // 快捷子搜索存的是常用头文本，读入时归一化抹平手打的尾部「 : 」；
+  // 快捷打开项 / 快捷搜索存的是匹配文本，只 trim（冒号可能是标题本身的一部分）。
   const target =
     action === "quick-filter"
       ? normalizeQuickFilterHeader(targetRaw) || null
@@ -255,12 +269,12 @@ export function serializeBindings(bindings: readonly ShortcutBinding[]): Array<{
   target: string | null;
 }> {
   return bindings.map((b) => {
-    // 快速过滤的常用头落盘前归一化（去掉手打的尾部「 : 」），避免存成「百度翻译 : 」；
-    // 快捷打开项只做 trim（冒号可能是标题本身的一部分）。
+    // 快捷子搜索的常用头落盘前归一化（去掉手打的尾部「 : 」），避免存成「百度翻译 : 」；
+    // 快捷打开项 / 快捷搜索只做 trim（冒号可能是标题本身的一部分）。
     let target: string | null;
     if (b.action === "quick-filter") {
       target = normalizeQuickFilterHeader(b.target) || null;
-    } else if (b.action === "quick-open") {
+    } else if (b.action === "quick-open" || b.action === "quick-search") {
       target = String(b.target ?? "").trim() || null;
     } else {
       target = b.target ?? null;
@@ -295,11 +309,15 @@ export function validateBindings(bindings: readonly ShortcutBinding[]): { ok: bo
       if (!b.target) return { ok: false, reason: "「打开插件」需要选择一个插件" };
     } else if (b.action === "quick-filter") {
       if (!normalizeQuickFilterHeader(b.target)) {
-        return { ok: false, reason: "「快速过滤」需要填写常用头（如「百度翻译」）" };
+        return { ok: false, reason: "「快捷子搜索」需要填写常用头（如「百度翻译」）" };
       }
     } else if (b.action === "quick-open") {
       if (!String(b.target ?? "").trim()) {
         return { ok: false, reason: "「快捷打开项」需要填写要打开的项名（如「百度翻译」）" };
+      }
+    } else if (b.action === "quick-search") {
+      if (!String(b.target ?? "").trim()) {
+        return { ok: false, reason: "「快捷搜索」需要填写要搜索的关键词（如「周报模板」）" };
       }
     }
     // screenshot（截图）不需要作用对象：Rust 侧就地开遮罩窗口
@@ -327,13 +345,19 @@ export function describeBinding(
   if (binding.action === "quick-filter") {
     const header = normalizeQuickFilterHeader(binding.target);
     if (!header) return SHORTCUT_ACTION_LABELS["quick-filter"];
-    // 展示时补上二次搜索分隔符，让用户一眼看出按下后会填入什么
-    return `快速过滤「${header}${SEARCH_BOUNDARY}」`;
+    // 只展示常用头本身：二次搜索分隔符「 : 」由宿主在触发时自动补，
+    // 不写进文案（用户明确要求右侧不要出现冒号）。
+    return `快捷子搜索「${header}」`;
   }
   if (binding.action === "quick-open") {
     const text = String(binding.target ?? "").trim();
     if (!text) return SHORTCUT_ACTION_LABELS["quick-open"];
     return `快捷打开项「${text}」`;
+  }
+  if (binding.action === "quick-search") {
+    const text = String(binding.target ?? "").trim();
+    if (!text) return SHORTCUT_ACTION_LABELS["quick-search"];
+    return `快捷搜索「${text}」`;
   }
   const name = binding.target ? pluginNameOf?.(binding.target) ?? null : null;
   if (!name) {

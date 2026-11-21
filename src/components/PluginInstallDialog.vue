@@ -25,6 +25,13 @@ const props = defineProps<{
   showAutoUpdate?: boolean;
   /** 「自动更新此插件」开关当前状态 */
   autoUpdate?: boolean;
+  /**
+   * 本次升级的更新日志（可多行）。
+   *
+   * 市场更新优先传目录条目里「本版本」的 changelog；文件安装不传时
+   * 组件回退到清单的 `changelog`。仅升级时展示，全新安装不展示。
+   */
+  changelog?: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -86,6 +93,24 @@ const confirmLabel = computed(() => {
 const showForceStopNotice = computed(
   () => !!props.installedVersion && props.running === true
 );
+
+/**
+ * 是否为「升级」（新版本 > 已安装版本）。
+ *
+ * 更新日志只在升级时展示：全新安装看到的是插件历史日志、同版本重装看到的
+ * 是当前版本说明，都不是用户所说的「本次更新的日志」。
+ */
+const isUpgrade = computed(() => {
+  const mf = props.manifest;
+  if (!mf || !props.installedVersion) return false;
+  return compareVersion(mf.version, props.installedVersion) > 0;
+});
+
+/** 本次升级的更新日志正文（市场目录优先，缺省回退清单；空串 = 不展示） */
+const changelogText = computed(() => {
+  if (!isUpgrade.value) return "";
+  return (props.changelog ?? props.manifest?.changelog ?? "").trim();
+});
 </script>
 
 <template>
@@ -157,6 +182,14 @@ const showForceStopNotice = computed(
             你也可以随时在那里关闭同步，或到「设置 → 插件」撤销此权限。
           </li>
         </ul>
+      </div>
+
+      <!-- 本次更新内容：仅在升级且存在 changelog 时展示（多行按行保留） -->
+      <div v-if="changelogText" class="plugin-install-changelog">
+        <div class="plugin-install-changelog-title">
+          v{{ installedVersion }} → v{{ manifest?.version }} 更新内容
+        </div>
+        <div class="plugin-install-changelog-body">{{ changelogText }}</div>
       </div>
 
       <!-- 权限列表 -->
@@ -241,6 +274,44 @@ const showForceStopNotice = computed(
 </template>
 
 <style scoped>
+.plugin-install-changelog {
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(91, 91, 214, 0.22);
+  background: rgba(91, 91, 214, 0.06);
+}
+
+.plugin-install-changelog-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #4a4ab8;
+  margin-bottom: 4px;
+}
+
+.plugin-install-changelog-body {
+  font-size: 12px;
+  line-height: 1.6;
+  color: #4b5563;
+  white-space: pre-line;
+  word-break: break-word;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+:global(html.theme-dark) .plugin-install-changelog {
+  border-color: rgba(139, 139, 255, 0.28);
+  background: rgba(139, 139, 255, 0.08);
+}
+
+:global(html.theme-dark) .plugin-install-changelog-title {
+  color: #a5a5f5;
+}
+
+:global(html.theme-dark) .plugin-install-changelog-body {
+  color: #c3c7cf;
+}
+
 .plugin-install-autoupdate {
   margin-top: 14px;
   padding: 10px 12px;

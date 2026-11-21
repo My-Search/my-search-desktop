@@ -397,7 +397,7 @@ async function suiteManifest() {
   check("searchItem keyword", mf.contributes.searchItem.keyword === "网盘");
   check("closeBehavior exit", mf.contributes.detailView.closeBehavior === "exit");
   check("meta 分类非空", Array.isArray(meta.categories) && meta.categories.length > 0);
-  check("apiVersion/minAppVersion", mf.apiVersion === 1 && mf.minAppVersion === "7.9.15");
+  check("apiVersion/minAppVersion", mf.apiVersion === 1 && mf.minAppVersion === "7.9.35");
 }
 
 async function suitePaths() {

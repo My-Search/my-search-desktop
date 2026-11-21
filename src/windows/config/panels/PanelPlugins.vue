@@ -545,6 +545,7 @@ async function confirmMarketInstall(req: any): Promise<boolean> {
   installDialogIcon.value = req.iconUrl;
   installDialogPerms.value = req.permBlocks;
   installDialogWarnings.value = req.warnings;
+  installDialogChangelog.value = req.changelog ?? req.manifest?.changelog ?? null;
   installDialogInstalledVersion.value = req.installedVersion;
   installDialogRunning.value = req.running === true;
   installDialogShowAutoUpdate.value = typeof req.autoUpdate === "boolean";
@@ -579,8 +580,8 @@ function isRunning(id: string): boolean {
  *
  * 旧逻辑是「先确认卸载、再弹第二个框问是否删数据」——两步确认且第二个默认焦点在
  * 「删除数据」上，极易在误触下把用户数据清掉。改为**一个弹窗**：下方一个勾选框
- * 「将插件清理，后续不打算再安装」（即删除数据），默认不勾=只卸插件、保留数据；
- * 勾选才在卸载时一并清理 plugin-data。这样「删数据」是显式、需主动勾选的动作。
+ * 「将插件清理，后续不打算再安装」（即删除数据），默认勾选=卸载时一并清理
+ * plugin-data（重装场景居多）；只想卸程序、保留数据的用户可取消勾选后再确认。
  */
 const uninstallDialogVisible = ref(false);
 const uninstallTarget = ref<any | null>(null);
@@ -645,6 +646,8 @@ const installDialogManifest = ref<PluginManifest | null>(null);
 const installDialogIcon = ref<string | null>(null);
 const installDialogPerms = ref<PermissionGroupBlock[]>([]);
 const installDialogWarnings = ref<string[]>([]);
+/** 本次升级的更新日志（市场目录版本优先；文件安装取清单 changelog） */
+const installDialogChangelog = ref<string | null>(null);
 /** 已安装版本（弹窗按钮据此显示 安装/重新安装/升级；null = 未安装） */
 const installDialogInstalledVersion = ref<string | null>(null);
 /** 该插件当前是否在后台运行（覆盖安装时弹窗提示「先停止再安装」） */
@@ -689,6 +692,7 @@ async function installFromPath(path: string): Promise<void> {
     installDialogIcon.value = iconUrl;
     installDialogPerms.value = groupPermissions(allPerms);
     installDialogWarnings.value = prepared.warnings;
+    installDialogChangelog.value = mf.changelog ?? null;
     // 直读注册表取已安装版本（另一窗口可能刚装过，比 rt 内存态更新）
     const prevRec = findPlugin(loadRegistry(), mf.id);
     installDialogInstalledVersion.value = prevRec?.version ?? null;
@@ -776,6 +780,7 @@ function closeInstallDialogState(): void {
   installDialogInstalledVersion.value = null;
   installDialogRunning.value = false;
   installDialogShowAutoUpdate.value = false;
+  installDialogChangelog.value = null;
   installDialogAutoUpdateCb = null;
   installDialogMode = "file";
 }
@@ -1009,7 +1014,13 @@ function durFrom(ts: number | null): string {
       >{{ f.label }}
         <span v-if="f.value === 'running' && runningCount > 0" class="badge">{{ runningCount }}</span>
       </button>
-      <button class="btn-filter" :class="{ on: checkingUpdates }" :disabled="checkingUpdates" @click="checkUpdates">
+      <!-- 检查更新独立贴右：筛选组在左，不被它打断阅读顺序 -->
+      <button
+        class="btn-filter plugins-filter-update"
+        :class="{ on: checkingUpdates }"
+        :disabled="checkingUpdates"
+        @click="checkUpdates"
+      >
         {{ checkingUpdates ? '检查中…' : '检查更新' }}
       </button>
     </div>
@@ -1291,6 +1302,7 @@ function durFrom(ts: number | null): string {
       :icon-url="installDialogIcon"
       :perm-blocks="installDialogPerms"
       :warnings="installDialogWarnings"
+      :changelog="installDialogChangelog"
       :installed-version="installDialogInstalledVersion"
       :running="installDialogRunning"
       :show-auto-update="installDialogShowAutoUpdate"

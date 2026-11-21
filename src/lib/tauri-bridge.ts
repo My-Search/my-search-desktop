@@ -285,7 +285,7 @@ export async function onShortcutOpenPlugin(
 }
 
 /**
- * 监听「快速过滤」快捷键事件（Rust 端注册的 quick-filter 热键按下时广播）。
+ * 监听「快捷子搜索」快捷键事件（Rust 端注册的 quick-filter 热键按下时广播）。
  * 主窗口据此把常用头填入搜索框并立即搜索。
  */
 export async function onShortcutQuickFilter(
@@ -299,7 +299,7 @@ export async function onShortcutQuickFilter(
       if (typeof filter === "string" && filter.trim() !== "") handler(filter);
     });
   } catch (e) {
-    console.warn("监听快速过滤快捷键事件失败:", e);
+    console.warn("监听快捷子搜索快捷键事件失败:", e);
     return null;
   }
 }
@@ -320,6 +320,26 @@ export async function onShortcutQuickOpen(
     });
   } catch (e) {
     console.warn("监听快捷打开项快捷键事件失败:", e);
+    return null;
+  }
+}
+
+/**
+ * 监听「快捷搜索」快捷键事件（Rust 端注册的 quick-search 热键按下时广播）。
+ * 主窗口据此把搜索词填入搜索框并立即搜索（只列结果，不自动打开）。
+ */
+export async function onShortcutQuickSearch(
+  handler: (text: string) => void
+): Promise<UnlistenFn | null> {
+  if (!isTauri) return null;
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    return await listen<{ text?: unknown }>("my-search://shortcut-quick-search", (event) => {
+      const text = event.payload?.text;
+      if (typeof text === "string" && text.trim() !== "") handler(text);
+    });
+  } catch (e) {
+    console.warn("监听快捷搜索快捷键事件失败:", e);
     return null;
   }
 }

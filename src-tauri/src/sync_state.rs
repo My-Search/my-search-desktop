@@ -54,6 +54,8 @@ fn now_ms() -> i64 {
 pub struct SyncState {
     /// 本机唯一 id（16 位十六进制）
     pub device_id: String,
+    /// 本机可读名（电脑名，仅用于面板「哪台设备最后同步」；不参与身份判断）
+    pub device_name: String,
     /// 远端目标指纹（URL + 用户名 + 远端文件名）
     pub target: String,
     /// 是否已与该远端建立同步基线
@@ -70,12 +72,30 @@ pub struct SyncState {
     pub applied_rev: String,
     /// 还原代次（每次应用还原后自增）
     pub epoch: u64,
+    /// 云同步格式：0 = 未确定（旧 v1 整包），2 = v2 分片，3 = v3 每文件对象
+    pub cloud_format: u32,
+    /// v2：上次见到的云端 `manifest.json` 原始 ETag（含引号，提交时作 `If-Match`）
+    pub manifest_etag: String,
+    /// v2：各分片的同步基线摘要
+    /// `{"core":"<digest>","plugins":{"<id>":{"body":"<digest>","data":"<digest>"}}}`
+    pub shards: Value,
+    /// v2：已知远端数据分片、但**本机还没下载**的插件 → 摘要（懒加载待办队列）
+    pub pending: Value,
+    /// v2：上轮未解决的分片冲突（隔离后其余片照常同步）
+    /// `[{"pluginId":"<id>","kind":"body|data|core","localBytes":n,"remoteBytes":n,"remoteUpdatedAt":ms}]`
+    ///
+    /// 持久化的意义：主窗口重启后面板仍能列出「哪些片还等你选」，而不是丢掉上下文。
+    pub conflicts: Value,
+    /// v3：每文件同步基线（远端 manifest 对齐后的摘要集合）
+    /// `{"core":"...","plugins":{"<id>":{"body":"...","state":{...},"files":{path:digest},"blobs":{path:digest}}}}`
+    pub v3: Value,
 }
 
 impl Default for SyncState {
     fn default() -> Self {
         Self {
             device_id: String::new(),
+            device_name: String::new(),
             target: String::new(),
             initialized: false,
             remote_rev: String::new(),
@@ -84,6 +104,12 @@ impl Default for SyncState {
             last_sync_at: 0,
             applied_rev: String::new(),
             epoch: 1,
+            cloud_format: 0,
+            manifest_etag: String::new(),
+            shards: Value::Null,
+            pending: Value::Null,
+            conflicts: Value::Null,
+            v3: Value::Null,
         }
     }
 }
@@ -115,6 +141,17 @@ fn new_device_id() -> String {
     digest[..8].iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// 本机可读名：优先电脑名（Windows `COMPUTERNAME` / Unix `HOSTNAME`）。
+/// 取不到就留空，前端会退回显示设备 id 前 8 位，不影响同步。
+fn default_device_name() -> String {
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default()
+}
+
 /// 读状态（不加锁；调用方必须已持有 `STATE_LOCK`）。
 fn load_unlocked(app: &AppHandle) -> SyncState {
     let mut state = state_path(app)
@@ -122,12 +159,21 @@ fn load_unlocked(app: &AppHandle) -> SyncState {
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|t| serde_json::from_str::<SyncState>(&t).ok())
         .unwrap_or_default();
+    let mut dirty = false;
     if state.device_id.trim().is_empty() {
         state.device_id = new_device_id();
-        let _ = save_unlocked(app, &state);
+        dirty = true;
+    }
+    if state.device_name.trim().is_empty() {
+        state.device_name = default_device_name();
+        dirty = true;
     }
     if state.epoch == 0 {
         state.epoch = 1;
+        dirty = true;
+    }
+    if dirty {
+        let _ = save_unlocked(app, &state);
     }
     state
 }
@@ -189,6 +235,11 @@ pub fn bind_target(app: &AppHandle, target: &str) -> Result<SyncState, String> {
             s.last_local_digest.clear();
             s.last_sync_at = 0;
             s.applied_rev.clear();
+            s.manifest_etag.clear();
+            s.shards = Value::Null;
+            s.pending = Value::Null;
+            s.conflicts = Value::Null;
+            s.v3 = Value::Null;
         }
     })?;
     Ok(state)
@@ -203,6 +254,11 @@ pub fn reset_remote(app: &AppHandle) -> Result<SyncState, String> {
         s.last_local_digest.clear();
         s.last_sync_at = 0;
         s.applied_rev.clear();
+        s.manifest_etag.clear();
+        s.shards = Value::Null;
+        s.pending = Value::Null;
+        s.conflicts = Value::Null;
+        s.v3 = Value::Null;
     })?;
     Ok(state)
 }
@@ -261,6 +317,36 @@ pub fn sync_state_patch(app: AppHandle, patch: Value) -> Result<SyncState, Strin
                 "appliedRev" => {
                     if let Some(v) = value.as_str() {
                         s.applied_rev = v.to_string();
+                    }
+                }
+                "cloudFormat" => {
+                    if let Some(v) = value.as_u64() {
+                        s.cloud_format = v as u32;
+                    }
+                }
+                "manifestEtag" => {
+                    if let Some(v) = value.as_str() {
+                        s.manifest_etag = v.to_string();
+                    }
+                }
+                "shards" => {
+                    if value.is_object() || value.is_null() {
+                        s.shards = value.clone();
+                    }
+                }
+                "pending" => {
+                    if value.is_object() || value.is_null() {
+                        s.pending = value.clone();
+                    }
+                }
+                "conflicts" => {
+                    if value.is_array() || value.is_null() {
+                        s.conflicts = value.clone();
+                    }
+                }
+                "v3" => {
+                    if value.is_object() || value.is_null() {
+                        s.v3 = value.clone();
                     }
                 }
                 _ => {}

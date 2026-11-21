@@ -138,8 +138,8 @@ export async function preparePackage(
   const minVersion = checkMinAppVersion(parsed.manifest, opts.hostVersion);
   if (!minVersion.ok) throw new InstallPrepError(minVersion.error);
 
-  // 警告码同样要翻译：它们会被拼进安装确认弹窗，直接透传就成了
-  // 「注意：· id.reservedPrefix:com.mysearch」这种给用户看的天书。
+  // 警告码同样要翻译：它们会被拼进安装确认弹窗，直接透传内部错误码
+  // （如 `contributes.command.prefix.no_boundary:xx`）就成了给用户看的天书。
   const warnings = describeManifestErrors(parsed.warnings);
 
   // 清单以外的文件（清单本身也要落盘：运行时读清单、Rust 侧校验 id 一致性都依赖它）

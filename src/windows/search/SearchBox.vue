@@ -288,7 +288,7 @@ function focus(): void {
 function select(): void {
   inputEl.value?.select();
 }
-/** 聚焦并把光标移到末尾（快速过滤填入常用头后，用户直接接着输入子关键词） */
+/** 聚焦并把光标移到末尾（快捷子搜索填入常用头后，用户直接接着输入子关键词） */
 function focusEnd(): void {
   const el = inputEl.value;
   if (!el) return;

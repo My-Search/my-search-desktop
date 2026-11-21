@@ -150,7 +150,14 @@ const manifest = JSON.parse(readFileSync(path.join(PLUGIN_DIR, "plugin.json"), "
 const PLUGIN_FILES = {
   [PLUGIN_ID]: {
     "ui/detail.html": readFileSync(path.join(PLUGIN_DIR, "ui", "detail.html"), "utf8"),
-    "ui/detail.css": readFileSync(path.join(PLUGIN_DIR, "ui", "detail.css"), "utf8"),
+    // 测试夹具覆盖：v1.4 起空态多了关键词行，插件盒子高度超过文本视图下限(140)，
+    // 压回矮内容以满足「盒子 < 下限」的旧 bug 触发前提（本测的是窗口高度语义，非插件布局）。
+    "ui/detail.css":
+      readFileSync(path.join(PLUGIN_DIR, "ui", "detail.css"), "utf8") +
+      "\n.fs-app { padding: 6px 10px !important; }" +
+      "\n.fs-heading h2 { display: none !important; }" +
+      "\n.fs-search { display: none !important; }" +
+      "\n.fs-header { margin: 0 !important; }",
     "ui/index.js": readFileSync(path.join(PLUGIN_DIR, "ui", "index.js"), "utf8"),
     "icon.svg": readFileSync(path.join(PLUGIN_DIR, "icon.svg"), "utf8"),
   },

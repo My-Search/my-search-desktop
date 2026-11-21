@@ -109,6 +109,11 @@ export function collectState() {
   return { subscribes: ["local"] };
 }
 
+/** 「覆盖前留底」用的本机完整快照：与 collectState 同源（设备专属键的差异由真实实现负责，桩内不区分） */
+export function collectBackupState() {
+  return collectState();
+}
+
 export function restoreState(data, opts) {
   calls.restoreState.push({ data, options: opts });
   return Object.keys(data).length;
