@@ -671,6 +671,17 @@ async function suiteStore() {
   check("prefs 合法值", prefs.sortKey === "size" && prefs.sortDir === -1 && prefs.showHidden === true);
   const dflt = T.normalizePrefs({ sortKey: "bogus", sortDir: 0, showHidden: "x" });
   check("prefs 非法回退默认", dflt.sortKey === "name" && dflt.sortDir === 1 && dflt.showHidden === false);
+
+  // 同一地址 + 同一账号 = 同一份配置（旧版每次保存都新增，会产生重复）
+  const dup = T.normalizeServers([
+    { id: "a", name: "rn", url: "https://x/", username: "u", password: "" },
+    { id: "b", name: "", url: "https://x/", username: "u", password: "p2" },
+    { id: "c", name: "other", url: "https://x/", username: "u2" },
+    { id: "d", name: "n", url: "https://x/", username: "u3" },
+  ]);
+  check("servers 按地址+账号去重", dup.length === 3, `got ${dup.length}`);
+  check("去重后补空密码", dup[0].password === "p2" && dup[0].name === "rn");
+  check("不同账号不算重复", dup[1].id === "c" && dup[2].id === "d");
 }
 
 async function suitePlans() {
@@ -1072,6 +1083,87 @@ async function flowServerForm() {
   check("编辑保存", storeData["webdav.servers"][0].url === "https://dav.jianguoyun.com/dav/backup/");
 }
 
+async function flowServerDialogDefaults() {
+  console.log("---- 回归：打开插件不再误弹设置框 / 保存不新增重复配置 ----");
+  {
+    // 已配置服务器时启动：必须建好客户端并直接列目录，不能弹设置框
+    const { T, els, calls } = boot({
+      store: { "webdav.servers": [SRV], "webdav.activeServer": "srv1" },
+      onFetch: rootFetch,
+    });
+    T.init();
+    await sleep(40);
+    check("启动后不弹设置框", !els["wd-dlg"].style.display || els["wd-dlg"].style.display === "none", els["wd-dlg"].style.display);
+    check("启动后客户端已建立", T.state.client !== null);
+    check("启动后自动列出根目录", calls.some((c) => c.method === "PROPFIND" && c.url === BASE) && T.state.entries.length === 3);
+    check("状态栏已更新", !els["wd-status"].textContent.includes("正在加载配置"), els["wd-status"].textContent);
+  }
+
+  {
+    // 打开设置框默认编辑当前服务器：直接保存必须更新，而不是新增一条
+    const { T, els, storeData } = boot({
+      store: { "webdav.servers": [SRV], "webdav.activeServer": "srv1" },
+      onFetch: rootFetch,
+    });
+    T.bindDom();
+    T.bindEvents();
+    await T.loadStore();
+    T.applyServer();
+
+    T.openServerDialog();
+    check("默认选中当前服务器", T.state.srvEditId === "srv1");
+    check("表单一打开就是当前配置", els["wd-srv-name"].value === SRV.name && els["wd-srv-url"].value === SRV.url);
+    check("对话框标题标明编辑", els["wd-dlg-title"].textContent.includes("编辑"), els["wd-dlg-title"].textContent);
+    els["wd-srv-name"].value = "改名后";
+    T.saveServerForm();
+    check("直接保存不新增", storeData["webdav.servers"].length === 1, `got ${storeData["webdav.servers"].length}`);
+    check("直接保存更新当前项", storeData["webdav.servers"][0].name === "改名后");
+
+    // 点「新增」后填一份与现有完全相同的地址+账号：也只更新，不新增
+    els["wd-srv-add"]._fire("click", {});
+    check("新增后表单清空", T.state.srvEditId === null && els["wd-srv-url"].value === "");
+    els["wd-srv-name"].value = "rn";
+    els["wd-srv-url"].value = SRV.url;
+    els["wd-srv-user"].value = SRV.username;
+    els["wd-srv-pass"].value = SRV.password;
+    T.saveServerForm();
+    check("重复地址+账号不新增", storeData["webdav.servers"].length === 1, `got ${storeData["webdav.servers"].length}`);
+
+    // 换一个地址仍然能正常新增
+    els["wd-srv-add"]._fire("click", {});
+    els["wd-srv-name"].value = "第二台";
+    els["wd-srv-url"].value = "https://other.example.com/dav/";
+    els["wd-srv-user"].value = "u2";
+    T.saveServerForm();
+    check("不同地址正常新增", storeData["webdav.servers"].length === 2, `got ${storeData["webdav.servers"].length}`);
+  }
+
+  {
+    // 历史重复配置：加载时合并、写回存储，收藏与活动服务器一起收敛
+    const dupServers = [
+      { id: "a", name: "rn", url: BASE, username: "u", password: "" },
+      { id: "b", name: "rn", url: BASE, username: "u", password: "p2" },
+    ];
+    const { T, storeData } = boot({
+      store: {
+        "webdav.servers": dupServers,
+        "webdav.activeServer": "b",
+        "webdav.favorites": { a: [{ path: "/docs", name: "docs" }], b: [{ path: "/docs", name: "docs" }, { path: "/x", name: "x" }] },
+      },
+      onFetch: rootFetch,
+    });
+    T.bindDom();
+    await T.loadStore();
+    check("加载时合并历史重复", T.state.servers.length === 1 && T.state.servers[0].id === "a", `got ${T.state.servers.length}`);
+    check("活动服务器指向保留项", T.state.activeId === "a", T.state.activeId);
+    check("重复项写回存储", storeData["webdav.servers"].length === 1 && storeData["webdav.activeServer"] === "a");
+    const favs = T.favoritesFor("a").map((f) => f.path).sort();
+    check("收藏并入保留项", eq(favs, ["/docs", "/x"]), JSON.stringify(favs));
+    check("被合并项的收藏已清掉", !("b" in storeData["webdav.favorites"]));
+    check("保留项密码补齐", T.state.servers[0].password === "p2");
+  }
+}
+
 async function flowPreview() {
   console.log("---- 流程：文本预览与复制直链 ----");
   const { T, els, copied } = boot({
@@ -1140,7 +1232,7 @@ const suites = [
   suiteManifest, suitePaths, suiteUrl, suiteCodec, suiteKinds, suiteXml, suiteClient,
   suiteStore, suitePlans,
   flowLoadDir, flowSubKeyword, flowSelection, flowUpload, flowDownload, flowClipboard,
-  flowDeleteRename, flowNewFolder, flowServerForm, flowPreview, flowErrorCard, flowLoadStoreOrder,
+  flowDeleteRename, flowNewFolder, flowServerForm, flowServerDialogDefaults, flowPreview, flowErrorCard, flowLoadStoreOrder,
 ];
 
 let chain = Promise.resolve();

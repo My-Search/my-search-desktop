@@ -655,28 +655,57 @@
    * 存储归一化
    * ============================================================ */
 
-  function normalizeServers(raw) {
+  /**
+   * 一份配置的身份：地址 + 账号。
+   *
+   * 用「地址 + 账号」而不是 id 判重：同一个 WebDAV 账号在旧版里被反复保存时，
+   * 每次都会生成一个新的 id，但地址和账号完全相同——它们本来就是同一份配置。
+   */
+  function serverKeyOf(url, username) {
+    return String(url || "").trim() + "\u0000" + String(username || "").trim();
+  }
+
+  function normalizeServersDetailed(raw) {
     var list = Array.isArray(raw) ? raw : [];
     var seen = {};
+    var seenKey = {};
     var out = [];
+    var dropped = 0;
+    var alias = {};
     for (var i = 0; i < list.length; i++) {
       var s = list[i];
       if (!s || typeof s !== "object") continue;
       var url = String(s.url || "").trim();
       if (!url) continue;
+      var user = String(s.username || "");
+      var key = serverKeyOf(url, user);
+      // 历史 bug 会为同一份配置攒出多条记录：保留第一条，后面的并入（补空字段）
+      if (hasOwn(seenKey, key)) {
+        var kept = out[seenKey[key]];
+        if (!kept.password && s.password) kept.password = String(s.password);
+        if (!kept.name && s.name) kept.name = String(s.name).trim();
+        if (s.id) alias[String(s.id)] = kept.id;
+        dropped++;
+        continue;
+      }
       var id = String(s.id || "").trim();
       if (!id || hasOwn(seen, id)) id = "srv-" + (i + 1) + "-" + String(i * 7919 + url.length) + "-" + i;
       while (hasOwn(seen, id)) id += "x";
       seen[id] = true;
+      seenKey[key] = out.length;
       out.push({
         id: id,
         name: String(s.name || "").trim() || (function () { try { return new URL(/^https?:\/\//i.test(url) ? url : "https://" + url).host; } catch (e) { return "服务器"; } })(),
         url: url,
-        username: String(s.username || ""),
+        username: user,
         password: String(s.password || ""),
       });
     }
-    return out;
+    return { list: out, alias: alias, dropped: dropped };
+  }
+
+  function normalizeServers(raw) {
+    return normalizeServersDetailed(raw).list;
   }
 
   function normalizeFavorites(raw) {
@@ -808,7 +837,7 @@
       "wd-paste-bar", "wd-paste-text", "wd-paste-ok", "wd-paste-cancel",
       "wd-progress", "wd-progress-bar", "wd-progress-text", "wd-progress-pct",
       "wd-status", "wd-drop",
-      "wd-dlg", "wd-srv-list", "wd-srv-name", "wd-srv-url", "wd-srv-user", "wd-srv-pass",
+      "wd-dlg", "wd-dlg-title", "wd-srv-list", "wd-srv-name", "wd-srv-url", "wd-srv-user", "wd-srv-pass",
       "wd-srv-add", "wd-srv-delete", "wd-srv-cancel", "wd-srv-save",
       "wd-prompt", "wd-prompt-title", "wd-prompt-input", "wd-prompt-ok", "wd-prompt-cancel",
       "wd-preview", "wd-preview-close", "wd-preview-title", "wd-preview-prev", "wd-preview-next",
@@ -915,12 +944,43 @@
       Promise.resolve(storeGet(STORE_FAVORITES, {})),
       Promise.resolve(storeGet(STORE_PREFS, null)),
     ]).then(function (vals) {
-      state.servers = normalizeServers(vals[0]);
+      var srv = normalizeServersDetailed(vals[0]);
+      state.servers = srv.list;
       state.activeId = String(vals[1] || "");
       state.favorites = normalizeFavorites(vals[2]);
       state.prefs = normalizePrefs(vals[3]);
+
+      // 合并掉的历史重复项：把被删 id 下的收藏并入保留项，活动服务器指向也一并修正
+      var favChanged = false;
+      for (var from in srv.alias) {
+        if (!hasOwn(srv.alias, from)) continue;
+        var to = srv.alias[from];
+        var src = state.favorites[from];
+        if (Array.isArray(src) && src.length) {
+          var dst = state.favorites[to] || (state.favorites[to] = []);
+          src.forEach(function (f) {
+            if (!dst.some(function (d) { return samePath(d.path, f.path); })) dst.push(f);
+          });
+          favChanged = true;
+        }
+        if (hasOwn(state.favorites, from)) {
+          delete state.favorites[from];
+          favChanged = true;
+        }
+        if (state.activeId === from) state.activeId = to;
+      }
+
       if (!state.servers.some(function (s) { return s.id === state.activeId; })) {
         state.activeId = state.servers.length ? state.servers[0].id : "";
+      }
+
+      // 历史重复/脏数据在加载时一次清理并写回，之后每次打开都不会再有同名配置
+      var rawCount = Array.isArray(vals[0]) ? vals[0].length : 0;
+      if (srv.dropped > 0 || rawCount !== state.servers.length) {
+        saveServers();
+        saveActive();
+        if (favChanged) saveFavorites();
+        else if (srv.dropped > 0) saveFavorites();
       }
     });
   }
@@ -941,6 +1001,27 @@
   function favoritesFor(serverId) {
     var list = state.favorites[serverId];
     return Array.isArray(list) ? list : [];
+  }
+
+  /** 把 fromId 的收藏并入 toId（去重），返回是否有改动（合并重复服务器时用） */
+  function mergeFavoritesInto(fromId, toId) {
+    if (!fromId || !toId || fromId === toId) return false;
+    var src = state.favorites[fromId];
+    var changed = false;
+    if (Array.isArray(src) && src.length) {
+      var dst = state.favorites[toId] || (state.favorites[toId] = []);
+      src.forEach(function (f) {
+        if (!dst.some(function (d) { return samePath(d.path, f.path); })) {
+          dst.push(f);
+          changed = true;
+        }
+      });
+    }
+    if (hasOwn(state.favorites, fromId)) {
+      delete state.favorites[fromId];
+      changed = true;
+    }
+    return changed;
   }
 
   /** 应用当前服务器：重建客户端、回到根目录（切服务器不做目录记忆，收藏夹足够快） */
@@ -1868,8 +1949,11 @@
 
   function openServerDialog() {
     if (!dom["wd-dlg"]) return;
-    state.srvEditId = null;
-    fillServerForm(state.servers.length ? currentServer() : null);
+    // 打开时就进入「编辑当前服务器」状态：表单里显示的是哪台，保存就更新哪台。
+    // 旧版这里固定置 null，于是「打开 → 直接保存」必然新增一条同名配置。
+    var current = currentServer();
+    state.srvEditId = current ? current.id : null;
+    fillServerForm(current || null);
     renderServerList();
     dom["wd-dlg"].style.display = "flex";
     try { if (dom["wd-srv-name"]) dom["wd-srv-name"].focus(); } catch (e) { /* ignore */ }
@@ -1883,7 +1967,9 @@
   function renderServerList() {
     if (!dom["wd-srv-list"]) return;
     clearNode(dom["wd-srv-list"]);
+    var editing = null;
     state.servers.forEach(function (s) {
+      if (s.id === state.srvEditId) editing = s;
       var item = el("div", "wd-srv-item" + (s.id === state.srvEditId ? " is-active" : ""));
       item.appendChild(el("span", "wd-srv-name", s.name || s.id));
       item.appendChild(el("span", "wd-srv-url", s.url));
@@ -1895,6 +1981,12 @@
       });
       dom["wd-srv-list"].appendChild(item);
     });
+    // 标题写明「正在编辑哪台 / 正在新增」，避免用户以为打开对话框就是新配置
+    if (dom["wd-dlg-title"]) {
+      dom["wd-dlg-title"].textContent = editing
+        ? "服务器设置 · 编辑「" + (editing.name || editing.url) + "」"
+        : "服务器设置 · 新增";
+    }
   }
 
   function fillServerForm(server) {
@@ -1919,24 +2011,54 @@
     }
     var user = String(dom["wd-srv-user"] && dom["wd-srv-user"].value || "").trim();
     var pass = String(dom["wd-srv-pass"] && dom["wd-srv-pass"].value || "");
-    if (state.srvEditId) {
-      for (var i = 0; i < state.servers.length; i++) {
-        if (state.servers[i].id === state.srvEditId) {
-          state.servers[i].name = name;
-          state.servers[i].url = url;
-          state.servers[i].username = user;
-          state.servers[i].password = pass;
+    var key = serverKeyOf(url, user);
+    var targetId = state.srvEditId;
+    if (!targetId) {
+      // 「新增」时地址+账号已经存在：视为编辑那台，不再凭空多一条
+      for (var j = 0; j < state.servers.length; j++) {
+        if (serverKeyOf(state.servers[j].url, state.servers[j].username) === key) {
+          targetId = state.servers[j].id;
           break;
         }
       }
+    }
+    if (targetId) {
+      var edit = null;
+      for (var i = 0; i < state.servers.length; i++) {
+        if (state.servers[i].id === targetId) { edit = state.servers[i]; break; }
+      }
+      if (edit) {
+        edit.name = name;
+        edit.url = url;
+        edit.username = user;
+        edit.password = pass;
+      } else {
+        targetId = ""; // 编辑目标已被删除：退回新增
+      }
+    }
+    if (targetId) {
+      // 改成了与另一条完全相同的地址+账号：把它并进当前这条（历史重复数据的自然收敛）
+      var mergedFav = false;
+      var rest = [];
+      for (var m = 0; m < state.servers.length; m++) {
+        var s = state.servers[m];
+        if (s.id !== targetId && serverKeyOf(s.url, s.username) === key) {
+          mergedFav = mergeFavoritesInto(s.id, targetId) || mergedFav;
+          continue;
+        }
+        rest.push(s);
+      }
+      if (rest.length !== state.servers.length) state.servers = rest;
+      if (mergedFav) saveFavorites();
     } else {
       var id = "srv-" + Date.now().toString(36) + "-" + Math.floor(Math.random() * 1e6).toString(36);
       while (state.servers.some(function (s) { return s.id === id; })) id += "x";
       state.servers.push({ id: id, name: name, url: url, username: user, password: pass });
-      state.srvEditId = id;
+      targetId = id;
     }
+    state.srvEditId = targetId;
     if (!state.activeId || !state.servers.some(function (s) { return s.id === state.activeId; })) {
-      state.activeId = state.srvEditId;
+      state.activeId = targetId;
     }
     saveServers();
     saveActive();
@@ -2119,6 +2241,9 @@
     bindEvents();
     setStatus("正在加载配置…");
     loadStore().then(function () {
+      // 必须先 applyServer 建客户端：否则 loadDir 会因 client 为空再次弹设置框，
+      // 「每次打开插件都弹服务器设置」就是这么来的。
+      applyServer();
       renderAll();
       if (!currentServer()) {
         setStatus("请先添加一个 WebDAV 服务器");
