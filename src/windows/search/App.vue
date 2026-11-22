@@ -70,6 +70,7 @@ import {
   resetMainWindowPosition,
   getMainMonitorRect,
   onMainWindowShown,
+  onMainWindowHidden,
   onClearCache,
   onShortcutOpenPlugin,
   onShortcutQuickFilter,
@@ -284,6 +285,15 @@ const draggingFiles = ref(false);
 const recentFiles = ref<AttachedEntry[]>([]);
 /** 「最近添加」条带是否展开（显示在搜索框下方；用普通流内布局，窗口随之长高） */
 const recentVisible = ref(false);
+
+/**
+ * 本次隐藏是否已经完成「提前复位」。
+ *
+ * 语义：窗口隐藏后（不可见状态下）已经把「下次呼出本应复位」的状态清干净。
+ * 呼出时据此跳过再复位一次——避免窗口已显示后再清空带来的闪帧。
+ * 兜底路径（截图临时隐藏、隐藏事件丢失、冷启动）为 false 时仍按老逻辑在呼出时复位。
+ */
+let resetOnHideDone = true;
 
 /** 条带 DOM（用于测量横向溢出、监听滚动；见下方 stripEdges） */
 const recentStripRef = ref<HTMLElement | null>(null);
@@ -933,9 +943,14 @@ function showScriptView(item: SearchItem): void {
 /**
  * 复位到初始视图：清空输入/结果/详情，并把窗口收回到搜索框高度。
  *
- * 呼出（隐藏前非详情视图）与点击 URL 结果时调用。
+ * @param fromHide true=窗口已隐藏（延迟到隐藏后的提前复位）。此时窗口不可见，
+ *   且 Rust 已在 hide() 前把窗口物理收到 48px，**不要再下发窗口尺寸 IPC**——
+ *   既省一次无意义调用，也不会和下一次呼出的建窗时序抢跑（show_main_window
+ *   每次都会重新按 48px/屏幕分档宽建窗）。
+ *
+ * 调用点：窗口隐藏后的提前复位（fromHide=true）、呼出兜底复位、点击 URL 结果。
  */
-function resetToInitialView(): void {
+function resetToInitialView(fromHide = false): void {
   detailVisible.value = false;
   detail.value = null;
   inputValue.value = "";
@@ -943,21 +958,23 @@ function resetToInitialView(): void {
   state.activeIndex = -1;
   state.rawKeyword = "";
   state.mode = MODE.WAIT_SEARCH;
-  search.debouncedSearch.cancel();
+  // 必须在清结果前先掐掉所有在途搜索：否则 await 中的那次会在复位后把结果填回来
+  search.cancelPendingSearch();
   scriptHost.clearScriptSession();
   pluginViewHost.clear();
   restoreWindowPositionIfPluginExited();
   // 附件随「复位」一并清掉（与老油猴版 viewHide 后 clear 一致）：
   // 下次呼出是干净的搜索框，不会带着上次的文件继续过滤结果。
   clearAttachments();
-  // 条带随复位收起。呼出路径已在 onMainWindowShown 里静默清过标记
+  // 条带随复位收起。隐藏态跳过高度重算（窗口不可见，见上方 fromHide 说明）；
+  // 呼出兜底路径已在 onMainWindowShown 里静默清过标记
   //（Rust 刚绝对复位过窗口，这里再移反而会推错）；点击 URL 等**未经
   // 重新定位**的复位走完整收起，把窗口等量移回。
-  hideRecentStrip();
+  hideRecentStrip(fromHide);
   // 复位时不要无条件刷回默认提示：若订阅数据仍在加载中，
   // 必须继续显示「正在加载订阅数据...」，否则会表现为静默加载。
   search.restoreLoadingPlaceholderIfNeeded();
-  collapseToBoxHeight();
+  if (!fromHide) collapseToBoxHeight();
 }
 
 /**
@@ -1014,6 +1031,30 @@ function resumeDetailViewIfAny(): boolean {
     }
   });
   return true;
+}
+
+/**
+ * 窗口**隐藏完成**后的「提前复位」。
+ *
+ * 为什么提前：输入框 / 结果列表 / 附件 / 条带这些状态，下次呼出时本来就一定会被
+ * `resetToInitialView()` 清掉；等窗口显示后再清，用户会先看到上一轮的内容闪一帧，
+ * 再跳回干净搜索框（用户报的观感问题）。放到 hide() 之后做，窗口不可见时完成，
+ * 下次呼出的第一帧就是未搜索时的样子。
+ *
+ * 两类状态**不参与**提前复位，保持既有「原样还原」语义：
+ *   - 详情视图（简述/附加/脚本/插件）：失焦只是先隐藏，再呼出原样还原；
+ *     插件/脚本会话也不能在这里清，清了就还原不回来；
+ *   - 安装确认弹窗：复位会清掉刚附加的 .mspp chip / 关掉详情，让弹窗悬空。
+ */
+function resetOnHideIfNeeded(): void {
+  // 安装确认弹窗：与呼出路网一致，跳过复位（file 安装还要保持撑高）。
+  // 不置 resetOnHideDone —— 若弹窗在隐藏期间被关掉，呼出时仍按兜底路径复位。
+  if (installDialogVisible.value) return;
+  // 详情视图：原样还原，不动任何状态（插件/脚本会话也保留）。
+  // 同理不置位：万一隐藏期间详情被销毁，呼出时兜底复位，不会留下残影。
+  if (state.mode === MODE.SHOW_ITEM_DETAIL && detailVisible.value) return;
+  resetToInitialView(true);
+  resetOnHideDone = true;
 }
 // ============== 插件视图窗口尺寸（拖拽改大小 + 按插件记忆） ==============
 /**
@@ -1568,11 +1609,12 @@ async function showRecentStrip(): Promise<void> {
   queueUpdateStripEdges();
 }
 
-/** 收起条带：重下发高度。已收起时是 no-op（复位/呼出路径可安全直调） */
-function hideRecentStrip(): void {
+/** 收起条带：重下发高度。已收起时是 no-op（复位/呼出路径可安全直调）。
+ *  @param skipHeightResize true=窗口已隐藏，跳过窗口高度重算（隐藏态下发无意义且会抢时序） */
+function hideRecentStrip(skipHeightResize = false): void {
   if (!recentVisible.value) return;
   recentVisible.value = false;
-  refreshHeightAfterStripToggle();
+  if (!skipHeightResize) refreshHeightAfterStripToggle();
 }
 
 // 条带一收起就清掉两侧渐隐。**盯 recentVisible 而不是只写在 hideRecentStrip 里**：
@@ -2149,6 +2191,8 @@ search.bindAfterResultsRendered(() => {
 
 // ============== 生命周期 ==============
 let unlistenShown: (() => void) | null = null;
+/** 「主窗口已隐藏」事件监听器（隐藏后提前复位，见 resetOnHideIfNeeded） */
+let unlistenHidden: (() => void) | null = null;
 /** 「打开插件」快捷键事件监听器 */
 let unlistenPluginShortcut: (() => void) | null = null;
 /** 「快捷子搜索」快捷键事件监听器 */
@@ -2201,7 +2245,9 @@ function handleEscape(): void {
     hideRecentStrip();
     return;
   }
-  void hideWindow();
+  // 主动隐藏（Esc）：win.hide() 在 JS 侧执行，若失焦隐藏事件被抑制就不会有
+  // Rust 的「已隐藏」广播；这里等 hide() 落地后兜底做一次提前复位（幂等）。
+  void hideWindow().then(() => resetOnHideIfNeeded());
 }
 
 /** 全局 ESC：输入框无焦点时，与输入框按 ESC 行为完全等价（见 handleEscape） */
@@ -2276,10 +2322,14 @@ onMounted(async () => {
         // 48，不撑高弹窗会被裁掉）；市场安装开在插件详情视图之上，高度由详情
         // 视图管理，强行按 440 下发会把插件页压扁，故只对 file 撑高。
         if (installDialogMode === "file") void setWindowHeight(INSTALL_DIALOG_HEIGHT);
-      } else {
+      } else if (!resetOnHideDone) {
+        // 兜底：隐藏事件没赶上（截图临时隐藏 / 冷启动 / 事件丢失）时才在呼出后复位。
+        // 正常路径的复位已在窗口不可见时完成，这里什么都不做——不能让它再清一次。
         resetToInitialView();
       }
     }
+    // 窗口已经显示，本次「隐藏后复位」的账结清；下次隐藏重新计算
+    resetOnHideDone = false;
     // 复位后再检查一次：若缓存已被清理，立即进入加载状态
     if (initialLoadDone) search.reloadIfSubscribesChanged(true);
     // 「自动下载更新」开关可能刚在设置窗口被改动：呼出时按新设置求值
@@ -2291,7 +2341,12 @@ onMounted(async () => {
     if (!installDialogVisible.value) searchBoxRef.value?.focus();
   });
 
-    // ── 并行初始化：插件链与订阅链无依赖，同时启动 ──
+  // 「窗口已隐藏」（Rust 在 hide() 之后广播）：把「下次呼出本来就要复位」的状态
+  // 在不可见时提前清掉，下次呼出直接显示干净搜索框，不再有显示后复位的闪帧。
+  // 与上面同一条理由，监听必须在重型初始化之前注册——隐藏随时可能发生。
+  unlistenHidden = await onMainWindowHidden(() => resetOnHideIfNeeded());
+
+  // ── 并行初始化：插件链与订阅链无依赖，同时启动 ──
   // 插件链：内置安装 → 注册表重载 → 绑定插件项 → 开发监听
   // 订阅链：解析订阅文本（纯 localStorage，极快）
   // 两者汇合后再调 loadAllData（它既需要订阅列表，也需要插件项提供者）。
@@ -2577,6 +2632,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("focus", onWindowFocus);
   document.removeEventListener("visibilitychange", onVisibilityChange);
   unlistenShown?.();
+  unlistenHidden?.();
   unlistenSyncApplied?.();
   unlistenPluginShortcut?.();
   unlistenQuickFilter?.();

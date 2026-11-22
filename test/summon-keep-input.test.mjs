@@ -1,13 +1,15 @@
 /**
- * 真实浏览器回归测试：呼出视图分支（用户规则）
+ * 真实浏览器回归测试：隐藏 / 呼出视图分支（用户规则）
  *
  * 「除了正在打开查看文档类型数据项/附加内容/应用项，其它的按快捷键
  *   Ctrl+Alt+S 应重置输入框；详情视图则只单独隐藏，再显示时仍应与隐藏前一致。」
  *
- * 即呼出（Rust 端显示窗口 → my-search://main-window-shown）按隐藏前状态分支：
+ * 复位时机：**窗口隐藏完成时**（Rust hide() 后 → my-search://main-window-hidden），
+ * 不再等呼出显示后再复位（那样会先看到上一轮内容闪一帧）。按隐藏前状态分支：
  *  1. 详情视图（简述文档 / 附加内容 / 脚本应用）展示中隐藏 → 只单独隐藏，
  *     再次呼出**原样还原**：详情正文仍在、输入框内容不动（视图不销毁）；
- *  2. 其它状态（等待搜索 / 结果列表）→ 复位：输入框清空、窗口收回搜索框高度；
+ *  2. 其它状态（等待搜索 / 结果列表）→ **隐藏时即复位**：输入框清空、结果区收起；
+ *     呼出只负责把窗口显示出来，显示后不再有第二次复位；
  *  3. 点击 URL 结果 → 显式结束会话：复位 + 隐藏（行为保持）。
  *
  * 做法：与 blur-hide-ui.test.mjs 相同——CDP 打开构建产物，注入假
@@ -215,6 +217,9 @@ const detailVisible = () =>
   evalJs(`document.getElementById('text_show').style.display === 'block'`);
 const summon = () =>
   evalJs(`window.__emitTauriEvent('my-search://main-window-shown', null)`);
+/** 模拟 Rust：主窗口 hide() 之后广播「已隐藏」（前端在这一刻提前复位） */
+const hideWindow = () =>
+  evalJs(`window.__emitTauriEvent('my-search://main-window-hidden', null)`);
 const typeKeyword = async (kw) => {
   await evalJs(`(() => {
     const input = document.getElementById('my_search_input');
@@ -224,25 +229,38 @@ const typeKeyword = async (kw) => {
   await sleep(700); // 防抖 300ms + 搜索
 };
 
-// ---- 探针：emit 是否能到达前端监听器（listener 已在 bootstrap 注册） ----
+// ---- 探针：两条事件都能到达前端监听器（listener 已在 bootstrap 注册） ----
 const probe = await summon();
-if (!probe) {
-  console.log("跳过：无法在 mock 环境触发 main-window-shown（未捕获到监听器）。");
+const probeHidden = await hideWindow();
+if (!probe || !probeHidden) {
+  console.log("跳过：无法在 mock 环境触发 window-shown / window-hidden（未捕获到监听器）。");
   proc.kill();
   server.close();
   process.exit(0);
 }
 await sleep(300);
 
-// ---- 1. 非详情状态呼出 → 复位输入框（用户规则的前半句） ----
+// ---- 1. 非详情状态：隐藏完成时即复位，呼出只显示（不二次复位） ----
 await typeKeyword("纯链接");
 check("结果列表展示中（隐藏前状态=结果列表）", (await resultVisible()) === true);
+// 模拟用户点窗口外 / Esc：Rust hide() 后广播「已隐藏」
+await hideWindow();
+await sleep(300);
+check("隐藏后（结果列表状态）：输入框已重置", (await inputVal()) === "");
+check(
+  "隐藏后（结果列表状态）：结果区已收起",
+  (await evalJs(`document.getElementById('matchResult').style.display === 'none'`)) === true
+);
+// 再呼出：窗口显示，前端不应再做任何复位（状态已是干净的）
 await summon();
 await sleep(300);
-check("结果列表状态呼出：输入框被重置", (await inputVal()) === "");
-check("结果列表状态呼出：结果区收起", (await evalJs(`document.getElementById('matchResult').style.display === 'none'`)) === true);
+check("呼出：输入框仍为空（未做二次复位）", (await inputVal()) === "");
+check(
+  "呼出：结果区仍收起（未做二次复位）",
+  (await evalJs(`document.getElementById('matchResult').style.display === 'none'`)) === true
+);
 
-// ---- 2. 详情视图（文档简述）呼出 → 原样还原（用户规则的后半句） ----
+// ---- 2. 详情视图（文档简述）：隐藏时不复位，呼出原样还原 ----
 await typeKeyword("文档");
 const openDetailOk = await evalJs(`(() => {
   const li = [...document.querySelectorAll('#matchItems li')]
@@ -256,12 +274,23 @@ const openDetailOk = await evalJs(`(() => {
 await sleep(300);
 check("点击简述项进入详情视图", openDetailOk === true && (await detailVisible()) === true);
 check("详情视图中输入框仍有关键词", (await inputVal()) === "文档");
-// 模拟详情视图展示中按快捷键隐藏窗口（只隐藏，前端视图不动）
-await evalJs(`window.__emitTauriEvent && window.__emitTauriEvent('my-search://main-window-shown', null)`);
-// 先验证隐藏期间 DOM 不动：直接呼出
+// 模拟详情视图展示中失焦隐藏（Rust hide() 后广播「已隐藏」）：按规则不得复位
+await hideWindow();
 await sleep(300);
-check("详情视图呼出：正文原样保留",
-  (await evalJs(`document.getElementById('text_show').textContent.includes('文档正文第一段')`)) === true);
+check(
+  "详情视图隐藏后：正文原样保留",
+  (await evalJs(`document.getElementById('text_show').textContent.includes('文档正文第一段')`)) === true
+);
+check("详情视图隐藏后：详情视图仍然展示", (await detailVisible()) === true);
+check("详情视图隐藏后：输入框内容与隐藏前一致", (await inputVal()) === "文档");
+check("详情视图隐藏后：结果区不抢焦点展示", (await resultVisible()) === false);
+// 再呼出：原样还原（不销毁、不重置）
+await summon();
+await sleep(300);
+check(
+  "详情视图呼出：正文原样保留",
+  (await evalJs(`document.getElementById('text_show').textContent.includes('文档正文第一段')`)) === true
+);
 check("详情视图呼出：详情视图仍然展示", (await detailVisible()) === true);
 check("详情视图呼出：输入框内容与隐藏前一致", (await inputVal()) === "文档");
 check("详情视图呼出：结果区不抢焦点展示", (await resultVisible()) === false);

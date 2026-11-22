@@ -626,28 +626,31 @@ html, body {
    所有插件贡献的条目共用这一个标记，用来区别于订阅数据项 / 旧版 [脚本] 项。
 
    造型照抄 Windows 桌面快捷方式角标（白色圆角底板 + 蓝色箭头）。
-   参数不是拍脑袋定的，是把真实 .lnk 交给 shell 渲染后逐像素量出来的
+   参数来自把真实 .lnk 交给 shell 渲染后逐像素量出来的参照
    （见 test/_lnk-icon.cs，SHGetFileInfo + SHGFI_LINKOVERLAY，再配合
    test/_measure-win-overlay.mjs 读像素）：
-     · 底板 13px / 32px 图标 = 40.6%  →  24px 图标上取 10px
+     · 底板 13px / 32px 图标 = 40.6%
      · 底板为**不透明纯白**（在深色图标上取样仍是 #ffffff、alpha=255，
        所以不是半透明蒙版，用实色即可）
      · 外缘一圈浅灰（顶边 #e5e9ef、底边 #c8d0de，越往下越深）≈ 1px 描边 + 微阴影
      · 图形是蓝色，最饱和处 #0a85d9
-   因此这里用「10px 白底 + 1px 浅灰描边 + 2px 圆角 + 蓝色图形」。
 
-   位置：Windows 把底板贴在图标最边角（距边 1px/32px），但那是**方形**图标。
-   本列表的 favicon 是 #matchResult img 的 radius 30%（24px → 7.2px 圆角），
-   底板贴死在 0 会被圆角切掉一角。左下角「危险区」判定为
-   {x<7.2 且 y>16.8 且 距(7.2,16.8) > 7.2}，代入底板最外角 (d, 24-d)：
-   d=2 时距离 7.35 已出界，d=2.109 是临界值，故取 2.5px 留一点余量。
-   好消息是这个约束只跟 d 有关、与底板尺寸无关，调大小不必重算偏移。 */
+   2026-11 口径调整（用户要求）：favicon 内容（云朵等图形）被角标压住太多，
+   改为「更小 + 更贴左下角」。底板 10px → **8px**（24px 图标的 33.3%，
+   比 Windows 的 40.6% 小一档），图形 7px → **5px**，位置压到 1.9px。
+
+   位置计算：favicon 是 #matchResult img 的 radius 30%（24px → 7.2px 圆角）。
+   角标**不被 img 裁剪**（它是同级的绝对定位元素），这里约束的是「别越出
+   favicon 的圆角轮廓」。左下角危险区 = {x<7.2 且 y>16.8 且 距(7.2,16.8)>7.2}，
+   代入角标最外角 (d, 24-2.5)：
+     d=1.746 是临界值（距离刚好 7.2），d=1.9 时距离 7.08，仍在内侧且留一点余量，
+   视觉上就是「贴着圆角弧线压进角落」，再小就会露出圆弧外。 */
 #matchResult .plugin-badge {
   position: absolute;
-  left: 2.5px;
+  left: 1.9px;
   bottom: 2.5px;
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -659,11 +662,11 @@ html, body {
 }
 
 /* 角标内的 svg（覆盖 .resultItem svg 的 16px，改为固定尺寸 = 图形实际大小）。
-   Windows 里箭头约占底板 64%（11px 底板里 7px），10px 底板对应 7px。 */
+   8px 底板配 5px 图形，四周留出约 0.5px 白边（与改版前的留白比例一致）。 */
 #matchResult .plugin-badge svg {
   display: block;
-  width: 7px;
-  height: 7px;
+  width: 5px;
+  height: 5px;
 }
 
 /* 图形颜色：Windows 快捷方式角标的蓝。

@@ -66,11 +66,13 @@ const tab = shallowRef<"export" | "import">("export");
 // ===================== 同步配置 =====================
 const config = ref<SyncConfig>({
   enabled: false,
-  webdavUrl: "", webdavUser: "", remoteFile: "my-search-backup.msbackup",
+  webdavUrl: "", webdavUser: "", remoteFile: "my-search",
   conflict: "newer", autoOnChange: true, intervalMinutes: 30, hasPassword: false,
 });
 const passwordInput = ref("");
 const loadingConfig = ref(true);
+/** 云端目录名 = 远端名 + `.cloud`（默认 my-search → my-search.cloud），只用于面板即时提示 */
+const cloudDirName = computed(() => `${config.value.remoteFile.trim().replace(/^\/+|\/+$/g, "") || "…"}.cloud`);
 
 async function loadConfig(): Promise<void> {
   loadingConfig.value = true;
@@ -718,8 +720,8 @@ defineExpose({ refreshAfterRestore });
         </div>
       </div>
       <div class="cfg-row">
-        <label class="cfg-row-label">远端文件名</label>
-        <input class="cfg-input" type="text" v-model="config.remoteFile" placeholder="my-search-backup.msbackup" />
+        <label class="cfg-row-label">远端文件名<CfgHint :text="`v3 的分片对象全部放在 WebDAV 上的「${cloudDirName}」目录里（该值 + .cloud），默认 my-search → my-search.cloud。已保存的配置按原值生效，不会自动迁移。`" /></label>
+        <input class="cfg-input" type="text" v-model="config.remoteFile" placeholder="my-search" />
       </div>
       <div class="cfg-row">
         <label class="cfg-row-label">冲突策略<CfgHint text="当远端与本机都有改动时，按所选策略决定保留哪份数据。首次连接云端已有备份时始终会先询问。" /></label>

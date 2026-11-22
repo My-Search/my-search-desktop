@@ -1052,8 +1052,9 @@ let heightFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
 /**
  * 监听主窗口“重新显示”事件（Rust 端 toggle_window 显示窗口时广播）。
- * 用于前端在每次呼出时复位残留的详情/结果视图与窗口高度，避免上次搜索的高窗口残留。
- * 注意：输入框内容属于用户会话，前端复位时会保留未处理完的输入并重新触发搜索。
+ * 用于前端在每次呼出时兜底复位残留的详情/结果视图与窗口高度。
+ * 注意：常态（非详情视图）的复位已提前到窗口隐藏完成时（见 onMainWindowHidden），
+ * 这里是兜底路径——仅在隐藏事件没赶上时才真正执行复位。
  */
 export async function onMainWindowShown(handler: () => void): Promise<UnlistenFn | null> {
   if (!isTauri) return null;
@@ -1062,6 +1063,26 @@ export async function onMainWindowShown(handler: () => void): Promise<UnlistenFn
     return await listen("my-search://main-window-shown", () => handler());
   } catch (e) {
     console.warn("监听主窗口显示事件失败:", e);
+    return null;
+  }
+}
+
+/**
+ * 监听主窗口“已隐藏”事件（Rust 在 hide() **之后**广播）。
+ *
+ * 用于把「下次呼出本来就要做」的复位提前到窗口不可见时完成：输入框、结果列表、
+ * 附件、条带在隐藏那一刻就归零，下次呼出第一帧直接是干净的搜索框，不会出现
+ * 「先显示上一轮内容、再复位」的跳变。详情视图 / 安装弹窗不在复位范围（调用方判定）。
+ *
+ * 必须是 hide() 之后：若在失焦时立刻复位，窗口还在画面上，用户会看到内容被清空的一帧。
+ */
+export async function onMainWindowHidden(handler: () => void): Promise<UnlistenFn | null> {
+  if (!isTauri) return null;
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    return await listen("my-search://main-window-hidden", () => handler());
+  } catch (e) {
+    console.warn("监听主窗口隐藏事件失败:", e);
     return null;
   }
 }

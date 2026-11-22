@@ -485,6 +485,13 @@ fn apply_app_theme(app: tauri::AppHandle, theme: String, resolved: String) -> Re
 /// 主窗口每次显示时向前端广播的事件名（前端据此清理残留状态）
 const EVENT_MAIN_WINDOW_SHOWN: &str = "my-search://main-window-shown";
 
+/// 主窗口**隐藏完成后**向前端广播的事件名。
+///
+/// 前端收到后在窗口不可见的状态下完成「下次呼出本来就要做」的复位（清输入、
+/// 结果、附件、条带）。必须放在 `hide()` 之后发：提前发会让用户在窗口还看得见
+/// 时看到内容被清空的一帧；放在呼出后做则会出现「先显示上一轮内容、再复位」。
+const EVENT_MAIN_WINDOW_HIDDEN: &str = "my-search://main-window-hidden";
+
 /// 搜索框（含边框）高度，与前端 BOX_HEIGHT 保持一致。
 /// 隐藏窗口时把窗口收回到这个高度，避免下次呼出时残留上一次的高窗口（下面空一大块）。
 /// 48 = 2(上边框)+44(#searchBox)+2(下边框)，缩放下取整对称、上下灰边等厚。
@@ -678,9 +685,9 @@ fn show_main_window(app: &tauri::AppHandle) {
     if let Ok(hwnd) = window.hwnd() {
         alt_click::force_foreground(windows::Win32::Foundation::HWND(hwnd.0 as *mut _));
     }
-    // 通知前端：窗口重新显示（前端据此复位残留的详情/结果视图与高度，
-    // 避免“上次搜过之后再次呼出，下面空着一大块”的问题；
-    // 输入框内容属于用户会话，前端会保留并重新触发搜索）
+    // 通知前端：窗口重新显示。常态（非详情视图）的复位已在隐藏完成时做过
+    //（见 EVENT_MAIN_WINDOW_HIDDEN），这里只是兜底：隐藏事件没赶上时前端才复位。
+    // 详情视图仍在此刻「原样还原」（高度重新贴回内容）。
     let _ = app.emit(EVENT_MAIN_WINDOW_SHOWN, ());
 }
 
@@ -688,8 +695,8 @@ fn show_main_window(app: &tauri::AppHandle) {
 fn toggle_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         if window.is_visible().unwrap_or(false) {
-            collapse_main_window(&window);
-            let _ = window.hide();
+            // 与失焦隐藏共用一份实现：收起高度 + 隐藏 + 广播「已隐藏」（前端提前复位）
+            collapse_and_hide(&window);
         } else {
             show_main_window(app);
         }
@@ -2553,6 +2560,9 @@ fn animate_window_size(
 pub(crate) fn collapse_and_hide(window: &tauri::WebviewWindow) {
     collapse_main_window(window);
     let _ = window.hide();
+    // 通知前端：窗口已不可见，把「下次呼出本就要复位」的状态提前清掉
+    //（详情视图/安装弹窗由前端判定跳过，保持原样还原）。
+    let _ = window.app_handle().emit(EVENT_MAIN_WINDOW_HIDDEN, ());
 }
 
 /// 把主窗口收回到搜索框高度（隐藏时调用，避免下次呼出残留上次的高窗口）
@@ -2636,8 +2646,10 @@ async fn open_config_window(app: tauri::AppHandle) {
 
     if let Some(main) = app.get_webview_window("main") {
         if main.is_visible().unwrap_or(false) {
-            collapse_main_window(&main);
-            let _ = main.hide();
+            // 与失焦隐藏同一条路径：收起高度 + 隐藏 + 广播「已隐藏」，
+            // 让搜索窗在设置窗口打开期间就完成提前复位（下次呼出是干净搜索框）。
+            // 详情视图/安装弹窗由前端判定跳过，不会被这里清掉。
+            collapse_and_hide(&main);
         }
     }
 

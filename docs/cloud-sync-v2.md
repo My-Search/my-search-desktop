@@ -17,7 +17,7 @@ v2 把用户态拆成**不可变分片对象**，用 `manifest.json` 记录「�
 ## 2. 云端布局
 
 ```text
-<remote_file 去掉 .msbackup>.cloud/
+<remote_file + ".cloud">/   ← 默认 my-search → my-search.cloud
   manifest.json                        ← 唯一原子提交点（最后写）
   core-<digest>.msbackup               ← internal/ + settings + 非插件 localStorage
   plugins/<id>/body-<digest>.msbackup  ← 插件主体（安装文件 / 开发挂载源码副本）

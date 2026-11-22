@@ -20,7 +20,9 @@ use tauri::{AppHandle, Manager};
 use crate::credential_store::{load_credentials, save_credentials, Credentials};
 
 const SYNC_CONFIG_FILE: &str = "sync-config.json";
-const DEFAULT_REMOTE_FILE: &str = "my-search-backup.msbackup";
+/// 默认远端名。v3 的云端目录 = 该值再拼 `.cloud`，即默认落在 `my-search.cloud/`。
+/// 只作为**新装的默认值**：用户已保存的 `sync-config.json` 一律按原值，不做迁移。
+const DEFAULT_REMOTE_FILE: &str = "my-search";
 const ARCHIVE_MIME: &str = "application/zip";
 
 fn err(msg: impl Into<String>) -> String {

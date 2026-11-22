@@ -291,6 +291,19 @@ export function useSearchState() {
     void doSearch(v);
   }, 300);
 
+  /**
+   * 取消一切在途搜索（防抖尚未触发的 + 已发出但 await 还没回来的）。
+   *
+   * 复位（尤其是窗口隐藏后的提前复位）必须先调它再清 `state.results`：只 cancel
+   * 防抖的话，已经进到 `engine.search` / `resultProviders` 里 await 的那一次仍会
+   * 带着结果回来，把刚清空的结果列表重新填上——下次呼出就会先看到上一轮残留。
+   * 递增 `searchSeq` 让 `doSearch` 尾部的一致性检查直接丢弃旧结果。
+   */
+  function cancelPendingSearch(): void {
+    searchSeq++;
+    debouncedSearch.cancel();
+  }
+
   /** 输入处理（还原油猴版 handler：编辑子关键词时不重搜，保住脚本视图） */
   function onInput(value: string): void {
     if (isSubKeywordEditing(value)) {
@@ -622,6 +635,7 @@ export function useSearchState() {
     // 搜索
     doSearch,
     debouncedSearch,
+    cancelPendingSearch,
     onInput,
     isSubKeywordEditing,
     parentKeywordOf,

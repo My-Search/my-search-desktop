@@ -438,10 +438,11 @@ check("角标可见（有实际尺寸）", badge.visible === true);
 check("角标有白色底板（仿 Windows 快捷方式角标）", badge.bgColor === "rgb(255, 255, 255)" && badge.bgImage === "none", `${badge.bgColor} / ${badge.bgImage}`);
 check("角标底板带 1px 浅灰描边", badge.borderWidth === "1px", badge.borderWidth);
 check("角标底板有圆角（Windows 是 2px 级小圆角）", badge.radius >= 1 && badge.radius <= 4, `${badge.radius}px`);
-// 尺寸按 Windows 比例：真实 .lnk 是 13/32 = 40.6%。给区间免得微调 1px 就红。
+// 尺寸：Windows 原版是 13/32 = 40.6%，2026-11 按用户要求再小一档（8/24 = 33.3%），
+// 给 30%~45% 的区间，微调 1px 不会红。
 check(
-  "角标尺寸符合 Windows 比例（图标宽度的 35%~50%）",
-  badge.ratio >= 0.35 && badge.ratio <= 0.5,
+  "角标尺寸符合「小一号」口径（图标宽度的 30%~45%）",
+  badge.ratio >= 0.3 && badge.ratio <= 0.45,
   `${(badge.ratio * 100).toFixed(1)}%`
 );
 check("角标图形为蓝色（Windows 快捷方式箭头色）", badge.glyphFill === "rgb(10, 133, 217)", badge.glyphFill);

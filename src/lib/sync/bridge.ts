@@ -241,7 +241,7 @@ function fallbackConfig(): SyncConfig {
     enabled: false,
     webdavUrl: "",
     webdavUser: "",
-    remoteFile: "my-search-backup.msbackup",
+    remoteFile: "my-search",
     conflict: "newer",
     autoOnChange: true,
     intervalMinutes: 30,
