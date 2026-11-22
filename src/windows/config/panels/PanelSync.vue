@@ -49,6 +49,7 @@ import {
   type CloudPluginContent,
   type CloudPluginContentEntry,
 } from "../../../lib/sync/cloud.ts";
+import { restorePluginFromCloud } from "../../../lib/sync/cloud-v3.ts";
 import { loadRegistry } from "../../../lib/plugins/registry.ts";
 import type { SyncRunState } from "../../../lib/sync/engine.ts";
 import type { UnlistenFn } from "../../../lib/tauri-bridge.ts";
@@ -218,7 +219,7 @@ function contentGroups(c: CloudPluginContent): ContentGroup[] {
   return all.filter((g) => g.entries.length > 0);
 }
 
-/** 手动拉取某个插件的数据分片（懒加载入口） */
+/** 手动拉取某个插件的数据分片（v2 懒加载入口） */
 async function downloadPluginData(id: string): Promise<void> {
   cloudDownloading.value = id;
   try {
@@ -232,6 +233,62 @@ async function downloadPluginData(id: string): Promise<void> {
     await loadCloudStats();
   } catch (e) {
     props.notify((e as Error)?.message ?? "下载失败", "error");
+  } finally {
+    cloudDownloading.value = "";
+  }
+}
+
+/**
+ * v3：把云端有、本机没装的插件装回来（主体 + 数据 + 图片）。
+ *
+ * 新设备首次「用云端」时同步内核会自动装回；这个按钮是给**已经在同步、
+ * 但某个插件被卸载/漏装**的情况兜底——那时自动装回会和「用户主动卸载」
+ * 混淆，只能由用户明确点一下。
+ */
+async function restorePluginData(id: string): Promise<void> {
+  cloudDownloading.value = id;
+  try {
+    const r = await restorePluginFromCloud(id);
+    if (r.status === "applied") props.notify(`已从云端恢复 ${id}`, "ok");
+    else if (r.status === "ready") props.notify(`${id} 本机已完整，无需恢复`, "ok");
+    else if (r.status === "disabled") props.notify("云同步未启用", "error");
+    else if (r.status === "missing") props.notify(r.message ?? "云端没有该插件的数据", "error");
+    else props.notify(r.message ?? "恢复失败", "error");
+    await loadCloudStats();
+  } catch (e) {
+    props.notify((e as Error)?.message ?? "恢复失败", "error");
+  } finally {
+    cloudDownloading.value = "";
+  }
+}
+
+/**
+ * v3：一键把「云端有、本机没装」的插件全部装回。
+ *
+ * 新设备首次「用云端」时同步内核会自动恢复；这个按钮给已经同步过、
+ * 但插件被漏装/卸载的设备兜底。整批只留一份「恢复前」快照。
+ */
+async function restoreAllAbsent(): Promise<void> {
+  const list = (cloudOverviewData.value?.plugins ?? [])
+    .filter((p) => p.absent)
+    .map((p) => p.id);
+  if (!list.length) return;
+  cloudDownloading.value = "*";
+  let done = 0;
+  const failed: string[] = [];
+  try {
+    for (let i = 0; i < list.length; i += 1) {
+      const r = await restorePluginFromCloud(list[i], { backup: i === 0, commit: false });
+      if (r.status === "applied" || r.status === "ready") done += 1;
+      else failed.push(`${list[i]}${r.message ? `（${r.message}）` : ""}`);
+    }
+    // 整批装完只 reload 一次插件，避免每个插件各打断一次正在用的视图
+    if (done > 0) await syncCommitApplied("cloud", "plugins");
+    if (failed.length) props.notify(`已恢复 ${done} 个，失败 ${failed.length} 个：${failed.join("；")}`, "error");
+    else props.notify(`已从云端恢复 ${done} 个插件`, "ok");
+    await loadCloudStats();
+  } catch (e) {
+    props.notify((e as Error)?.message ?? "恢复失败", "error");
   } finally {
     cloudDownloading.value = "";
   }
@@ -702,6 +759,14 @@ defineExpose({ refreshAfterRestore });
       <CfgHint
         text="v3 用 manifest-v3.json 作唯一提交点：core / 插件程序仍按摘要对象存放，插件数据拆成每文件对象，≤2KB 的文本内联，图片走内容寻址 blob。只传变了的文件；剪贴板只同步收藏/分类条目及其引用图片，普通历史留本机。旧 manifest.json 保持只读，回滚只需删掉 v3 提交点。单插件云端配额 200MB。「查看内容」直接列 manifest 里的文件/图片清单，不下载分片，只读。"
       />
+      <button
+        v-if="cloudOverviewData?.pendingCount"
+        class="cfg-btn ghost"
+        :disabled="cloudDownloading !== ''"
+        @click="restoreAllAbsent"
+      >
+        {{ cloudDownloading === '*' ? '恢复中…' : `恢复全部 ${cloudOverviewData.pendingCount} 个` }}
+      </button>
       <button class="cfg-btn ghost sync-cloud-refresh" :disabled="cloudLoading" @click="loadCloudStats">
         {{ cloudLoading ? '刷新中…' : '刷新' }}
       </button>
@@ -716,7 +781,7 @@ defineExpose({ refreshAfterRestore });
           · rev {{ cloudOverviewData.rev }} · 最近提交 {{ fmt(cloudOverviewData.updatedAt) }}
         </span>
         <span v-if="cloudOverviewData.pendingCount">
-          · {{ cloudOverviewData.pendingCount }} 个插件的数据待下载
+          · {{ cloudOverviewData.format === 3 ? `${cloudOverviewData.pendingCount} 个插件仅存于云端，可恢复到本机` : `${cloudOverviewData.pendingCount} 个插件的数据待下载` }}
         </span>
       </p>
       <div v-if="cloudOverviewData.plugins.length" class="sync-cloud-list">
@@ -740,9 +805,11 @@ defineExpose({ refreshAfterRestore });
             <span class="sync-cloud-size">{{ fmtSize(p.cloudBytes) }}</span>
             <span class="sync-cloud-local">{{ fmtSize(p.localBytes) }}</span>
             <span class="sync-cloud-quota">{{ fmtSize(p.remainingBytes) }}</span>
-            <span class="sync-cloud-status" :class="{ pending: p.pendingData }">
-              <span class="sync-cloud-status-main">{{ p.pendingData ? '数据待下载' : '已同步' }}</span>
-              <span v-if="!p.pendingData && cloudOverviewData.format === 3" class="sync-cloud-status-sub">
+            <span class="sync-cloud-status" :class="{ pending: p.pendingData || p.absent }">
+              <span class="sync-cloud-status-main">
+                {{ p.pendingData ? '数据待下载' : (p.absent ? '本机未安装' : '已同步') }}
+              </span>
+              <span v-if="cloudOverviewData.format === 3" class="sync-cloud-status-sub">
                 {{ p.fileCount ?? 0 }} 文件<template v-if="p.blobCount"> / {{ p.blobCount }} 图片</template>
               </span>
             </span>
@@ -753,10 +820,18 @@ defineExpose({ refreshAfterRestore });
               <button
                 v-if="p.pendingData"
                 class="cfg-btn ghost"
-                :disabled="cloudDownloading === p.id"
+                :disabled="cloudDownloading !== ''"
                 @click="downloadPluginData(p.id)"
               >
                 {{ cloudDownloading === p.id ? '下载中…' : '下载数据' }}
+              </button>
+              <button
+                v-else-if="p.absent"
+                class="cfg-btn ghost"
+                :disabled="cloudDownloading !== ''"
+                @click="restorePluginData(p.id)"
+              >
+                {{ cloudDownloading === p.id ? '恢复中…' : '恢复到本机' }}
               </button>
             </span>
           </div>

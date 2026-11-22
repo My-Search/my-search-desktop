@@ -89,6 +89,9 @@ pub struct SyncState {
     /// v3：每文件同步基线（远端 manifest 对齐后的摘要集合）
     /// `{"core":"...","plugins":{"<id>":{"body":"...","state":{...},"files":{path:digest},"blobs":{path:digest}}}}`
     pub v3: Value,
+    /// v3：本机发起、还没写进云端的「删除插件」待办
+    /// `{"<id>":{"at":ms}}` —— 卸载时离线/未开启同步也不会丢，下一轮成功提交后清空
+    pub pending_plugin_deletes: Value,
 }
 
 impl Default for SyncState {
@@ -110,6 +113,7 @@ impl Default for SyncState {
             pending: Value::Null,
             conflicts: Value::Null,
             v3: Value::Null,
+            pending_plugin_deletes: Value::Null,
         }
     }
 }
@@ -347,6 +351,11 @@ pub fn sync_state_patch(app: AppHandle, patch: Value) -> Result<SyncState, Strin
                 "v3" => {
                     if value.is_object() || value.is_null() {
                         s.v3 = value.clone();
+                    }
+                }
+                "pendingPluginDeletes" => {
+                    if value.is_object() || value.is_null() {
+                        s.pending_plugin_deletes = value.clone();
                     }
                 }
                 _ => {}

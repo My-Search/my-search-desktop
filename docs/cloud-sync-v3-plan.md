@@ -394,7 +394,7 @@ v3 每一轮会顺带检查旧客户端是否在 v3 之后又提交过 v2，若�
 
 **P0 实施记录（已完成，2026-11-20）**
 
-- `src/lib/sync/scope.ts`：`account / device / never` 三档；设备级含 `RECENT_ATTACH_KEY`、`auto_download_update`、`PLUGIN_DATA:*:viewSize`；**注册表按记录处理**——`source.dev === true` 的开发挂载记录上传前改写为普通安装副本（`dir=plugins/<id>`、`source.kind=file`），插件文件仍随 body 片同步；还原时同 id 用本机 dev 记录覆盖，新设备则拿到可运行副本。对应 `PLUGIN_DATA:*` 按设备数据、不跨机。
+- `src/lib/sync/scope.ts`：`account / device / never` 三档；设备级含 `RECENT_ATTACH_KEY`、`auto_download_update`、`PLUGIN_DATA:*:viewSize`；**注册表按记录处理**——`source.dev === true` 的开发挂载记录上传前改写为普通安装副本（`dir=plugins/<id>`、`source.kind=file`），插件文件仍随 body 片同步；还原时同 id 用本机 dev 记录覆盖，新设备则拿到可运行副本。对应 `PLUGIN_DATA:*` 按设备数据、不跨机。另：插件记录的 `enabled`（暂停使用）是设备开关，上传前剔除、还原时用本机值补回（缺失默认使用中），避免一台机器暂停把所有设备停掉。
 - `src/lib/sync/snapshot.ts`：采集/还原/修剪统一走 `scopeOfKey`，不再维护第二套黑名单；`shouldSyncKey` 委托给作用域模块。
 - `src-tauri/src/credential_store.rs`：Windows 用 `CryptProtectData`（`CRYPTPROTECT_UI_FORBIDDEN` + 固定熵）；文件格式 `{v:2,cipher:"dpapi",data}`；旧 `{password}` 首次读取自动升级；Unix 保持 0600 明文回退。DPAPI 往返单测已过。
 - `src-tauri/src/lib.rs`：`autostart_enabled` 移出 `BACKUP_SETTINGS_KEYS`（设备专属），旧归档即使带该键也不写、不应用；单测改口径。
@@ -451,8 +451,25 @@ leaves / 行级 diff / tombstone / CDC 留结构后置。这样先把**真实痛
   `node test/sync-scope.test.mjs`（54）、`node test/sync-snapshot.test.mjs`（27）、
   `cargo test --lib`（191 通过 / 6 ignored）。
 
-**本轮明确没做**：多 leaf 合并与 diff UI、tombstone 删除传播、CDC 大文件分块、
-按插件懒下载、云端孤儿对象 GC、macOS Keychain / Linux Secret Service。
+**后续修复（2026-11-22）**：`runV3Round` 原先对「本机没装」的云端插件无条件跳过下载，
+首次连接选「用云端」也只拉 core、却把全部远端摘要写进基线——新设备因此永远停在
+「云端有、本机 0 B、状态已同步」，重启也不会重试。现在首次连接或本轮明确裁决为远端时，
+按「主体 → 状态 → 文件 → 图片」整份装回（多个插件合并成一次 reload、整批只留一份
+`pre-remote` 快照；主体落地后才下载 `itemized` 虚拟条目）；稳态下仍不自动装回（尊重
+主动卸载），面板标「本机未安装」并提供单插件 / 「恢复全部 N 个」。测试 41 → 58 条。
+
+**卸载清理云端（2026-11-22）**：卸载只删本机、v3 清单条目仍留着，是「卸了又回来」的根因。
+现在勾选「清理数据」卸载时，`removePluginFromCloud` 删除清单条目并写墓碑 `deleted[id] =
+{at, by, body}`，同时摘掉本机基线；墓碑让仍装着旧副本的设备**不能**把插件重新推上云，
+只有卸载后重装（注册表 `installedAt > at`）才解除墓碑、按新插件全量上传。云同步关闭 /
+离线 / 412 冲突时删除请求落到 `pendingPluginDeletes`，下一轮同步提交成功后清空；待办带
+`target` 指纹，换过 WebDAV 目标就丢弃，避免误删新目标。选择不物理删 shard：墓碑已阻断
+复活，孤儿对象留给 P2 GC。测试 58 → 84 条（含离线待办、老副本不复活、重装解除墓碑、
+删除待办未执行时重装取消删除）。
+
+**本轮明确没做**：多 leaf 合并与 diff UI、把卸载传播到其它设备本机（只阻断复活，不远程删
+别人还在用的插件）、CDC 大文件分块、按插件懒下载、云端孤儿对象 GC、macOS Keychain /
+Linux Secret Service。
 这些不影响 P1-mini 的正确性；等真实多设备并发或对象数上来再补，避免提前背复杂度。
 
 ### P2 细粒度与治理（4–6 天）

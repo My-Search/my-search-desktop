@@ -601,7 +601,7 @@ export function usePluginViewHost(opts: PluginViewHostOptions) {
     if (!pluginId) return { ok: false, error: "不是插件数据项" };
     const record = opts.getRecord(pluginId);
     if (!record) return { ok: false, error: "插件不存在（可能已卸载）" };
-    if (!record.enabled) return { ok: false, error: "插件已禁用" };
+    if (!record.enabled) return { ok: false, error: "插件已暂停使用" };
 
     // 云同步 v2：该插件的「数据分片」若还在云端（懒下载），打开时后台拉一次。
     // 不阻塞打开：先按本机现有数据渲染，拉完由 `sync://applied` 统一重载。
@@ -1141,7 +1141,7 @@ export function usePluginViewHost(opts: PluginViewHostOptions) {
     for (const id of [...sessions.keys()]) {
       const rec = opts.getRecord(id);
       if (!rec || !rec.enabled) {
-        if (release(id, rec ? "插件已禁用" : "插件已卸载")) n++;
+        if (release(id, rec ? "插件已暂停使用" : "插件已卸载")) n++;
       }
     }
     return n;

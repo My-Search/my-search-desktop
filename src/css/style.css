@@ -4166,6 +4166,7 @@ html.theme-dark #ms-config-view .btn-warn:hover {
 
 #ms-config-view .plugin-detail-actions {
   display: flex;
+  align-items: center;
   gap: 8px;
   margin-top: 4px;
 }

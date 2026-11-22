@@ -563,10 +563,15 @@ function onInstallAutoUpdateChange(val: boolean): void {
   installDialogAutoUpdateCb?.(val);
 }
 
-// ===================== 启用/禁用/卸载 =====================
+// ===================== 暂停使用 / 卸载 =====================
 async function toggleEnabled(rec: any): Promise<void> {
   await rt.setEnabled(rec.id, !rec.enabled);
-  props.notify(rec.enabled ? `${rec.name} 已启用` : `${rec.name} 已禁用`, "ok");
+  props.notify(
+    rec.enabled
+      ? `${rec.name} 已恢复使用（仅本机生效）`
+      : `${rec.name} 已暂停使用：云端与本地数据保留，其它设备不受影响`,
+    "ok"
+  );
 }
 
 /** 插件是否正在后台运行（卸载弹窗里提示「将自动停止进程」用） */
@@ -609,6 +614,15 @@ async function confirmUninstall(): Promise<void> {
   const deleteData = clearDataChecked.value;
   closeUninstallDialog();
 
+  const cloudNote = (c?: { status: string; message?: string }): string => {
+    if (!c) return "";
+    if (c.status === "deleted") return "，云端数据已删除";
+    if (c.status === "queued") return `，云端删除已记为待办${c.message ? `（${c.message}）` : ""}`;
+    if (c.status === "missing") return "，云端没有该插件的数据";
+    if (c.status === "error") return `，云端删除失败：${c.message ?? "下次同步会重试"}`;
+    return "";
+  };
+
   if (isBuiltin(rec.id)) {
     uninstallingId.value = rec.id;
     try {
@@ -627,9 +641,12 @@ async function confirmUninstall(): Promise<void> {
 
   uninstallingId.value = rec.id;
   try {
-    await rt.uninstall(rec.id, deleteData);
+    const r = await rt.uninstall(rec.id, deleteData);
     forgetIconCache(rec.id);
-    props.notify(`已卸载 ${rec.name}${deleteData ? "（含数据已清理）" : ""}`, "ok");
+    props.notify(
+      `已卸载 ${rec.name}${deleteData ? "（含数据已清理）" : ""}${deleteData ? cloudNote(r?.cloud) : ""}`,
+      "ok"
+    );
   } catch (e) {
     props.notify(`卸载失败: ${String((e as Error)?.message ?? e)}`, "error");
   } finally {
@@ -813,13 +830,13 @@ async function installDevDir(): Promise<void> {
  * 打开插件市场界面（工具栏「从插件市场安装」）。
  *
  * 市场界面在主搜索窗口里渲染：Rust 侧收起设置窗口、呼出主窗口并广播事件，
- * 由那边的既有路径打开详情视图。这里只多做一道「已禁用」的前置提示——
- * 禁用时主窗口只会弹一个 toast 而设置窗口已经收起，用户会觉得「点了没反应」。
+ * 由那边的既有路径打开详情视图。这里只多做一道「已暂停」的前置提示——
+ * 暂停时主窗口只会弹一个 toast 而设置窗口已经收起，用户会觉得「点了没反应」。
  */
 async function openMarket(): Promise<void> {
   const rec = rt.get(MARKET_PLUGIN_ID);
   if (rec && !rec.enabled) {
-    props.notify(`「${rec.name}」已禁用，请先启用后再打开插件市场`, "error");
+    props.notify(`「${rec.name}」已暂停使用，请先恢复使用后再打开插件市场`, "error");
     return;
   }
   try {
@@ -1093,11 +1110,6 @@ function durFrom(ts: number | null): string {
         </div>
 
         <div v-if="expanded[record.id]" class="plugin-detail">
-          <div class="plugin-info-row">
-            <span class="plugin-info-label">状态</span>
-            <label class="switch" :class="{ on: record.enabled }" @click.stop><input type="checkbox" :checked="record.enabled" @change="toggleEnabled(record)" /><span class="switch-track"><span class="switch-thumb"></span></span></label>
-            <span>{{ record.enabled ? '已启用' : '已禁用' }}</span>
-          </div>
           <div class="plugin-info-row"><span class="plugin-info-label">ID</span><code>{{ record.id }}</code></div>
           <div class="plugin-info-row" v-if="homepageOf(record)"><span class="plugin-info-label">首页</span><a :href="homepageOf(record)" target="_blank">{{ homepageOf(record) }}</a></div>
 
@@ -1273,8 +1285,19 @@ function durFrom(ts: number | null): string {
             </div>
           </div>
 
-          <!-- 操作 -->
+          <!-- 操作：最左是「暂停使用」开关（无文字，悬停看 title） -->
           <div class="plugin-detail-actions">
+            <label
+              class="switch"
+              :class="{ on: record.enabled }"
+              :title="record.enabled
+                ? '暂停使用：仅本机停止，保留云端/本地数据，不影响其它设备'
+                : '恢复使用：仅本机生效'"
+              @click.stop
+            >
+              <input type="checkbox" :checked="record.enabled" @change="toggleEnabled(record)" />
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+            </label>
             <button class="btn-sm" @click.stop="showLog(record)">日志</button>
             <button
               class="btn-sm btn-warn"
@@ -1368,7 +1391,18 @@ function durFrom(ts: number | null): string {
         </p>
         <label style="display: flex; align-items: flex-start; gap: 8px; font-size: 13px; line-height: 1.5; color: var(--text); cursor: pointer; user-select: none;">
           <input type="checkbox" v-model="clearDataChecked" style="margin-top: 2px; width: 15px; height: 15px; cursor: pointer;" />
-          <span style="color: #e03131;">将数据清理</span>
+          <span>
+            <span style="color: #e03131;">{{
+              uninstallTarget && isBuiltin(uninstallTarget.id)
+                ? '将插件数据清理'
+                : '将本地与云端数据一起清理'
+            }}</span>
+            <span style="display: block; font-size: 12px; color: var(--muted);">{{
+              uninstallTarget && isBuiltin(uninstallTarget.id)
+                ? '清理后升级不再自动安装。'
+                : '清理后下次同步不会自动装回；想再使用需重新安装。'
+            }}</span>
+          </span>
         </label>
         <div class="plugin-install-actions">
           <button class="cfg-btn ghost" @click="closeUninstallDialog">取消</button>

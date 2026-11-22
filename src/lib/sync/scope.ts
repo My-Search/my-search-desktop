@@ -154,14 +154,24 @@ export function normalizeDevicePluginRecord(rec: unknown): unknown {
   };
 }
 
-/** 上传/备份用：设备专属记录改写为普通安装副本（没有 dev 记录时原样返回） */
+/**
+ * 上传/备份用：设备专属记录改写为普通安装副本，并去掉「仅本机生效」的用户态。
+ *
+ * `enabled` 在本产品里是**暂停使用**（本机开关）：停掉前台/后台，但不删数据、
+ * 不影响云端；因此它绝不能跟着注册表跨设备走，否则 A 暂停一下，B 也跟着停。
+ */
 export function registryForSync<T>(registry: T): T {
   if (!registry || typeof registry !== "object") return registry;
   const plugins = (registry as { plugins?: unknown }).plugins;
   if (!Array.isArray(plugins)) return registry;
   let changed = false;
   const normalized = plugins.map((rec) => {
-    const next = normalizeDevicePluginRecord(rec);
+    let next = normalizeDevicePluginRecord(rec);
+    if (next && typeof next === "object" && "enabled" in (next as object)) {
+      next = { ...(next as object) };
+      delete (next as { enabled?: unknown }).enabled;
+      changed = true;
+    }
     if (next !== rec) changed = true;
     return next;
   });
@@ -170,10 +180,12 @@ export function registryForSync<T>(registry: T): T {
 }
 
 /**
- * 还原用：以云端注册表为底，把**本机**的 dev 记录合并回去。
+ * 还原用：以云端注册表为底，把**本机**的 dev 记录与暂停状态合并回去。
  *
- * 同时清掉云端可能残留的 dev 记录（旧版本客户端没有过滤规则时会上传它们）。
- * 同 id 时保留本机记录：路径只有本机才是对的。
+ * - dev 记录：路径只有本机才是对的，同 id 时本机优先；云端可能残留旧客户端
+ *   上传的 dev 记录，一律丢弃。
+ * - `enabled`（暂停使用）：只在本机生效，云端记录不带它；有本机记录就沿用本机
+ *   开关，没有（新设备首次还原）默认使用中。
  */
 export function registryWithLocalDevicePlugins<T>(remote: T, local: unknown): T {
   if (!remote || typeof remote !== "object") return remote;
@@ -181,13 +193,16 @@ export function registryWithLocalDevicePlugins<T>(remote: T, local: unknown): T 
   if (!Array.isArray(remotePlugins)) return remote;
 
   const localDev = new Map<string, unknown>();
+  const localById = new Map<string, Record<string, unknown>>();
   if (local && typeof local === "object") {
     const lp = (local as { plugins?: unknown }).plugins;
     if (Array.isArray(lp)) {
       for (const rec of lp) {
-        if (!isDevicePluginRecord(rec)) continue;
+        if (!rec || typeof rec !== "object") continue;
         const id = (rec as { id?: unknown }).id;
-        if (typeof id === "string" && id) localDev.set(id, rec);
+        if (typeof id !== "string" || !id) continue;
+        localById.set(id, rec as Record<string, unknown>);
+        if (isDevicePluginRecord(rec)) localDev.set(id, rec);
       }
     }
   }
@@ -203,8 +218,16 @@ export function registryWithLocalDevicePlugins<T>(remote: T, local: unknown): T 
       seen.add(id);
       continue;
     }
+    if (typeof id === "string" && id) {
+      // 暂停状态只属于本机：云端记录不带 enabled，这里用本机值补上；
+      // 新设备还没有这条记录时默认「使用中」，而不是默认暂停。
+      const localRec = localById.get(id);
+      const enabled = typeof localRec?.enabled === "boolean" ? localRec.enabled : true;
+      merged.push({ ...(rec as object), enabled });
+      seen.add(id);
+      continue;
+    }
     merged.push(rec);
-    if (typeof id === "string") seen.add(id);
   }
   for (const [id, rec] of localDev) {
     if (!seen.has(id)) merged.push(rec);

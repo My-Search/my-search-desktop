@@ -1201,6 +1201,10 @@ export async function cloudPluginContents(pluginId: string): Promise<CloudPlugin
   /** v3：文件对象数 / blob 数 */
   fileCount?: number;
   blobCount?: number;
+  /** v3：本机是否真的装了（`undefined` = 本机摘要读不到，状态未知） */
+  installed?: boolean;
+  /** v3：云端有内容、本机没装（面板显示「本机未安装」，可「恢复到本机」） */
+  absent?: boolean;
 }
 
 export interface CloudOverview {
@@ -1243,8 +1247,13 @@ export async function cloudOverview(): Promise<CloudOverview> {
       const dataBytes = fileBytes + blobBytes;
       const cloudBytes = bodyBytes + dataBytes;
       totalBytes += cloudBytes;
+      const local = digests?.plugins[id];
       const localBytes =
-        (digests?.plugins[id]?.body.bytes ?? 0) + (digests?.plugins[id]?.data.bytes ?? 0);
+        (local?.body.bytes ?? 0) + (local?.data.bytes ?? 0);
+      // 「装了」以主体为准：只有 plugin-data 目录（卸载残留）不算能运行的安装。
+      // `digests` 读不到（null）时保持 undefined，不能误报成「未安装」。
+      const installed = digests ? (local?.body.files ?? 0) > 0 : undefined;
+      const absent = installed === false && cloudBytes > 0;
       plugins.push({
         id,
         cloudBytes,
@@ -1256,9 +1265,12 @@ export async function cloudOverview(): Promise<CloudOverview> {
         dataBytes,
         fileCount: Object.keys(ref?.files ?? {}).length,
         blobCount: Object.keys(ref?.blobs ?? {}).length,
+        installed,
+        absent,
       });
     }
     plugins.sort((a, b) => b.cloudBytes - a.cloudBytes);
+    const absentCount = plugins.filter((p) => p.absent).length;
     return {
       enabled: !!config.enabled,
       manifestExists: true,
@@ -1268,7 +1280,7 @@ export async function cloudOverview(): Promise<CloudOverview> {
       updatedBy: m.updatedBy ?? "",
       totalBytes,
       plugins,
-      pendingCount: 0,
+      pendingCount: absentCount,
       quotaBytes: quota.pluginBytes,
     };
   }

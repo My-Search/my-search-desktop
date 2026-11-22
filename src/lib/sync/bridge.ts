@@ -90,6 +90,13 @@ export interface SyncPersistedState {
   conflicts?: SyncConflictShard[] | null;
   /** v3：每文件同步基线（远端 manifest 对齐后的摘要集合） */
   v3?: V3Baseline | null;
+  /**
+   * v3：本机发起、还没写进云端的「删除插件」待办。
+   *
+   * 卸载时即使离线 / 云同步没开也不会丢，下一轮同步成功提交后清空。
+   * 与 `v3` 分开存是为了**不会被同步轮次的基线写回覆盖**。
+   */
+  pendingPluginDeletes?: Record<string, { at: number; target?: string }> | null;
 }
 
 /** v3 单插件基线 */
@@ -159,6 +166,7 @@ export async function syncStatePatch(
     pending?: Record<string, string> | null;
     conflicts?: SyncConflictShard[] | null;
     v3?: V3Baseline | null;
+    pendingPluginDeletes?: Record<string, { at: number; target?: string }> | null;
   }
 ): Promise<SyncPersistedState> {
   if (!isTauri) return fallbackState();
@@ -402,6 +410,22 @@ export interface V3PluginManifest {
   blobs?: Record<string, V3BlobRef>;
 }
 
+/**
+ * 「云端已删除」的墓碑。
+ *
+ * 卸载时删除 manifest 条目并留下墓碑：其它仍装着旧副本的设备**不能**
+ * 再把它推回云端（否则新设备一同步就又装回来了）。只有「卸载之后重新安装」
+ * （注册表 `installedAt` 晚于 `at`）才允许解除墓碑、按新插件重新上云。
+ */
+export interface V3Tombstone {
+  /** 删除时间（毫秒） */
+  at: number;
+  /** 哪台设备删的（诊断用） */
+  by?: string;
+  /** 删除前的插件主体摘要（只用于诊断/日志） */
+  body?: string;
+}
+
 export interface CloudManifestV3 {
   schema: "ms.cloud/3";
   rev: number;
@@ -411,6 +435,8 @@ export interface CloudManifestV3 {
   devices?: Record<string, CloudDeviceInfo>;
   core?: CloudShardRef;
   plugins: Record<string, V3PluginManifest>;
+  /** 已从云端删除的插件（墓碑） */
+  deleted?: Record<string, V3Tombstone>;
   /** v2 迁移时留下的旧提交点信息（只用于提示/回滚，不参与同步） */
   legacyV2?: { rev: number; etag?: string; updatedAt?: number; migratedAt: number } | null;
 }

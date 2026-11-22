@@ -115,7 +115,13 @@ export interface PluginRecord {
   source: PluginSource;
   installedAt: number;
   updatedAt: number;
-  /** 插件总开关（关闭 = 不加载视图、不提供搜索项、后台进程停止） */
+  /**
+   * 暂停使用（本机开关，关闭 = 不加载视图、不提供搜索项、后台进程停止）。
+   *
+   * **不参与云同步**：它表示「这台机器先不用」，不代表卸载。数据照常同步，
+   * 其它设备的开关也不受影响（上传时由 `registryForSync` 去掉，还原时由
+   * `registryWithLocalDevicePlugins` 用本机值补回）。
+   */
   enabled: boolean;
   /** 用户在面板上选择的后台启动策略 */
   autoStart: AutoStartMode;
@@ -501,6 +507,8 @@ export function createPluginRecord(input: {
  */
 function hydrateRecord(rec: PluginRecord): PluginRecord {
   let out = rec;
+  // 云端的注册表记录不带「暂停使用」（设备专属）；缺失时按使用中处理
+  if (typeof out.enabled !== "boolean") out = { ...out, enabled: true };
   if (out.closeBehavior !== "minimize" && out.closeBehavior !== "exit") {
     out = { ...out, closeBehavior: behaviorSuggestionOf(out.manifest).closeBehavior };
   }

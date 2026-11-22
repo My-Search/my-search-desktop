@@ -39,6 +39,7 @@ import { parsePluginManifest, type PluginManifest } from "../../lib/plugins/mani
 import { isKnownPermission } from "../../lib/plugins/permissions.ts";
 import { isFreshEvent, planReload } from "../../lib/plugins/dev-reload.ts";
 import { markPluginFrontendRestart } from "../../lib/plugins/restart.ts";
+import { removePluginFromCloud } from "../../lib/sync/cloud-v3.ts";
 import {
   createPluginRecord,
   findPlugin,
@@ -312,10 +313,20 @@ export function usePluginRuntime() {
     }
   }
 
-  /** 卸载（deleteData 为 true 时同时清掉插件私有数据） */
-  async function uninstall(pluginId: string, deleteData = false): Promise<void> {
+  /**
+   * 卸载（deleteData 为 true 时同时清掉插件私有数据与云端那份）。
+   *
+   * 云端清理只在「彻底清数据」时做：勾了「将插件清理，后续不打算再安装」，
+   * 就应该连云端一起删，否则下次同步（或换台设备）又把它装回来。
+   * 返回云端清理结果，面板据此提示「已清理」/「已记为待办」。
+   */
+  async function uninstall(
+    pluginId: string,
+    deleteData = false
+  ): Promise<{ cloud?: { status: string; message?: string } }> {
     const rec = get(pluginId);
-    if (!rec) return;
+    if (!rec) return {};
+    const result: { cloud?: { status: string; message?: string } } = {};
     busy.value = true;
     try {
       // 先停进程再删文件，避免进程持有文件句柄（Windows 上会删不掉）
@@ -352,6 +363,16 @@ export function usePluginRuntime() {
       removePlugin(registry, pluginId);
       persist();
       delete backends[pluginId];
+      // 彻底卸载：云端清单条目也要删，否则别的设备/新设备同步时又装回来
+      if (deleteData && rec.source.kind !== "builtin") {
+        try {
+          const cloud = await removePluginFromCloud(pluginId);
+          result.cloud = { status: cloud.status, message: cloud.message };
+        } catch (e) {
+          console.warn("[插件] 清理云端插件失败:", e);
+          result.cloud = { status: "error", message: String((e as Error)?.message ?? e) };
+        }
+      }
       // 卸载可能带走了某个快捷键作用类型（如「截图」）：立刻下发可用动作，
       // 让宿主移除它的绑定并注销热键（卸载没有 reconcile，不能省这一步）。
       try {
@@ -359,6 +380,7 @@ export function usePluginRuntime() {
       } catch (e) {
         console.warn("[插件] 快捷键动作同步失败:", e);
       }
+      return result;
     } finally {
       busy.value = false;
     }
@@ -368,13 +390,19 @@ export function usePluginRuntime() {
    * 开关与自启动
    * ============================================================ */
 
-  /** 启用 / 禁用插件 */
+  /**
+   * 暂停 / 恢复使用（仅本机生效）。
+   *
+   * 暂停不会删任何数据，也不影响云端；插件目录与 `PLUGIN_DATA:*` 照常参与同步，
+   * 只是这台机器不再加载视图、不再提供搜索项、后台进程立即停止。
+   * 开关状态由 `registryForSync` 从云端注册表里剔除，所以不会传到别的设备。
+   */
   async function setEnabled(pluginId: string, enabled: boolean): Promise<void> {
     const rec = get(pluginId);
     if (!rec) return;
     rec.enabled = enabled;
-    // 禁用时收掉权限？不：Android 语义里禁用不改授权，重新启用不该再弹一遍授权。
-    // 但后台进程必须立刻停（reconcile 里 enabled=false → Rust 停止进程）。
+    // 暂停不撤销授权：恢复使用不该再弹一遍权限确认。
+    // 后台进程由 reconcile 处理（enabled=false → Rust 停止进程）。
     persist();
     await reconcile(pluginId);
   }

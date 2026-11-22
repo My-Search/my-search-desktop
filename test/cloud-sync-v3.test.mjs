@@ -244,6 +244,197 @@ s = await cloud.runCloudRound(opts(), "test-legacy-warning");
 ok("旧客户端写过 v2 时持续给警告", String(s.lastError || "").includes("旧客户端"));
 eq("警告不影响同步状态", s.status, "idle");
 
+/* ===================== 8) 新设备首次连接选「用云端」→ 插件必须装回来 ===================== */
+// 先在一台「旧设备」上把云端建立起来（含剪贴板主体/文件/图片）
+reset();
+await cloud.runCloudRound(opts(), "seed-cloud-for-new-device");
+const seededManifest = __cloud.v3.manifest;
+const seededObjects = new Map(__cloud.v3.objects);
+ok("云端已有剪贴板主体", !!seededManifest?.plugins?.["com.mysearch.clipboard"]?.body?.digest);
+
+// 换成全新设备：只有本机设置，一个插件都没装（这正是「装了主体软件、还没同步过」）
+__cloud.state = {
+  deviceId: "dev-new",
+  deviceName: "新设备",
+  target: "",
+  initialized: false,
+  remoteRev: "",
+  remoteEtag: "",
+  lastLocalDigest: "",
+  lastSyncAt: 0,
+  appliedRev: "",
+  epoch: 1,
+  cloudFormat: 3,
+  manifestEtag: "",
+  shards: null,
+  pending: null,
+  conflicts: null,
+  v3: null,
+};
+__cloud.local = { core: { theme: "light" }, pluginLs: {}, bodyFiles: {}, dataFiles: {}, settings: { a: 1 } };
+__cloud.v3.local = { core: {}, plugins: {} };
+__cloud.v3.manifest = seededManifest;
+__cloud.v3.objects = seededObjects;
+__cloud.v3.puts = [];
+__cloud.v3.gets = [];
+__cloud.v3.applied = [];
+__cloud.puts = [];
+__cloud.gets = [];
+
+s = await cloud.runCloudRound(opts({ choice: "remote" }), "new-device-first-connect");
+eq("新设备选「用云端」后 idle", s.status, "idle");
+eq("插件主体已装回本机", __cloud.local.bodyFiles["com.mysearch.clipboard"], 3);
+ok(
+  "插件文件已下回本机",
+  __cloud.v3.local.plugins["com.mysearch.clipboard"]?.files?.["clipboard/items/a.json"] !== undefined
+);
+ok(
+  "插件图片已下回本机",
+  __cloud.v3.local.plugins["com.mysearch.clipboard"]?.blobs?.["clipboard/a.png"] === "png-a"
+);
+eq("新设备已建立同步基线", __cloud.state.initialized, true);
+eq(
+  "基线指向云端摘要",
+  __cloud.state.v3?.plugins?.["com.mysearch.clipboard"]?.body,
+  seededManifest.plugins["com.mysearch.clipboard"].body.digest
+);
+
+/* ===================== 9) 稳态缺插件不自动装回（尊重主动卸载），可手动恢复 ===================== */
+delete __cloud.local.bodyFiles["com.mysearch.clipboard"];
+delete __cloud.v3.local.plugins["com.mysearch.clipboard"];
+__cloud.v3.gets = [];
+s = await cloud.runCloudRound(opts(), "steady-absent-plugin");
+eq("稳态下缺插件不自动装回", __cloud.v3.gets.length, 0);
+eq("稳态缺插件仍是 idle", s.status, "idle");
+
+const restored = await v3.restorePluginFromCloud("com.mysearch.clipboard");
+eq("「恢复到本机」返回 applied", restored.status, "applied");
+eq("恢复后主体已装回", __cloud.local.bodyFiles["com.mysearch.clipboard"], 3);
+ok(
+  "恢复后文件已落地",
+  __cloud.v3.local.plugins["com.mysearch.clipboard"]?.files?.["kv/annotations.json"] !== undefined
+);
+ok(
+  "恢复后图片已落地",
+  __cloud.v3.local.plugins["com.mysearch.clipboard"]?.blobs?.["clipboard/a.png"] === "png-a"
+);
+const restoredAgain = await v3.restorePluginFromCloud("com.mysearch.clipboard");
+eq("本机已完整时返回 ready（不重复下载）", restoredAgain.status, "ready");
+
+/* ===================== 10) 面板统计：云端有、本机没装 → 「本机未安装」 ===================== */
+// 复用第 8 节的云端种子：清空本机插件，模拟「已经同步过、但插件被漏装」的设备
+__cloud.config.cloudFormat = 3;
+__cloud.local.bodyFiles = {};
+__cloud.v3.local.plugins = {};
+const overview = await cloud.cloudOverview();
+const row = overview.plugins.find((p) => p.id === "com.mysearch.clipboard");
+ok("面板仍能看到云端插件", !!row);
+eq("面板标出本机未安装", row?.absent, true);
+eq("面板据此统计待恢复数量", overview.pendingCount, 1);
+
+/* ===================== 11) 卸载 → 云端删除 + 墓碑，别的设备不能复活 ===================== */
+/** 给本模块装一个最小 localStorage（只有注册表），用于 installedAt 判重装 */
+function setRegistry(plugins) {
+  const key = "my-search-desktop:PLUGIN_REGISTRY_CACHE_KEY";
+  const data = JSON.stringify({ version: 1, plugins });
+  globalThis.localStorage = {
+    getItem: (k) => (k === key ? data : null),
+    setItem: () => undefined,
+    removeItem: () => undefined,
+  };
+}
+
+reset();
+await cloud.runCloudRound(opts(), "seed-before-uninstall");
+eq("卸载前云端有剪贴板", !!__cloud.v3.manifest.plugins["com.mysearch.clipboard"], true);
+
+const removed = await v3.removePluginFromCloud("com.mysearch.clipboard");
+eq("卸载清理云端返回 deleted", removed.status, "deleted");
+eq("云端条目已删除", __cloud.v3.manifest.plugins["com.mysearch.clipboard"], undefined);
+ok("云端留下墓碑", (__cloud.v3.manifest.deleted?.["com.mysearch.clipboard"]?.at ?? 0) > 0);
+eq("本机基线已摘掉", __cloud.state.v3?.plugins?.["com.mysearch.clipboard"], undefined);
+eq("删除成功不留下待办", __cloud.state.pendingPluginDeletes ?? null, null);
+
+// 另一台设备还装着「卸载前的老副本」：下一轮绝不能把它重新推回云端
+const tombAt = __cloud.v3.manifest.deleted["com.mysearch.clipboard"].at;
+setRegistry([
+  { id: "com.mysearch.clipboard", name: "剪贴板", installedAt: tombAt - 1000, dir: "C:\\plugins\\clipboard" },
+]);
+const putsBeforeTombstone = __cloud.v3.puts.length;
+s = await cloud.runCloudRound(opts(), "old-copy-must-not-revive");
+eq("老副本同步仍 idle", s.status, "idle");
+eq("老副本没有被重新上云", __cloud.v3.manifest.plugins["com.mysearch.clipboard"], undefined);
+eq("老副本没有产生上传", __cloud.v3.puts.length, putsBeforeTombstone);
+ok("墓碑仍在", !!__cloud.v3.manifest.deleted?.["com.mysearch.clipboard"]);
+
+// 卸载之后重新安装（installedAt 晚于墓碑）→ 解除墓碑，按新插件重新上传
+setRegistry([
+  { id: "com.mysearch.clipboard", name: "剪贴板", installedAt: tombAt + 1000, dir: "C:\\plugins\\clipboard" },
+]);
+s = await cloud.runCloudRound(opts(), "reinstall-after-uninstall");
+eq("重装后同步 idle", s.status, "idle");
+ok("重装后重新上云", !!__cloud.v3.manifest.plugins["com.mysearch.clipboard"]);
+eq("重装后墓碑解除", __cloud.v3.manifest.deleted?.["com.mysearch.clipboard"], undefined);
+
+/* ===================== 12) 离线卸载 → 待办，下一轮补删 ===================== */
+reset();
+await cloud.runCloudRound(opts(), "seed-before-offline-uninstall");
+// 本机这份是「很久以前装的」，删除待办的时间晚于它 → 应当执行删除
+setRegistry([
+  { id: "com.mysearch.clipboard", name: "剪贴板", installedAt: 1, dir: "C:\\plugins\\clipboard" },
+]);
+__cloud.enabled = false;
+__cloud.state.target = "dav-target-a";
+const queued = await v3.removePluginFromCloud("com.mysearch.clipboard");
+eq("云同步关闭时删除记为待办", queued.status, "queued");
+eq(
+  "待办记下了插件",
+  __cloud.state.pendingPluginDeletes?.["com.mysearch.clipboard"]?.at > 0,
+  true
+);
+eq(
+  "待办带上同步目标指纹",
+  __cloud.state.pendingPluginDeletes?.["com.mysearch.clipboard"]?.target,
+  "dav-target-a"
+);
+__cloud.enabled = true;
+s = await cloud.runCloudRound(opts(), "apply-queued-delete");
+eq("补删后 idle", s.status, "idle");
+eq("补删后云端条目已删除", __cloud.v3.manifest.plugins["com.mysearch.clipboard"], undefined);
+ok("补删后留下墓碑", !!__cloud.v3.manifest.deleted?.["com.mysearch.clipboard"]);
+eq("补删成功清空待办", __cloud.state.pendingPluginDeletes ?? null, null);
+
+/* ===================== 12b) 删除待办还没执行，用户又重装 → 取消删除、按新插件上传 ===================== */
+reset();
+await cloud.runCloudRound(opts(), "seed-before-requeue");
+setRegistry([
+  { id: "com.mysearch.clipboard", name: "剪贴板", installedAt: 1, dir: "C:\\plugins\\clipboard" },
+]);
+__cloud.enabled = false;
+await v3.removePluginFromCloud("com.mysearch.clipboard");
+const requeueAt = __cloud.state.pendingPluginDeletes["com.mysearch.clipboard"].at;
+setRegistry([
+  {
+    id: "com.mysearch.clipboard",
+    name: "剪贴板",
+    installedAt: requeueAt + 1000,
+    dir: "C:\\plugins\\clipboard",
+  },
+]);
+__cloud.enabled = true;
+s = await cloud.runCloudRound(opts(), "reinstall-cancels-queued-delete");
+eq("重装取消待办后 idle", s.status, "idle");
+eq("重装取消待办不产生冲突", s.conflicts.length, 0);
+ok("重装后插件按新插件重新上传", !!__cloud.v3.manifest.plugins["com.mysearch.clipboard"]);
+eq("取消后待办已清空", __cloud.state.pendingPluginDeletes ?? null, null);
+
+/* ===================== 13) 墓碑插件不能「恢复到本机」 ===================== */
+// 12b 又把插件传回去了，这里再删一次，验证墓碑会拦住「恢复到本机」
+await v3.removePluginFromCloud("com.mysearch.clipboard");
+const restoreDeleted = await v3.restorePluginFromCloud("com.mysearch.clipboard");
+eq("已删除插件恢复返回 missing", restoreDeleted.status, "missing");
+ok("提示重新安装", String(restoreDeleted.message || "").includes("重新安装"));
+
 if (failures.length) {
   console.error(`\n✗ cloud-sync-v3: ${failures.length} 条失败`);
   for (const f of failures) console.error("  - " + f);

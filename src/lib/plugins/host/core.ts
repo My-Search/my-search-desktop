@@ -38,7 +38,7 @@ export class PluginPermissionError extends Error {
 /** 插件被禁用 / 已卸载 */
 export class PluginUnavailableError extends Error {
   constructor(pluginId: string) {
-    super(`插件不可用（已禁用或已卸载）: ${pluginId}`);
+    super(`插件不可用（已暂停使用或已卸载）: ${pluginId}`);
     this.name = "PluginUnavailableError";
   }
 }

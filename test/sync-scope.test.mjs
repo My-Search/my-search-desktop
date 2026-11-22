@@ -152,6 +152,41 @@ ok("本机 dev 记录仍标记为 dev", merged.plugins.find((p) => p.id === "dev
 const plain = { version: 1, plugins: [{ id: "a", source: { kind: "market" } }] };
 ok("无 dev 时不重建对象", scope.registryForSync(plain) === plain);
 
+/* ===================== 8) 「暂停使用」是设备专属，不能跟着注册表上云 ===================== */
+const pauseRegistry = {
+  version: 1,
+  plugins: [
+    { id: "market-a", enabled: false, source: { kind: "market" } },
+    { id: "dev-b", enabled: true, source: { kind: "folder", dev: true, ref: "D:\\code\\dev-b" } },
+  ],
+};
+const pauseUploaded = scope.registryForSync(pauseRegistry);
+eq(
+  "上传时去掉暂停状态",
+  pauseUploaded.plugins.find((p) => p.id === "market-a").enabled,
+  undefined
+);
+eq(
+  "dev 记录也不带暂停状态",
+  pauseUploaded.plugins.find((p) => p.id === "dev-b").enabled,
+  undefined
+);
+const pauseRestored = scope.registryWithLocalDevicePlugins(pauseUploaded, pauseRegistry);
+eq(
+  "还原时沿本机暂停状态",
+  pauseRestored.plugins.find((p) => p.id === "market-a").enabled,
+  false
+);
+const pauseNewDevice = scope.registryWithLocalDevicePlugins(pauseUploaded, {
+  version: 1,
+  plugins: [],
+});
+eq(
+  "新设备默认使用中（不继承别人暂停）",
+  pauseNewDevice.plugins.find((p) => p.id === "market-a").enabled,
+  true
+);
+
 if (failures.length) {
   console.error(`✗ sync-scope: ${failures.length} 条失败 / ${passed + failures.length} 条断言`);
   for (const f of failures) console.error("  - " + f);

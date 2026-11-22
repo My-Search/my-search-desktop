@@ -1810,7 +1810,7 @@ async function openPluginByShortcut(pluginId: string): Promise<void> {
     return;
   }
   if (!record.enabled) {
-    toast.showToast(`插件「${record.name}」已禁用，请先在设置 → 插件中启用`, "error");
+    toast.showToast(`插件「${record.name}」已暂停使用，请先在设置 → 插件中恢复使用`, "error");
     return;
   }
   const item = pluginHost.itemForPlugin(pluginId);
@@ -1842,7 +1842,7 @@ async function runPluginActionByShortcut(pluginId: string, action: string): Prom
     return;
   }
   if (!record.enabled) {
-    toast.showToast(`插件「${record.name}」已禁用，请先在设置 → 插件中启用`, "error");
+    toast.showToast(`插件「${record.name}」已暂停使用，请先在设置 → 插件中恢复使用`, "error");
     return;
   }
   const item = pluginHost.itemForPlugin(pluginId);

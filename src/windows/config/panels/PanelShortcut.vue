@@ -121,7 +121,7 @@ async function loadPlugins(): Promise<void> {
           id: p.id,
           name: p.name || p.id,
           openable,
-          note: !p.enabled ? "已禁用" : !hasView ? "无界面" : "",
+          note: !p.enabled ? "已暂停" : !hasView ? "无界面" : "",
         };
       });
     pluginActions.value = availableShortcutActions(reg);
