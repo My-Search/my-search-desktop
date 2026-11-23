@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GitHub 仓库搜索与批量下载器</title>
+<link rel="stylesheet" href="detail.css">
+</head>
+<body>
+<div id="app" class="gh-app">
+  <!-- ========== 头部：品牌 + 登录态 + 设置 ========== -->
+  <header class="gh-head">
+    <div class="gh-brand">
+      <span class="gh-logo" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M5 5.2A2.2 2.2 0 0 1 7.2 3H20v15.5H7.2A2.2 2.2 0 0 0 5 20.7V5.2Z"/>
+          <path d="M5 18.6A2.2 2.2 0 0 1 7.2 16.4H20"/>
+          <path d="M11.2 6.2v6.2m0 0-2.4-2.4m2.4 2.4 2.4-2.4"/>
+        </svg>
+      </span>
+      <div class="gh-brand-text">
+        <h1>GitHub 仓库搜索</h1>
+        <p><button id="gh-auth-btn" class="gh-auth" type="button" title="配置 Token 可提高配额并下载私有仓库"><i id="gh-auth-dot" class="gh-auth-dot is-anon"></i><span id="gh-auth-text">匿名模式 · 10 次/分</span></button></p>
+      </div>
+    </div>
+    <div class="gh-head-right">
+      <span id="gh-rate" class="gh-rate" hidden></span>
+      <button id="gh-settings" class="gh-icon-btn" type="button" title="设置：Token 与网络" aria-label="设置">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3.2"/>
+          <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 9 19.4a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.6V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.6 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/>
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- ========== 搜索行 ========== -->
+  <div class="gh-searchrow">
+    <div class="gh-searchbox">
+      <svg class="gh-search-ico" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+        <circle cx="10.8" cy="10.8" r="7"/>
+        <path d="M16 16l4.2 4.2"/>
+      </svg>
+      <input id="gh-q" class="gh-input gh-query" type="text" placeholder="搜索仓库：关键词，或 language:python stars:&gt;1000" autocomplete="off" spellcheck="false" />
+      <button id="gh-clear-q" class="gh-clear" type="button" title="清空关键词" hidden>×</button>
+    </div>
+    <button id="gh-search" class="gh-btn gh-btn-primary" type="button">搜索</button>
+    <button id="gh-filter-toggle" class="gh-btn gh-btn-ghost" type="button" aria-expanded="false" title="展开更多筛选条件">筛选<i id="gh-filter-dot" class="gh-dot" hidden></i></button>
+  </div>
+
+  <!-- ========== 快速筛选 ========== -->
+  <div class="gh-filterbar" id="gh-filterbar">
+    <select id="gh-language" class="gh-select" title="按主要语言筛选">
+      <option value="">语言：不限</option>
+      <option>JavaScript</option><option>TypeScript</option><option>Python</option><option>Java</option>
+      <option>Go</option><option>Rust</option><option>C</option><option>C++</option><option>C#</option>
+      <option>PHP</option><option>Ruby</option><option>Swift</option><option>Kotlin</option><option>Shell</option>
+      <option>HTML</option><option>CSS</option><option>Vue</option><option>Jupyter Notebook</option>
+      <option>Dart</option><option>Lua</option><option>Scala</option><option>Haskell</option><option>Elixir</option>
+    </select>
+    <select id="gh-stars" class="gh-select" title="按 Star 数筛选">
+      <option value="">星标：不限</option>
+      <option value="100">≥ 100</option>
+      <option value="1000">≥ 1,000</option>
+      <option value="5000">≥ 5,000</option>
+      <option value="10000">≥ 10,000</option>
+      <option value="50000">≥ 50,000</option>
+    </select>
+    <select id="gh-updated" class="gh-select" title="按最近推送时间筛选">
+      <option value="">更新：不限</option>
+      <option value="7">最近 7 天</option>
+      <option value="30">最近 30 天</option>
+      <option value="90">最近 3 个月</option>
+      <option value="365">最近 1 年</option>
+    </select>
+    <select id="gh-sort" class="gh-select" title="排序方式">
+      <option value="best">最佳匹配</option>
+      <option value="stars">Star 最多</option>
+      <option value="forks">Fork 最多</option>
+      <option value="updated">最近更新</option>
+      <option value="help-wanted-issues">待帮助 Issue 最多</option>
+    </select>
+    <label class="gh-check" title="包含 Fork 仓库"><input id="gh-forks" type="checkbox" /><span class="gh-checkmark"></span>含 Fork</label>
+    <label class="gh-check" title="包含已归档仓库"><input id="gh-archived" type="checkbox" /><span class="gh-checkmark"></span>含归档</label>
+  </div>
+
+  <!-- ========== 高级筛选 ========== -->
+  <div class="gh-advanced" id="gh-advanced" hidden>
+    <div class="gh-adv-grid">
+      <label class="gh-field"><span>搜索范围</span>
+        <select id="gh-scope" class="gh-select">
+          <option value="">名称 + 描述 + README</option>
+          <option value="name">仅名称</option>
+          <option value="description">仅描述</option>
+          <option value="readme">仅 README</option>
+        </select>
+      </label>
+      <label class="gh-field"><span>所有者 / 组织</span><input id="gh-owner" class="gh-input" placeholder="如 torvalds / github" autocomplete="off" spellcheck="false" /></label>
+      <label class="gh-field"><span>主题 Topic</span><input id="gh-topic" class="gh-input" placeholder="如 cli / machine-learning" autocomplete="off" spellcheck="false" /></label>
+      <label class="gh-field"><span>许可证</span>
+        <select id="gh-license" class="gh-select">
+          <option value="">不限</option>
+          <option value="mit">MIT</option>
+          <option value="apache-2.0">Apache-2.0</option>
+          <option value="gpl-3.0">GPL-3.0</option>
+          <option value="bsd-3-clause">BSD-3-Clause</option>
+          <option value="mpl-2.0">MPL-2.0</option>
+          <option value="unlicense">Unlicense</option>
+        </select>
+      </label>
+      <label class="gh-field"><span>所有者类型</span>
+        <select id="gh-ownertype" class="gh-select">
+          <option value="user">用户</option>
+          <option value="org">组织</option>
+        </select>
+      </label>
+      <label class="gh-field"><span>每页结果</span>
+        <select id="gh-perpage" class="gh-select">
+          <option value="30">30 条</option>
+          <option value="50">50 条</option>
+          <option value="100">100 条</option>
+        </select>
+      </label>
+    </div>
+    <p class="gh-hint">可直接在关键词里使用 GitHub 原生语法：<code>language:python</code> <code>stars:&gt;1000</code> <code>topic:cli</code> <code>user:torvalds</code> <code>pushed:&gt;2025-01-01</code>；筛选会与关键词自动组合。</p>
+    <div class="gh-adv-actions"><button id="gh-apply-filters" class="gh-btn gh-btn-ghost" type="button">应用筛选</button></div>
+  </div>
+
+  <!-- ========== 结果元信息 ========== -->
+  <div class="gh-meta" id="gh-meta" hidden>
+    <div class="gh-meta-left"><span id="gh-meta-count"></span><span id="gh-meta-extra" class="gh-meta-extra"></span></div>
+    <span id="gh-meta-rate" class="gh-rate" hidden></span>
+  </div>
+
+  <!-- ========== 结果列表 ========== -->
+  <div class="gh-list" id="gh-list" tabindex="-1"></div>
+
+  <!-- ========== 空态 ========== -->
+  <div class="gh-empty" id="gh-empty">
+    <div class="gh-empty-icon" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="46" height="46" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M5 5.2A2.2 2.2 0 0 1 7.2 3H20v15.5H7.2A2.2 2.2 0 0 0 5 20.7V5.2Z"/>
+        <path d="M5 18.6A2.2 2.2 0 0 1 7.2 16.4H20"/>
+        <path d="M12 6.4v6m0 0-2.3-2.3m2.3 2.3 2.3-2.3"/>
+      </svg>
+    </div>
+    <h2>搜索 GitHub 仓库</h2>
+    <p>按关键词、语言、星标、更新时间或 Topic 筛选；结果只展示仓库。<br>勾选多个仓库后，可一次下载到指定文件夹。</p>
+    <div class="gh-examples">
+      <button class="gh-example" type="button" data-q="react">react</button>
+      <button class="gh-example" type="button" data-q="topic:cli language:go">topic:cli language:go</button>
+      <button class="gh-example" type="button" data-q="stars:>10000 language:python">stars:&gt;10000 language:python</button>
+      <button class="gh-example" type="button" data-q="user:torvalds">user:torvalds</button>
+    </div>
+  </div>
+
+  <!-- ========== 底部批量栏 ========== -->
+  <footer class="gh-foot">
+    <div class="gh-foot-left">
+      <label class="gh-check gh-selectall" title="全选当前已加载的结果"><input id="gh-selectall" type="checkbox" /><span class="gh-checkmark"></span>全选</label>
+      <span id="gh-selected-count" class="gh-selected-count">已选 0 个</span>
+      <button id="gh-clear-selection" class="gh-link" type="button" hidden>清空</button>
+    </div>
+    <div class="gh-foot-right">
+      <button id="gh-foot-hint" class="gh-foot-hint" type="button" hidden></button>
+      <button id="gh-download" class="gh-btn gh-btn-download" type="button" disabled>
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v11m0 0-4-4m4 4 4-4"/><path d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></svg>
+        <span id="gh-download-text">下载</span>
+      </button>
+    </div>
+  </footer>
+
+  <!-- ========== 下载弹窗 ========== -->
+  <div class="gh-modal" id="gh-download-modal" hidden role="dialog" aria-modal="true" aria-labelledby="gh-dl-title">
+    <div class="gh-sheet" role="document">
+      <header class="gh-sheet-head">
+        <h2 id="gh-dl-title">下载仓库</h2>
+        <button class="gh-icon-btn gh-sheet-close" type="button" data-close="download" title="关闭" aria-label="关闭">×</button>
+      </header>
+
+      <div class="gh-sheet-body" id="gh-dl-setup">
+        <div class="gh-dl-summary" id="gh-dl-summary"></div>
+
+        <section class="gh-section">
+          <div class="gh-section-title">下载位置</div>
+          <div class="gh-dest">
+            <span id="gh-dest-path" class="gh-dest-path is-empty">尚未选择文件夹</span>
+            <button id="gh-pick-folder" class="gh-btn gh-btn-ghost" type="button">选择文件夹</button>
+          </div>
+          <label class="gh-check gh-inline-check"><input id="gh-subfolder" type="checkbox" /><span class="gh-checkmark"></span>同时新建子文件夹</label>
+          <input id="gh-subfolder-name" class="gh-input gh-subfolder-input" type="text" placeholder="子文件夹名称，如 github-repos-2026-11-22" disabled autocomplete="off" spellcheck="false" />
+        </section>
+
+        <section class="gh-section">
+          <div class="gh-section-title">打包方式</div>
+          <div class="gh-seg" role="group" aria-label="打包方式">
+            <button id="gh-merge-none" type="button" data-merge="0" class="is-active">每个仓库单独压缩</button>
+            <button id="gh-merge-one" type="button" data-merge="1">合并为一个压缩包</button>
+          </div>
+          <div class="gh-seg gh-seg-small" id="gh-format-seg" role="group" aria-label="压缩格式">
+            <button id="gh-format-zip" type="button" data-format="zip" class="is-active">ZIP</button>
+            <button id="gh-format-tar" type="button" data-format="tar">TAR.GZ</button>
+          </div>
+          <p class="gh-hint" id="gh-merge-hint">每个仓库下载为一个独立压缩包，文件名见下方命名规则。</p>
+        </section>
+
+        <section class="gh-section">
+          <div class="gh-section-title">文件命名</div>
+          <div id="gh-separate-name">
+            <input id="gh-template" class="gh-input" type="text" value="{owner}--{repo}" autocomplete="off" spellcheck="false" />
+            <p class="gh-hint">可用占位符：<code>{owner}</code> <code>{repo}</code> <code>{date}</code> <code>{time}</code>；扩展名会自动补齐。</p>
+          </div>
+          <div id="gh-bundle-name" hidden>
+            <input id="gh-bundle" class="gh-input" type="text" autocomplete="off" spellcheck="false" />
+            <p class="gh-hint">压缩包内按 <code>包名 / owner / repo / …</code> 组织，解压后不会散落一地。</p>
+          </div>
+          <p class="gh-preview" id="gh-template-preview"></p>
+        </section>
+
+        <div class="gh-dl-error" id="gh-dl-error" hidden></div>
+      </div>
+
+      <div class="gh-sheet-body gh-progress-body" id="gh-dl-progress" hidden>
+        <div class="gh-prog-head">
+          <div class="gh-prog-main">
+            <div class="gh-prog-percent" id="gh-prog-percent">0%</div>
+            <div class="gh-prog-sub" id="gh-prog-sub">准备中…</div>
+          </div>
+          <div class="gh-prog-speed" id="gh-prog-speed"></div>
+        </div>
+        <div class="gh-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="gh-prog-track"><i id="gh-prog-bar"></i></div>
+        <div class="gh-prog-note" id="gh-prog-note" hidden></div>
+        <div class="gh-prog-list" id="gh-prog-list"></div>
+      </div>
+
+      <footer class="gh-sheet-foot">
+        <div id="gh-dl-foot-setup" class="gh-sheet-foot-row">
+          <button class="gh-btn gh-btn-ghost" type="button" data-close="download">取消</button>
+          <button id="gh-dl-start" class="gh-btn gh-btn-primary" type="button">开始下载</button>
+        </div>
+        <div id="gh-dl-foot-progress" class="gh-sheet-foot-row" hidden>
+          <button id="gh-dl-cancel" class="gh-btn gh-btn-danger" type="button">取消下载</button>
+          <span class="gh-foot-spacer"></span>
+          <button id="gh-dl-open" class="gh-btn gh-btn-ghost" type="button" hidden>打开文件夹</button>
+          <button id="gh-dl-finish" class="gh-btn gh-btn-primary" type="button" hidden>完成</button>
+        </div>
+      </footer>
+    </div>
+  </div>
+
+  <!-- ========== 设置弹窗 ========== -->
+  <div class="gh-modal" id="gh-settings-modal" hidden role="dialog" aria-modal="true" aria-labelledby="gh-set-title">
+    <div class="gh-sheet gh-sheet-settings" role="document">
+      <header class="gh-sheet-head">
+        <h2 id="gh-set-title">设置</h2>
+        <button class="gh-icon-btn gh-sheet-close" type="button" data-close="settings" title="关闭" aria-label="关闭">×</button>
+      </header>
+      <div class="gh-sheet-body">
+        <section class="gh-section">
+          <div class="gh-section-title">GitHub Token <span id="gh-token-badge" class="gh-badge gh-badge-muted">未配置</span></div>
+          <p class="gh-section-desc">配置后搜索配额从匿名 <b>10 次/分钟</b> 提升到 <b>30 次/分钟</b>（下载公开仓库不消耗搜索配额），并可下载私有仓库。Token 只保存在插件数据目录，不会暴露给界面脚本。</p>
+          <div class="gh-form-row">
+            <input id="gh-token" class="gh-input" type="password" placeholder="ghp_… / github_pat_…" autocomplete="off" spellcheck="false" />
+            <button id="gh-token-test" class="gh-btn gh-btn-ghost" type="button">测试</button>
+          </div>
+          <p class="gh-token-status" id="gh-token-status">未配置 Token，当前为匿名访问。</p>
+          <div class="gh-form-actions">
+            <button id="gh-token-save" class="gh-btn gh-btn-primary" type="button">保存 Token</button>
+            <button id="gh-token-clear" class="gh-link" type="button">清除</button>
+          </div>
+        </section>
+
+        <section class="gh-section">
+          <div class="gh-section-title">网络</div>
+          <p class="gh-section-desc">无法直连 GitHub 时，可填写本机 HTTP 代理（Clash / V2Ray 等的 HTTP 端口）。API 地址一般无需修改。</p>
+          <label class="gh-field"><span>API 地址</span><input id="gh-apibase" class="gh-input" type="text" placeholder="https://api.github.com" autocomplete="off" spellcheck="false" /></label>
+          <label class="gh-field"><span>HTTP 代理</span><input id="gh-proxy" class="gh-input" type="text" placeholder="http://127.0.0.1:7890" autocomplete="off" spellcheck="false" /></label>
+          <div class="gh-form-actions">
+            <button id="gh-network-save" class="gh-btn gh-btn-primary" type="button">保存网络设置</button>
+          </div>
+        </section>
+
+        <p class="gh-note">本插件需要「运行本机程序」权限：搜索与下载由插件自带的 Node 后端完成，Token 不经过网页脚本；下载只会写入你在系统文件夹选择框里明确挑选的目录。</p>
+      </div>
+    </div>
+  </div>
+</div>
+<script src="index.js"></script>
+</body>
+</html>

@@ -53,6 +53,7 @@ const PLUGINS = [
   { dir: "com.zhuangjie.app-uninstaller", id: "com.zhuangjie.app-uninstaller" },
   { dir: "com.zhuangjie.mouse-gesture", id: "com.zhuangjie.mouse-gesture" },
   { dir: "com.zhuangjie.webdav", id: "com.zhuangjie.webdav" },
+  { dir: "com.zhuangjie.github-repo-downloader", id: "com.zhuangjie.github-repo-downloader" },
 ];
 
 const pkgsDir = path.join(root, "dist", "market-pkgs");

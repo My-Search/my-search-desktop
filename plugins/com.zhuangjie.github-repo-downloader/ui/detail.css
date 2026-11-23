@@ -1,0 +1,1662 @@
+/* GitHub 仓库搜索与批量下载器 —— 插件界面样式
+ *
+ * 宿主会把本文件作用域到「搜索窗里的插件容器」，因此：
+ *   - 只写插件自己的类（.gh-*），不要碰 html/body/#text_show；
+ *   - 颜色全部走宿主共享主题变量（--text / --card / --line …），自动跟随明暗主题；
+ *   - #text_show 同时挂了 ms-markdown-body 类，这里显式归零标题/段落 margin，
+ *     避免宿主 markdown 排版波及插件。
+ */
+
+.gh-app {
+  --gh-bg: var(--card, #ffffff);
+  --gh-text: var(--text, #1f2329);
+  --gh-muted: var(--muted, #7a828e);
+  --gh-line: var(--line, #e6e8ec);
+  --gh-field: var(--field, #fbfbfd);
+  --gh-hover: var(--hover-bg, #f7f8fa);
+  --gh-hover-border: var(--hover-border, #c9ccd4);
+  --gh-green: var(--ok, #1a9c5b);
+  --gh-red: var(--err, #e02424);
+  --gh-accent: var(--accent, #4a4ab8);
+  --gh-code: var(--code-bg, #eef0f4);
+  --gh-seg: var(--seg-bg, #eef0f4);
+
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  box-sizing: border-box;
+  height: auto;
+  /* 宿主的 #text_show 默认最大高度是 510px（含 10/16px 内边距），
+     插件视图用负 margin 铺满这块区域；这里取 510px 刚好完整落在可视区内，
+     不会把底栏压出 #text_show 而被裁掉。 */
+  max-height: 510px;
+  padding: 12px 16px 12px;
+  overflow: hidden;
+  color: var(--gh-text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+  background: transparent;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 弹窗打开时给内容一个稳定的高度，避免长表单被压到无法操作 */
+.gh-app.has-modal {
+  height: 510px;
+}
+
+.gh-app * {
+  box-sizing: border-box;
+}
+
+.gh-app [hidden] {
+  display: none !important;
+}
+
+/* 宿主 markdown 排版归零：插件自己控制留白 */
+.gh-app h1,
+.gh-app h2,
+.gh-app p {
+  margin: 0;
+  border: 0;
+}
+
+.gh-app button,
+.gh-app input,
+.gh-app select {
+  font-family: inherit;
+}
+
+.gh-app button {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* ========== 头部 ========== */
+.gh-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.gh-brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.gh-logo {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: var(--gh-text);
+  color: var(--gh-bg);
+}
+
+.gh-brand-text {
+  min-width: 0;
+}
+
+.gh-brand-text h1 {
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gh-brand-text p {
+  margin-top: 1px !important;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--gh-muted);
+}
+
+.gh-auth {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--gh-muted);
+  font-size: 11px;
+  line-height: 1.45;
+  cursor: pointer;
+}
+
+.gh-auth:hover {
+  color: var(--gh-accent);
+}
+
+.gh-auth-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #9aa3af;
+}
+
+.gh-auth-dot.is-auth {
+  background: var(--gh-green);
+}
+
+.gh-auth-dot.is-error {
+  background: var(--gh-red);
+}
+
+.gh-head-right {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.gh-icon-btn {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--gh-muted);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.gh-icon-btn:hover {
+  background: var(--gh-hover);
+  border-color: var(--gh-line);
+  color: var(--gh-text);
+}
+
+.gh-icon-btn:focus-visible {
+  outline: 2px solid var(--gh-accent);
+  outline-offset: 1px;
+}
+
+/* ========== 搜索行 ========== */
+.gh-searchrow {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.gh-searchbox {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+.gh-search-ico {
+  position: absolute;
+  left: 10px;
+  color: var(--gh-muted);
+  pointer-events: none;
+}
+
+.gh-searchbox:focus-within .gh-search-ico {
+  color: var(--gh-accent);
+}
+
+.gh-input {
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--gh-line);
+  border-radius: 8px;
+  outline: none;
+  background: var(--gh-bg);
+  color: var(--gh-text);
+  font-size: 12.5px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.gh-input::placeholder {
+  color: var(--gh-muted);
+  opacity: 0.85;
+}
+
+.gh-input:hover {
+  border-color: var(--gh-hover-border);
+}
+
+.gh-input:focus {
+  border-color: var(--gh-accent);
+  box-shadow: 0 0 0 3px var(--gh-focus, rgba(74, 74, 184, 0.16));
+}
+
+.gh-query {
+  height: 34px;
+  padding-left: 31px;
+  padding-right: 30px;
+  font-size: 12.5px;
+}
+
+.gh-clear {
+  position: absolute;
+  right: 5px;
+  display: grid;
+  place-items: center;
+  width: 23px;
+  height: 23px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--gh-muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.gh-clear:hover {
+  background: var(--gh-hover);
+  color: var(--gh-text);
+}
+
+/* ========== 按钮 ========== */
+.gh-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--gh-line);
+  border-radius: 8px;
+  background: var(--gh-bg);
+  color: var(--gh-text);
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s, opacity 0.15s;
+}
+
+.gh-btn:hover {
+  border-color: var(--gh-accent);
+  color: var(--gh-accent);
+}
+
+.gh-btn:focus-visible {
+  outline: 2px solid var(--gh-accent);
+  outline-offset: 1px;
+}
+
+.gh-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.gh-btn:disabled:hover {
+  border-color: var(--gh-line);
+  color: var(--gh-text);
+}
+
+.gh-searchrow .gh-btn {
+  height: 34px;
+}
+
+.gh-btn-primary {
+  border-color: var(--gh-text);
+  background: var(--gh-text);
+  color: var(--gh-bg);
+}
+
+.gh-btn-primary:hover {
+  border-color: var(--gh-accent);
+  background: var(--gh-accent);
+  color: var(--gh-bg);
+}
+
+.gh-btn-primary:disabled:hover {
+  border-color: var(--gh-text);
+  background: var(--gh-text);
+  color: var(--gh-bg);
+}
+
+.gh-btn-primary.is-loading {
+  opacity: 0.75;
+}
+
+.gh-btn-ghost {
+  background: transparent;
+}
+
+.gh-btn-danger {
+  border-color: var(--gh-red);
+  background: transparent;
+  color: var(--gh-red);
+}
+
+.gh-btn-danger:hover {
+  border-color: var(--gh-red);
+  background: var(--gh-red);
+  color: var(--gh-bg);
+}
+
+.gh-btn-download {
+  height: 30px;
+  padding: 0 12px;
+  border-color: var(--gh-green);
+  background: var(--gh-green);
+  color: var(--gh-bg);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.gh-btn-download:hover {
+  border-color: var(--gh-green);
+  background: var(--gh-green);
+  color: var(--gh-bg);
+  opacity: 0.88;
+}
+
+.gh-btn-download:disabled:hover {
+  border-color: var(--gh-green);
+  background: var(--gh-green);
+}
+
+.gh-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--gh-muted);
+  font-size: 11.5px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.gh-link:hover {
+  color: var(--gh-accent);
+}
+
+/* ========== 快速筛选 ========== */
+.gh-filterbar {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.gh-select {
+  appearance: none;
+  -webkit-appearance: none;
+  height: 27px;
+  max-width: 100%;
+  padding: 0 22px 0 8px;
+  border: 1px solid var(--gh-line);
+  border-radius: 7px;
+  outline: none;
+  background-color: var(--gh-bg);
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath d='M2 3.5l3 3 3-3' fill='none' stroke='%23888e98' stroke-width='1.4' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 7px center;
+  background-size: 9px 9px;
+  color: var(--gh-text);
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+
+.gh-select:hover {
+  border-color: var(--gh-hover-border);
+}
+
+.gh-select:focus {
+  border-color: var(--gh-accent);
+}
+
+.gh-select:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.gh-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--gh-muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+
+.gh-check input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.gh-checkmark {
+  position: relative;
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--gh-line);
+  border-radius: 4px;
+  background: var(--gh-bg);
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.gh-check:hover .gh-checkmark {
+  border-color: var(--gh-green);
+}
+
+.gh-check input:focus-visible + .gh-checkmark {
+  outline: 2px solid var(--gh-accent);
+  outline-offset: 1px;
+}
+
+.gh-check input:checked + .gh-checkmark {
+  border-color: var(--gh-green);
+  background: var(--gh-green);
+}
+
+.gh-check input:checked + .gh-checkmark::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 1px;
+  width: 4px;
+  height: 8px;
+  border: solid var(--gh-bg);
+  border-width: 0 1.6px 1.6px 0;
+  transform: rotate(42deg);
+}
+
+.gh-check input:indeterminate + .gh-checkmark {
+  border-color: var(--gh-green);
+  background: var(--gh-green);
+}
+
+.gh-check input:indeterminate + .gh-checkmark::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 5.5px;
+  width: 6px;
+  height: 0;
+  border-top: 1.6px solid var(--gh-bg);
+}
+
+.gh-check input:checked + .gh-checkmark,
+.gh-check input:indeterminate + .gh-checkmark {
+  box-shadow: none;
+}
+
+/* ========== 高级筛选 ========== */
+.gh-advanced {
+  flex: 0 0 auto;
+  max-height: 220px;
+  padding: 10px;
+  overflow-y: auto;
+  border: 1px solid var(--gh-line);
+  border-radius: 10px;
+  background: var(--gh-field);
+}
+
+.gh-adv-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px 10px;
+}
+
+.gh-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  color: var(--gh-muted);
+  font-size: 10.5px;
+}
+
+.gh-field > span {
+  padding-left: 1px;
+}
+
+.gh-field .gh-input,
+.gh-field .gh-select {
+  width: 100%;
+  height: 29px;
+  font-size: 11.5px;
+}
+
+.gh-hint {
+  margin-top: 8px !important;
+  color: var(--gh-muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.gh-hint code,
+.gh-note code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--gh-code);
+  color: var(--gh-text);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", monospace;
+  font-size: 10.5px;
+}
+
+.gh-adv-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
+.gh-dot {
+  width: 5px;
+  height: 5px;
+  margin-left: 1px;
+  border-radius: 50%;
+  background: var(--gh-green);
+}
+
+/* ========== 结果元信息 ========== */
+.gh-meta {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 16px;
+  color: var(--gh-muted);
+  font-size: 11.5px;
+}
+
+.gh-meta-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.gh-meta-left > span {
+  white-space: nowrap;
+}
+
+.gh-meta-extra {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--gh-muted);
+}
+
+.gh-meta-extra.is-warn {
+  color: var(--gh-red);
+}
+
+.gh-rate {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border: 1px solid var(--gh-line);
+  border-radius: 999px;
+  color: var(--gh-muted);
+  font-size: 10.5px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.gh-rate.is-low {
+  border-color: color-mix(in srgb, var(--gh-red) 35%, var(--gh-line));
+  color: var(--gh-red);
+}
+
+/* ========== 结果列表 ========== */
+.gh-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: 360px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 1px 2px 4px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--gh-line) transparent;
+}
+
+.gh-list::-webkit-scrollbar {
+  width: 8px;
+}
+
+.gh-list::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 99px;
+  background: var(--gh-line);
+  background-clip: content-box;
+}
+
+.gh-list::-webkit-scrollbar-thumb:hover {
+  background: var(--gh-hover-border);
+  background-clip: content-box;
+}
+
+/* ---------- 仓库卡片 ---------- */
+.gh-repo {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 9px 9px 9px 9px;
+  border: 1px solid var(--gh-line);
+  border-radius: 10px;
+  background: var(--gh-bg);
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, box-shadow 0.12s;
+}
+
+.gh-repo:hover {
+  border-color: var(--gh-hover-border);
+  background: var(--gh-hover);
+}
+
+.gh-repo.is-selected {
+  border-color: var(--gh-green);
+  background: var(--gh-bg);
+  background: color-mix(in srgb, var(--gh-green) 6%, var(--gh-bg));
+}
+
+.gh-repo.is-selected:hover {
+  border-color: var(--gh-green);
+}
+
+.gh-repo .gh-check {
+  margin-top: 1px;
+}
+
+.gh-repo-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.gh-repo-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 3px 6px;
+  min-width: 0;
+}
+
+.gh-owner {
+  color: var(--gh-muted);
+  font-size: 11.5px;
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.gh-name {
+  color: var(--gh-text);
+  font-size: 13.5px;
+  font-weight: 650;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+  word-break: break-word;
+}
+
+.gh-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  border: 1px solid var(--gh-line);
+  border-radius: 4px;
+  background: var(--gh-field);
+  color: var(--gh-muted);
+  font-size: 9.5px;
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.gh-badge-private {
+  border-color: color-mix(in srgb, var(--gh-red) 34%, var(--gh-line));
+  color: var(--gh-red);
+  background: color-mix(in srgb, var(--gh-red) 6%, var(--gh-bg));
+}
+
+.gh-badge-fork {
+  border-color: color-mix(in srgb, var(--gh-accent) 30%, var(--gh-line));
+  color: var(--gh-accent);
+  background: color-mix(in srgb, var(--gh-accent) 6%, var(--gh-bg));
+}
+
+.gh-badge-archived,
+.gh-badge-template {
+  color: var(--gh-muted);
+}
+
+.gh-badge-muted {
+  color: var(--gh-muted);
+}
+
+.gh-updated {
+  margin-left: auto;
+  padding-left: 8px;
+  color: var(--gh-muted);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.gh-desc {
+  display: -webkit-box;
+  margin-top: 3px !important;
+  overflow: hidden;
+  color: var(--gh-muted);
+  font-size: 12px;
+  line-height: 1.45;
+  word-break: break-word;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.gh-desc.is-empty {
+  font-style: italic;
+  opacity: 0.65;
+}
+
+.gh-repo-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 9px;
+  margin-top: 5px;
+  color: var(--gh-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.gh-lang {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--gh-text);
+  font-weight: 500;
+}
+
+.gh-lang i {
+  display: block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #8b949e;
+}
+
+.gh-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+}
+
+.gh-stat svg {
+  width: 11px;
+  height: 11px;
+}
+
+.gh-topic {
+  padding: 0 6px;
+  border: 1px solid var(--gh-line);
+  border-radius: 999px;
+  background: var(--gh-field);
+  color: var(--gh-muted);
+  font-size: 9.5px;
+  line-height: 1.7;
+}
+
+.gh-open {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 25px;
+  height: 25px;
+  margin-top: 1px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--gh-muted);
+  cursor: pointer;
+}
+
+.gh-open:hover {
+  border-color: var(--gh-line);
+  background: var(--gh-hover);
+  color: var(--gh-accent);
+}
+
+.gh-open:focus-visible {
+  outline: 2px solid var(--gh-accent);
+  outline-offset: 1px;
+}
+
+/* ---------- 列表里的状态块 ---------- */
+.gh-loading-state,
+.gh-error-state,
+.gh-no-result {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: auto;
+  padding: 28px 12px;
+  color: var(--gh-muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.gh-spinner {
+  width: 15px;
+  height: 15px;
+  border: 2px solid var(--gh-line);
+  border-top-color: var(--gh-accent);
+  border-radius: 50%;
+  animation: gh-spin 0.8s linear infinite;
+}
+
+.gh-spinner.is-small {
+  width: 11px;
+  height: 11px;
+  border-width: 1.5px;
+}
+
+.gh-loading-state p {
+  color: var(--gh-muted);
+}
+
+.gh-error-state .gh-error-icon {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--gh-red) 10%, transparent);
+  color: var(--gh-red);
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.gh-error-state strong {
+  color: var(--gh-text);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.gh-error-state p {
+  max-width: 480px;
+  color: var(--gh-muted);
+  line-height: 1.65;
+  word-break: break-word;
+}
+
+.gh-error-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.gh-no-result strong {
+  color: var(--gh-text);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.gh-no-result p {
+  max-width: 440px;
+  color: var(--gh-muted);
+  line-height: 1.65;
+}
+
+.gh-loadmore {
+  flex: 0 0 auto;
+  height: 30px;
+  border: 1px dashed var(--gh-line);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--gh-muted);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.gh-loadmore:hover {
+  border-color: var(--gh-accent);
+  color: var(--gh-accent);
+}
+
+.gh-loadmore:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.gh-list-end {
+  flex: 0 0 auto;
+  padding: 2px 0;
+  color: var(--gh-muted);
+  font-size: 10.5px;
+  text-align: center;
+}
+
+.gh-loading-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 4px;
+  color: var(--gh-muted);
+  font-size: 11px;
+}
+
+/* ========== 空态 ========== */
+.gh-empty {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 16px;
+  overflow-y: auto;
+  text-align: center;
+}
+
+.gh-empty-icon {
+  margin-bottom: 8px;
+  color: var(--gh-muted);
+  opacity: 0.7;
+}
+
+.gh-empty h2 {
+  color: var(--gh-text);
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.gh-empty p {
+  max-width: 440px;
+  margin-top: 6px !important;
+  color: var(--gh-muted);
+  font-size: 11.5px;
+  line-height: 1.7;
+}
+
+.gh-examples {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.gh-example {
+  padding: 3px 9px;
+  border: 1px solid var(--gh-line);
+  border-radius: 999px;
+  background: var(--gh-field);
+  color: var(--gh-text);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.gh-example:hover {
+  border-color: var(--gh-accent);
+  color: var(--gh-accent);
+}
+
+.gh-example:focus-visible {
+  outline: 2px solid var(--gh-accent);
+  outline-offset: 1px;
+}
+
+/* ========== 底部批量栏 ========== */
+.gh-foot {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--gh-line);
+}
+
+.gh-foot-left {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.gh-selectall {
+  color: var(--gh-text);
+  font-size: 11.5px;
+}
+
+.gh-selected-count {
+  color: var(--gh-muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.gh-selected-count b {
+  color: var(--gh-text);
+  font-weight: 650;
+}
+
+.gh-foot-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.gh-foot-hint {
+  max-width: 210px;
+  padding: 2px 4px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--gh-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.gh-foot-hint:hover {
+  background: var(--gh-hover);
+  color: var(--gh-accent);
+}
+
+/* ========== 弹窗与卡片 ========== */
+.gh-modal {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  background: rgba(15, 20, 26, 0.42);
+  animation: gh-fade 0.14s ease-out;
+}
+
+.gh-sheet {
+  display: flex;
+  flex-direction: column;
+  width: min(600px, 100%);
+  max-height: 100%;
+  overflow: hidden;
+  border: 1px solid var(--gh-line);
+  border-radius: 12px;
+  background: var(--gh-bg);
+  box-shadow: var(--dialog-shadow, 0 12px 40px rgba(0, 0, 0, 0.2));
+  animation: gh-pop 0.16s ease-out;
+}
+
+.gh-sheet-settings {
+  width: min(560px, 100%);
+}
+
+.gh-sheet-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 42px;
+  padding: 0 10px 0 16px;
+  border-bottom: 1px solid var(--gh-line);
+}
+
+.gh-sheet-head h2 {
+  overflow: hidden;
+  color: var(--gh-text);
+  font-size: 13.5px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gh-sheet-close {
+  width: 28px;
+  height: 28px;
+  border: 0;
+  background: transparent;
+  color: var(--gh-muted);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.gh-sheet-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 11px 16px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--gh-line) transparent;
+}
+
+.gh-sheet-body::-webkit-scrollbar {
+  width: 8px;
+}
+
+.gh-sheet-body::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 99px;
+  background: var(--gh-line);
+  background-clip: content-box;
+}
+
+.gh-sheet-foot {
+  flex: 0 0 auto;
+  padding: 8px 16px;
+  border-top: 1px solid var(--gh-line);
+}
+
+.gh-sheet-foot-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.gh-foot-spacer {
+  flex: 1 1 auto;
+}
+
+/* ---------- 表单 ---------- */
+.gh-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.gh-section-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--gh-text);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+
+.gh-section-desc {
+  margin: 0 !important;
+  color: var(--gh-muted);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.gh-section-desc b {
+  color: var(--gh-text);
+  font-weight: 600;
+}
+
+.gh-form-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.gh-form-row .gh-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.gh-form-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 1px;
+}
+
+.gh-token-status {
+  margin: 0 !important;
+  color: var(--gh-muted);
+  font-size: 11px;
+  line-height: 1.55;
+  word-break: break-word;
+}
+
+.gh-token-status.is-ok {
+  color: var(--gh-green);
+}
+
+.gh-token-status.is-error {
+  color: var(--gh-red);
+}
+
+.gh-badge-ok {
+  border-color: color-mix(in srgb, var(--gh-green) 34%, var(--gh-line));
+  background: color-mix(in srgb, var(--gh-green) 7%, var(--gh-bg));
+  color: var(--gh-green);
+}
+
+.gh-badge-error {
+  border-color: color-mix(in srgb, var(--gh-red) 34%, var(--gh-line));
+  background: color-mix(in srgb, var(--gh-red) 7%, var(--gh-bg));
+  color: var(--gh-red);
+}
+
+.gh-note {
+  margin: 0 !important;
+  padding-top: 9px;
+  border-top: 1px dashed var(--gh-line);
+  color: var(--gh-muted);
+  font-size: 10.5px;
+  line-height: 1.65;
+}
+
+/* ---------- 下载设置 ---------- */
+.gh-dl-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--gh-line);
+  border-radius: 8px;
+  background: var(--gh-field);
+  color: var(--gh-muted);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.gh-dl-summary b {
+  color: var(--gh-text);
+  font-weight: 650;
+}
+
+.gh-dest {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.gh-dest-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  padding: 0 9px;
+  overflow: hidden;
+  border: 1px solid var(--gh-line);
+  border-radius: 8px;
+  background: var(--gh-field);
+  color: var(--gh-text);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", monospace;
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gh-dest-path.is-empty {
+  color: var(--gh-muted);
+  font-family: inherit;
+  font-style: italic;
+}
+
+.gh-inline-check {
+  margin-top: 1px;
+}
+
+.gh-subfolder-input {
+  margin-top: 2px;
+}
+
+.gh-subfolder-input:disabled {
+  opacity: 0.55;
+}
+
+.gh-seg {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--gh-line);
+  border-radius: 8px;
+  background: var(--gh-field);
+}
+
+.gh-seg button {
+  height: 27px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--gh-muted);
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.gh-seg button:hover {
+  color: var(--gh-text);
+}
+
+.gh-seg button.is-active {
+  background: var(--gh-bg);
+  color: var(--gh-text);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+.gh-seg button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.gh-seg-small {
+  width: 150px;
+}
+
+.gh-preview {
+  margin: 0 !important;
+  color: var(--gh-muted);
+  font-size: 10.5px;
+  line-height: 1.55;
+  word-break: break-all;
+}
+
+.gh-preview b {
+  color: var(--gh-text);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, monospace;
+  font-weight: 600;
+}
+
+.gh-dl-error {
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--gh-red) 35%, var(--gh-line));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--gh-red) 7%, transparent);
+  color: var(--gh-red);
+  font-size: 11.5px;
+  line-height: 1.55;
+  word-break: break-word;
+}
+
+/* 已有列表时，顶部一条紧凑错误提示（不遮挡结果） */
+.gh-inline-error {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 9px;
+  border: 1px solid color-mix(in srgb, var(--gh-red) 32%, var(--gh-line));
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--gh-red) 6%, var(--gh-bg));
+  color: var(--gh-red);
+  font-size: 11px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.gh-inline-error .gh-link {
+  flex: 0 0 auto;
+  color: var(--gh-red);
+  text-decoration: underline;
+}
+
+/* ---------- 下载进度 ---------- */
+.gh-progress-body {
+  gap: 9px;
+}
+
+.gh-prog-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.gh-prog-main {
+  min-width: 0;
+}
+
+.gh-prog-percent {
+  color: var(--gh-text);
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.gh-prog-sub {
+  margin-top: 3px;
+  color: var(--gh-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.gh-prog-speed {
+  color: var(--gh-muted);
+  font-size: 10.5px;
+  line-height: 1.6;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.gh-bar {
+  flex: 0 0 auto;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: var(--gh-seg);
+}
+
+.gh-bar i {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: 99px;
+  background: var(--gh-green);
+  transition: width 0.3s ease;
+}
+
+.gh-bar i.is-error {
+  background: var(--gh-red);
+}
+
+.gh-prog-note {
+  padding: 7px 9px;
+  border: 1px solid var(--gh-line);
+  border-radius: 7px;
+  background: var(--gh-field);
+  color: var(--gh-muted);
+  font-size: 10.5px;
+  line-height: 1.55;
+}
+
+.gh-prog-note.is-warn {
+  border-color: color-mix(in srgb, var(--gh-red) 35%, var(--gh-line));
+  color: var(--gh-red);
+}
+
+.gh-prog-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: 236px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding-right: 2px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--gh-line) transparent;
+}
+
+.gh-prog-list::-webkit-scrollbar {
+  width: 7px;
+}
+
+.gh-prog-list::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 99px;
+  background: var(--gh-line);
+  background-clip: content-box;
+}
+
+.gh-prog-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px 8px;
+  border: 1px solid var(--gh-line);
+  border-radius: 7px;
+  background: var(--gh-bg);
+}
+
+.gh-prog-row-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 11px;
+}
+
+.gh-prog-icon {
+  flex: 0 0 auto;
+  width: 11px;
+  height: 11px;
+  display: grid;
+  place-items: center;
+  color: var(--gh-muted);
+  font-size: 10px;
+}
+
+.gh-prog-icon.is-run .gh-spinner {
+  width: 10px;
+  height: 10px;
+  border-width: 1.5px;
+}
+
+.gh-prog-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--gh-text);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, monospace;
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gh-prog-status {
+  flex: 0 0 auto;
+  color: var(--gh-muted);
+  font-size: 10px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.gh-prog-row.is-done .gh-prog-status {
+  color: var(--gh-green);
+}
+
+.gh-prog-row.is-error .gh-prog-status {
+  color: var(--gh-red);
+}
+
+.gh-prog-row .gh-bar {
+  height: 3px;
+}
+
+.gh-prog-row.is-error .gh-bar i {
+  background: var(--gh-red);
+}
+
+.gh-prog-error {
+  color: var(--gh-red);
+  font-size: 10px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.gh-prog-separated {
+  color: var(--gh-muted);
+  font-size: 9.5px;
+  line-height: 1.4;
+}
+
+/* ========== 响应式 ========== */
+@media (max-width: 600px) {
+  .gh-adv-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .gh-updated {
+    margin-left: 0;
+    padding-left: 0;
+  }
+}
+
+@media (max-width: 440px) {
+  .gh-adv-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .gh-foot-hint {
+    display: none;
+  }
+
+  .gh-empty p br {
+    display: none;
+  }
+}
+
+/* ========== 动画 ========== */
+@keyframes gh-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes gh-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes gh-pop {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "id": "com.zhuangjie.github-repo-downloader",
+  "name": "GitHub 仓库搜索与批量下载器",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "minAppVersion": "7.9.15",
+  "autoUpdate": true,
+  "author": "zhuangjie",
+  "description": "搜索 GitHub 仓库（名称 / 描述 / README、语言、星标、更新时间、主题等），批量勾选后打包下载到指定文件夹，支持合并为一个压缩包。",
+  "changelog": "首个版本：仓库搜索与筛选、批量勾选、选择目标文件夹批量下载 ZIP / TAR.GZ、合并为一个 ZIP、下载进度与取消。",
+  "repository": "https://github.com/My-Search/my-search-desktop/tree/master/plugins/com.zhuangjie.github-repo-downloader",
+  "icon": "icon.svg",
+  "permissions": [
+    "ui.inlay",
+    "ui.notify",
+    "store",
+    "backend.spawn",
+    "system.openExternal"
+  ],
+  "contributes": {
+    "searchItem": {
+      "title": "GitHub 仓库搜索",
+      "desc": "按关键词 / 语言 / 星标 / 更新时间等搜索 GitHub 仓库，批量勾选后打包下载",
+      "keyword": "仓库",
+      "icon": "icon.svg",
+      "subSearch": true
+    },
+    "detailView": {
+      "entry": "ui/detail.html",
+      "script": "ui/index.js",
+      "mode": "inlay",
+      "closeBehavior": "minimize",
+      "theme": "inherit"
+    }
+  },
+  "backend": {
+    "entry": "backend/run.cmd",
+    "command": ["node", "backend/index.mjs"],
+    "protocol": "jsonrpc-stdio",
+    "autostart": "on-demand",
+    "closeBehavior": "minimize",
+    "startupTimeoutMs": 20000,
+    "callTimeoutMs": 60000,
+    "idleExitSec": 0,
+    "maxRestarts": 1
+  }
+}

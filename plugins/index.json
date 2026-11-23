@@ -92,6 +92,10 @@
       "createTime": "2026-11-18T01:09:10.004Z",
       "latestVersionUpdateTime": "2026-11-22T10:37:42.839Z",
       "lastVersion": "1.1.0"
+    },
+    {
+      "plugin": "official-plugins/com.zhuangjie.github-repo-downloader",
+      "official": false
     }
   ],
   "three-parties": [

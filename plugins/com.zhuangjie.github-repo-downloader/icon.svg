@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="GitHub 仓库搜索与批量下载器">
+  <rect x="6" y="6" width="116" height="116" rx="26" fill="#1f2329"/>
+  <path d="M46 30H88V86H46A12 12 0 0 0 34 98V42A12 12 0 0 1 46 30Z" fill="none" stroke="#ffffff" stroke-width="7" stroke-linejoin="round"/>
+  <path d="M34 98A12 12 0 0 1 46 86H88" fill="none" stroke="#ffffff" stroke-width="7" stroke-linejoin="round"/>
+  <path d="M67 42V68" fill="none" stroke="#3fb950" stroke-width="7" stroke-linecap="round"/>
+  <path d="M57 58L67 68L77 58" fill="none" stroke="#3fb950" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
