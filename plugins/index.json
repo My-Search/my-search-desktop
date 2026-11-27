@@ -95,7 +95,10 @@
     },
     {
       "plugin": "official-plugins/com.zhuangjie.github-repo-downloader",
-      "official": false
+      "official": false,
+      "createTime": "2026-11-23T04:18:33.793Z",
+      "latestVersionUpdateTime": "2026-11-27T01:51:34.120Z",
+      "lastVersion": "1.0.1"
     }
   ],
   "three-parties": [
