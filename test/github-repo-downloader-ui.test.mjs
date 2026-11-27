@@ -190,6 +190,23 @@ async function screenshot(name) {
 await send("Page.navigate", { url: base + "/harness.html" }, sessionId);
 await sleep(500);
 
+/* ---------------- 清单：关闭界面即退出 ---------------- */
+const manifest = JSON.parse(readFileSync(path.join(pluginDir, "plugin.json"), "utf8"));
+check(
+  "关闭界面即停止后台：backend.closeBehavior",
+  manifest.backend?.closeBehavior === "exit",
+  manifest.backend?.closeBehavior
+);
+check(
+  "关闭界面即卸载界面：detailView.closeBehavior",
+  manifest.contributes?.detailView?.closeBehavior === "exit",
+  manifest.contributes?.detailView?.closeBehavior
+);
+check(
+  "两处声明一致（无冲突告警）",
+  manifest.backend?.closeBehavior === manifest.contributes?.detailView?.closeBehavior
+);
+
 /* ---------------- 首屏 ---------------- */
 const intro = await evalJs(`(() => ({
   emptyVisible: !document.getElementById("gh-empty").hidden,

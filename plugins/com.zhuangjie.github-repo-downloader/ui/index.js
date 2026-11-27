@@ -801,7 +801,7 @@
     else if (state.job) {
       var status = String(state.job.status || "");
       var pct = Math.max(0, Math.min(100, Number(state.job.overall && state.job.overall.percent) || 0));
-      if (status === "running") hint = "后台下载 " + Math.round(pct) + "%";
+      if (status === "running") hint = "下载中 " + Math.round(pct) + "%";
       else if (status === "merging") hint = "正在打包 " + Math.round(pct) + "%";
       else if (status === "done") hint = "下载完成 · 查看";
       else if (status === "error") hint = "下载失败 · 查看";
@@ -1292,7 +1292,7 @@
     if (dom.downloadModal.hidden) return;
     var running = isJobRunning();
     if (state.jobStarting) {
-      askConfirm("正在创建下载任务，关闭窗口后任务仍会在后台继续。确定关闭吗？").then(function (ok) {
+      askConfirm("正在创建下载任务。关闭下载窗口不会中断任务；关闭插件界面会停止下载。确定关闭吗？").then(function (ok) {
         if (ok) {
           dom.downloadModal.hidden = true;
           syncModalState();
@@ -1301,7 +1301,7 @@
       return;
     }
     if (running && !dom.dlProgress.hidden) {
-      askConfirm("下载仍在后台继续，关闭进度窗口不会中断任务。确定关闭吗？").then(function (ok) {
+      askConfirm("关闭进度窗口不会中断任务，下载会继续；关闭插件界面则会停止下载。确定关闭吗？").then(function (ok) {
         if (ok) {
           dom.downloadModal.hidden = true;
           syncModalState();

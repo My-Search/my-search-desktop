@@ -6,8 +6,8 @@
  *   - `getConfig`      返回是否已配置 Token / API 地址 / 代理（**绝不回传 Token 本身**）；
  *   - `setConfig`      保存 Token / API 地址 / 代理到插件自己的数据目录；
  *   - `testToken`      校验 Token 并读取当前账号与配额；
- *   - `downloadStart`  创建批量下载任务（立即返回 jobId，下载在后台继续）；
- *   - `getJob`         查询任务快照（界面关闭再打开时可恢复进度）；
+ *   - `downloadStart`  创建批量下载任务（立即返回 jobId，下载在后台进程里继续）；
+ *   - `getJob`         查询任务快照（关闭下载弹窗后仍可查看进度）；
  *   - `cancelDownload` 取消任务（删除未完成的临时文件）；
  *   - `openFolder`     用系统文件管理器打开下载目录。
  *
